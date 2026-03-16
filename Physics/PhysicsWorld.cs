@@ -6,7 +6,11 @@ namespace ScreenOverlayPhysics.Physics;
 
 public sealed class PhysicsWorld
 {
+    private const float SleepAngularThreshold = 18f;
+    private const float SleepSettleTimeSeconds = 0.55f;
+
     private readonly List<ObjectState> _objects = [];
+    private readonly BroadphaseGrid _broadphase = new();
     private Vector2 _gravity;
 
     public PhysicsWorld(Vector2 gravity)
@@ -33,18 +37,30 @@ public sealed class PhysicsWorld
                 continue;
             }
 
-            body.Velocity += (_gravity + body.Acceleration) * dt;
+            if (body.IsSleeping)
+            {
+                continue;
+            }
+
+            var scaledGravity = _gravity * body.GravityScale;
+            body.Velocity += (scaledGravity + body.Acceleration) * dt;
             body.Velocity *= body.LinearDamping;
             body.Position += body.Velocity * dt;
         }
 
-        CollisionSolver.SolveObjectCollisions(_objects);
+        var collisionPairs = _broadphase.BuildPairs(_objects);
+        CollisionSolver.SolveObjectCollisions(_objects, collisionPairs);
 
         for (var i = 0; i < _objects.Count; i++)
         {
             var body = _objects[i].Body;
 
             if (body.IsDragging)
+            {
+                continue;
+            }
+
+            if (body.IsSleeping)
             {
                 continue;
             }
@@ -68,7 +84,46 @@ public sealed class PhysicsWorld
             obj.RotationX += obj.AngularVelocityX * dt;
             obj.RotationY += obj.AngularVelocityY * dt;
             obj.RotationZ += obj.AngularVelocityZ * dt;
+            UpdateSleepState(obj, bounds, dt, sleepThreshold, floorSnapThreshold);
         }
+    }
+
+    private static void UpdateSleepState(ObjectState obj, in RectF bounds, float dt, float sleepThreshold, float floorSnapThreshold)
+    {
+        var body = obj.Body;
+        if (body.IsDragging)
+        {
+            body.IsSleeping = false;
+            body.SleepTimerSeconds = 0f;
+            return;
+        }
+
+        var speedSquared = body.Velocity.LengthSquared;
+        var linearThreshold = sleepThreshold * sleepThreshold;
+        var angularSpeed = Math.Abs(obj.AngularVelocityX) + Math.Abs(obj.AngularVelocityY) + Math.Abs(obj.AngularVelocityZ);
+        var insetY = (body.Height * 0.5f) - (body.Height * 0.5f * body.CollisionScale);
+        var effectiveBottom = body.Position.Y + body.Height - insetY;
+        var nearFloor = effectiveBottom >= bounds.Bottom - floorSnapThreshold - 1f;
+        var canSleep = nearFloor && speedSquared <= linearThreshold && angularSpeed <= SleepAngularThreshold;
+        if (!canSleep)
+        {
+            body.IsSleeping = false;
+            body.SleepTimerSeconds = 0f;
+            return;
+        }
+
+        body.SleepTimerSeconds += dt;
+        if (body.SleepTimerSeconds < SleepSettleTimeSeconds)
+        {
+            return;
+        }
+
+        body.IsSleeping = true;
+        body.SleepTimerSeconds = SleepSettleTimeSeconds;
+        body.Velocity = Vector2.Zero;
+        obj.AngularVelocityX = 0.0;
+        obj.AngularVelocityY = 0.0;
+        obj.AngularVelocityZ = 0.0;
     }
 
     private static void ApplyDiceFaceSettling(ObjectState obj, PhysicsBody body, in RectF bounds, float dt, float sleepThreshold)

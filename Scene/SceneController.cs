@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Windows.Media;
 using ScreenOverlayPhysics.Models;
@@ -83,6 +84,11 @@ public sealed class SceneController
         return SpawnObject(position, spec.Color, spec.VisualKind);
     }
 
+    public ObjectState SpawnRandomCrystal(Vector2 position)
+    {
+        return SpawnObject(position, RandomCrystalColor(), ObjectVisualKind.Crystal);
+    }
+
     public ObjectState SpawnObject(Vector2 position, Color? color, ObjectVisualKind visualKind)
     {
         var state = new ObjectState
@@ -98,6 +104,11 @@ public sealed class SceneController
         state.Body.Mass = 1f;
         state.Body.Restitution = _config.Restitution;
         state.Body.LinearDamping = _config.LinearDamping;
+        state.Body.GravityScale = visualKind == ObjectVisualKind.Satellite ? 0f : 1f;
+        state.Body.Shape = visualKind == ObjectVisualKind.Crystal ? CollisionShape.Circle : CollisionShape.Box;
+        state.Body.CollisionScale = visualKind == ObjectVisualKind.Crystal ? 0.82f : 1f;
+        state.Body.IsSleeping = false;
+        state.Body.SleepTimerSeconds = 0f;
 
         _physicsWorld.Add(state);
         _sceneRenderer.EnsureObjectVisual(state);
@@ -122,6 +133,11 @@ public sealed class SceneController
         state.Body.Mass = 1f;
         state.Body.Restitution = _config.Restitution;
         state.Body.LinearDamping = _config.LinearDamping;
+        state.Body.GravityScale = 1f;
+        state.Body.Shape = CollisionShape.Box;
+        state.Body.CollisionScale = 1f;
+        state.Body.IsSleeping = false;
+        state.Body.SleepTimerSeconds = 0f;
 
         _physicsWorld.Add(state);
         _sceneRenderer.EnsureObjectVisual(state);
@@ -167,5 +183,70 @@ public sealed class SceneController
         var color = CubePalette[_nextCubeColorIndex % CubePalette.Length];
         _nextCubeColorIndex++;
         return color;
+    }
+
+    private static Color RandomCrystalColor()
+    {
+        var hue = Random.Shared.NextDouble() * 360.0;
+        return ColorFromHsv(hue, 0.55, 1.0);
+    }
+
+    private static Color ColorFromHsv(double hue, double saturation, double value)
+    {
+        hue = ((hue % 360.0) + 360.0) % 360.0;
+        var chroma = value * saturation;
+        var segment = hue / 60.0;
+        var x = chroma * (1.0 - Math.Abs((segment % 2.0) - 1.0));
+        double red;
+        double green;
+        double blue;
+
+        if (segment < 1.0)
+        {
+            red = chroma;
+            green = x;
+            blue = 0.0;
+        }
+        else if (segment < 2.0)
+        {
+            red = x;
+            green = chroma;
+            blue = 0.0;
+        }
+        else if (segment < 3.0)
+        {
+            red = 0.0;
+            green = chroma;
+            blue = x;
+        }
+        else if (segment < 4.0)
+        {
+            red = 0.0;
+            green = x;
+            blue = chroma;
+        }
+        else if (segment < 5.0)
+        {
+            red = x;
+            green = 0.0;
+            blue = chroma;
+        }
+        else
+        {
+            red = chroma;
+            green = 0.0;
+            blue = x;
+        }
+
+        var match = value - chroma;
+        return Color.FromRgb(
+            ToByte(red + match),
+            ToByte(green + match),
+            ToByte(blue + match));
+    }
+
+    private static byte ToByte(double value)
+    {
+        return (byte)Math.Clamp(Math.Round(value * 255.0), 0.0, 255.0);
     }
 }

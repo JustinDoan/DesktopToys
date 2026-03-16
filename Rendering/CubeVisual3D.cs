@@ -6,8 +6,13 @@ namespace ScreenOverlayPhysics.Rendering;
 public sealed class CubeVisual3D : SceneObjectVisual3DBase
 {
     public CubeVisual3D(double size, Color baseColor)
-        : base(BuildCubeModel(size, baseColor))
+        : base(GetOrCreateCachedModel(CacheKey(size, baseColor), () => BuildCubeModel(size, baseColor)))
     {
+    }
+
+    private static string CacheKey(double size, Color baseColor)
+    {
+        return $"cube:{size:0.###}:{baseColor.R:X2}{baseColor.G:X2}{baseColor.B:X2}";
     }
 
     private static Model3DGroup BuildCubeModel(double size, Color baseColor)

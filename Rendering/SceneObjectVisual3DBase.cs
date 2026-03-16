@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using System.Windows.Media;
 using System.Windows.Media.Media3D;
 
@@ -5,6 +7,9 @@ namespace ScreenOverlayPhysics.Rendering;
 
 public abstract class SceneObjectVisual3DBase : ISceneObjectVisual3D
 {
+    private static readonly Dictionary<string, Model3DGroup> ModelCache = [];
+    private static readonly object ModelCacheLock = new();
+
     private readonly TranslateTransform3D _translate = new();
     private readonly ScaleTransform3D _scale = new(1, 1, 1);
     private readonly AxisAngleRotation3D _rotationX = new(new Vector3D(1, 0, 0), 0);
@@ -142,5 +147,25 @@ public abstract class SceneObjectVisual3DBase : ISceneObjectVisual3D
         material.Children.Add(CreateDiffuseMaterial(diffuseColor));
         material.Children.Add(CreateEmissiveMaterial(emissiveColor));
         return material;
+    }
+
+    protected static Model3D GetOrCreateCachedModel(string key, Func<Model3DGroup> createModel)
+    {
+        lock (ModelCacheLock)
+        {
+            if (ModelCache.TryGetValue(key, out var existing))
+            {
+                return existing.Clone();
+            }
+
+            var created = createModel();
+            if (!created.IsFrozen && created.CanFreeze)
+            {
+                created.Freeze();
+            }
+
+            ModelCache[key] = created;
+            return created.Clone();
+        }
     }
 }

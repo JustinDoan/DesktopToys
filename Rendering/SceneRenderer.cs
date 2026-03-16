@@ -17,6 +17,9 @@ public sealed class SceneRenderer
     private readonly DirectionalLight _keyLight = new(Color.FromRgb(255, 255, 255), new Vector3D(0.0, 0.0, 1.0));
     private readonly DirectionalLight _fillLight = new(Color.FromRgb(120, 162, 255), new Vector3D(-0.12, -0.06, 0.92));
     private readonly ModelVisual3D _lightVisual;
+    private RectF _cameraBoundsCache;
+    private bool _cameraBoundsCached;
+    private double _lastLightUpdateSeconds;
 
     public SceneRenderer(Viewport3D viewport)
     {
@@ -62,7 +65,7 @@ public sealed class SceneRenderer
     public void Render(IReadOnlyList<ObjectState> objects, in RectF bounds, double elapsedSeconds)
     {
         EnsureCamera(bounds);
-        UpdateLights(bounds, elapsedSeconds);
+        UpdateLights(elapsedSeconds);
 
         for (var i = 0; i < objects.Count; i++)
         {
@@ -181,8 +184,14 @@ public sealed class SceneRenderer
         return new VisualTransform(centerX, centerY, centerZ, rotationX, rotationY, rotationZ, scaleX, scaleY);
     }
 
-    private void UpdateLights(in RectF bounds, double elapsedSeconds)
+    private void UpdateLights(double elapsedSeconds)
     {
+        if (elapsedSeconds - _lastLightUpdateSeconds < (1.0 / 30.0))
+        {
+            return;
+        }
+
+        _lastLightUpdateSeconds = elapsedSeconds;
         _ambientLight.Color = LerpColor(Color.FromRgb(106, 118, 148), Color.FromRgb(132, 156, 194), 0.5 + (Math.Sin(elapsedSeconds * 0.9) * 0.5));
         _keyLight.Direction = new Vector3D(Math.Sin(elapsedSeconds * 0.35) * 0.03, Math.Cos(elapsedSeconds * 0.28) * 0.02, 1.0);
         _fillLight.Direction = new Vector3D(-0.12 + (Math.Sin(elapsedSeconds * 0.42) * 0.03), -0.06 + (Math.Cos(elapsedSeconds * 0.31) * 0.02), 0.92);
@@ -203,6 +212,18 @@ public sealed class SceneRenderer
 
     private void EnsureCamera(in RectF bounds)
     {
+        if (_cameraBoundsCached &&
+            Math.Abs(_cameraBoundsCache.X - bounds.X) < 0.01f &&
+            Math.Abs(_cameraBoundsCache.Y - bounds.Y) < 0.01f &&
+            Math.Abs(_cameraBoundsCache.Width - bounds.Width) < 0.01f &&
+            Math.Abs(_cameraBoundsCache.Height - bounds.Height) < 0.01f)
+        {
+            return;
+        }
+
+        _cameraBoundsCache = bounds;
+        _cameraBoundsCached = true;
+
         if (_viewport.Camera is OrthographicCamera camera)
         {
             camera.Position = new Point3D(bounds.Width * 0.5, bounds.Height * 0.5, -1200);

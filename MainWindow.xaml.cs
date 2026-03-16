@@ -78,6 +78,8 @@ public partial class MainWindow : Window
         _overlayWindowService.ApplyOverlayStyles();
         _overlayWindowService.SetInputMode(_config.StartInPassThrough ? OverlayInputMode.PassThrough : OverlayInputMode.Interactive);
 
+        InputSurface.Width = _screenBounds.Width;
+        InputSurface.Height = _screenBounds.Height;
         CompositionTarget.Rendering += OnRendering;
 
         _sceneController.Initialize(_screenBounds);
@@ -99,9 +101,6 @@ public partial class MainWindow : Window
         {
             return;
         }
-
-        InputSurface.Width = _screenBounds.Width;
-        InputSurface.Height = _screenBounds.Height;
 
         _frameClock.Tick();
         var dt = _frameClock.DeltaTimeSeconds;
@@ -298,7 +297,7 @@ public partial class MainWindow : Window
 
     private bool IsPointOverAnyObject(Vector2 cursor)
     {
-        return HitTestObject(_physicsWorld.Objects, cursor) is not null;
+        return _hitTester.IsPointOverAnyObject(_physicsWorld.Objects, cursor);
     }
 
     private void OnKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
@@ -309,13 +308,16 @@ public partial class MainWindow : Window
                 _debugOverlayRenderer.Toggle();
                 break;
             case Key.F2:
-                _selectedObject = _sceneController.SpawnNextObject(new Vector2(_screenBounds.Width * 0.5f, 40f));
+                SpawnNextObject();
                 break;
             case Key.F3:
                 ResetObjects();
                 break;
             case Key.F4:
                 OpenSettingsPanel();
+                break;
+            case Key.F7:
+                SpawnRandomCrystal();
                 break;
             case Key.F6:
                 ImportModelFromFile();
@@ -341,6 +343,8 @@ public partial class MainWindow : Window
         Dispatcher.Invoke(() =>
         {
             _screenBounds = bounds;
+            InputSurface.Width = bounds.Width;
+            InputSurface.Height = bounds.Height;
             _overlayWindowService?.ApplyWindowBounds(bounds);
             _overlayWindowService?.EnsureTopmost();
         });
@@ -350,7 +354,8 @@ public partial class MainWindow : Window
     {
         var menu = new Forms.ContextMenuStrip();
         menu.Items.Add("Toggle Debug (F1)", null, (_, _) => _debugOverlayRenderer.Toggle());
-        menu.Items.Add("Spawn Object (F2)", null, (_, _) => _selectedObject = _sceneController.SpawnNextObject(new Vector2(_screenBounds.Width * 0.5f, 40f)));
+        menu.Items.Add("Spawn Object (F2)", null, (_, _) => SpawnNextObject());
+        menu.Items.Add("Spawn Crystal (F7)", null, (_, _) => SpawnRandomCrystal());
         menu.Items.Add("Reset (F3)", null, (_, _) => ResetObjects());
         menu.Items.Add("Settings (F4)", null, (_, _) => OpenSettingsPanel());
         menu.Items.Add("Import Model (F6)", null, (_, _) => ImportModelFromFile());
@@ -367,6 +372,21 @@ public partial class MainWindow : Window
 
         icon.DoubleClick += (_, _) => OpenSettingsPanel();
         return icon;
+    }
+
+    private void SpawnNextObject()
+    {
+        _selectedObject = _sceneController.SpawnNextObject(DefaultSpawnPosition());
+    }
+
+    private void SpawnRandomCrystal()
+    {
+        _selectedObject = _sceneController.SpawnRandomCrystal(DefaultSpawnPosition());
+    }
+
+    private Vector2 DefaultSpawnPosition()
+    {
+        return new Vector2(_screenBounds.Width * 0.5f, 40f);
     }
 
     private void OpenSettingsPanel()
@@ -410,7 +430,7 @@ public partial class MainWindow : Window
         try
         {
             _selectedObject = _sceneController.SpawnImportedModel(
-                new Vector2(_screenBounds.Width * 0.5f, 40f),
+                DefaultSpawnPosition(),
                 dialog.FileName,
                 optionsWindow.ScaleMultiplier,
                 optionsWindow.Tint);

@@ -13,8 +13,7 @@ public sealed class HitTester
         for (var i = 0; i < objects.Count; i++)
         {
             var candidate = objects[i];
-            var rect = new RectF(candidate.Body.Position.X, candidate.Body.Position.Y, candidate.Body.Width, candidate.Body.Height);
-            if (!rect.Contains(point))
+            if (!ContainsPoint(candidate.Body, point))
             {
                 continue;
             }
@@ -33,16 +32,28 @@ public sealed class HitTester
     {
         for (var i = 0; i < objects.Count; i++)
         {
-            var body = objects[i].Body;
-            if (point.X >= body.Position.X &&
-                point.X <= body.Position.X + body.Width &&
-                point.Y >= body.Position.Y &&
-                point.Y <= body.Position.Y + body.Height)
+            if (ContainsPoint(objects[i].Body, point))
             {
                 return true;
             }
         }
 
         return false;
+    }
+
+    private static bool ContainsPoint(Physics.PhysicsBody body, Vector2 point)
+    {
+        if (body.Shape == Physics.CollisionShape.Circle)
+        {
+            var radius = System.MathF.Min(body.Width, body.Height) * 0.5f * body.CollisionScale;
+            var centerX = body.Position.X + (body.Width * 0.5f);
+            var centerY = body.Position.Y + (body.Height * 0.5f);
+            var deltaX = point.X - centerX;
+            var deltaY = point.Y - centerY;
+            return (deltaX * deltaX) + (deltaY * deltaY) <= radius * radius;
+        }
+
+        var rect = new RectF(body.Position.X, body.Position.Y, body.Width, body.Height);
+        return rect.Contains(point);
     }
 }

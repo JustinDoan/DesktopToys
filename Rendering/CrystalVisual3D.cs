@@ -6,8 +6,13 @@ namespace ScreenOverlayPhysics.Rendering;
 public sealed class CrystalVisual3D : SceneObjectVisual3DBase
 {
     public CrystalVisual3D(double size, Color baseColor)
-        : base(BuildCrystalModel(size, baseColor))
+        : base(GetOrCreateCachedModel(CacheKey(size, baseColor), () => BuildCrystalModel(size, baseColor)))
     {
+    }
+
+    private static string CacheKey(double size, Color baseColor)
+    {
+        return $"crystal:{size:0.###}:{baseColor.R:X2}{baseColor.G:X2}{baseColor.B:X2}";
     }
 
     private static Model3DGroup BuildCrystalModel(double size, Color baseColor)
@@ -61,14 +66,33 @@ public sealed class CrystalVisual3D : SceneObjectVisual3DBase
         Material highlightMaterial,
         Material shadowMaterial)
     {
-        group.Children.Add(CreateTriangleModel(top, front, right, highlightMaterial));
-        group.Children.Add(CreateTriangleModel(top, right, back, sideMaterial));
-        group.Children.Add(CreateTriangleModel(top, back, left, shadowMaterial));
-        group.Children.Add(CreateTriangleModel(top, left, front, sideMaterial));
-        group.Children.Add(CreateTriangleModel(bottom, right, front, highlightMaterial));
-        group.Children.Add(CreateTriangleModel(bottom, back, right, sideMaterial));
-        group.Children.Add(CreateTriangleModel(bottom, left, back, shadowMaterial));
-        group.Children.Add(CreateTriangleModel(bottom, front, left, sideMaterial));
+        var highlightMesh = new MeshGeometry3D();
+        var sideMesh = new MeshGeometry3D();
+        var shadowMesh = new MeshGeometry3D();
+
+        AddTriangle(highlightMesh, top, front, right);
+        AddTriangle(sideMesh, top, right, back);
+        AddTriangle(shadowMesh, top, back, left);
+        AddTriangle(sideMesh, top, left, front);
+        AddTriangle(highlightMesh, bottom, right, front);
+        AddTriangle(sideMesh, bottom, back, right);
+        AddTriangle(shadowMesh, bottom, left, back);
+        AddTriangle(sideMesh, bottom, front, left);
+
+        group.Children.Add(new GeometryModel3D(highlightMesh, highlightMaterial) { BackMaterial = highlightMaterial });
+        group.Children.Add(new GeometryModel3D(sideMesh, sideMaterial) { BackMaterial = sideMaterial });
+        group.Children.Add(new GeometryModel3D(shadowMesh, shadowMaterial) { BackMaterial = shadowMaterial });
+    }
+
+    private static void AddTriangle(MeshGeometry3D mesh, Point3D p0, Point3D p1, Point3D p2)
+    {
+        var start = mesh.Positions.Count;
+        mesh.Positions.Add(p0);
+        mesh.Positions.Add(p1);
+        mesh.Positions.Add(p2);
+        mesh.TriangleIndices.Add(start);
+        mesh.TriangleIndices.Add(start + 1);
+        mesh.TriangleIndices.Add(start + 2);
     }
 
     private static Point3D ScalePoint(Point3D point, double scale)

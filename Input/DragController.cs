@@ -39,6 +39,8 @@ public sealed class DragController
         _dragged = hit;
         hit.IsDragging = true;
         hit.Body.IsDragging = true;
+        hit.Body.IsSleeping = false;
+        hit.Body.SleepTimerSeconds = 0f;
         hit.Body.Velocity = Vector2.Zero;
         _cursorOffset = cursor - hit.Body.Position;
 
@@ -69,6 +71,8 @@ public sealed class DragController
         var throwVelocity = _mouseTracker.EstimateVelocity(0.085d, throwSensitivity, maxThrowSpeed);
 
         _dragged.Body.IsDragging = false;
+        _dragged.Body.IsSleeping = false;
+        _dragged.Body.SleepTimerSeconds = 0f;
         _dragged.IsDragging = false;
         _dragged.Body.Velocity = throwVelocity;
         _dragged = null;
