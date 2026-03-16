@@ -7,7 +7,10 @@ namespace ScreenOverlayPhysics.Models;
 public enum ObjectVisualKind
 {
     Cube,
-    Dice
+    Dice,
+    Crystal,
+    Satellite,
+    ImportedModel
 }
 
 public sealed class ObjectState
@@ -25,4 +28,6 @@ public sealed class ObjectState
     public int ZIndex { get; set; }
     public Color BaseColor { get; set; } = Color.FromRgb(127, 202, 255);
     public ObjectVisualKind VisualKind { get; set; } = ObjectVisualKind.Cube;
+    public string? ModelSourcePath { get; set; }
+    public float ModelScaleMultiplier { get; set; } = 1f;
 }

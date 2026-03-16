@@ -5,6 +5,7 @@ namespace ScreenOverlayPhysics.Core;
 
 public static class Win32Interop
 {
+    public const uint AttachParentProcess = 0xFFFFFFFF;
     public const int GwlExStyle = -20;
 
     public const int WsExToolWindow = 0x00000080;
@@ -50,6 +51,12 @@ public static class Win32Interop
 
     [DllImport("user32.dll", SetLastError = true)]
     public static extern bool GetCursorPos(out Point lpPoint);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool AttachConsole(uint dwProcessId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool FreeConsole();
 
     [DllImport("user32.dll")]
     private static extern short GetAsyncKeyState(int vKey);

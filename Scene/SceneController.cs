@@ -9,6 +9,7 @@ namespace ScreenOverlayPhysics.Scene;
 public sealed class SceneController
 {
     private readonly record struct InitialObjectSpec(float XFactor, float YOffset, ObjectVisualKind VisualKind, Color? Color = null);
+    private readonly record struct SpawnSpec(ObjectVisualKind VisualKind, Color? Color = null);
 
     private static readonly Color[] CubePalette =
     [
@@ -22,16 +23,27 @@ public sealed class SceneController
     private static readonly InitialObjectSpec[] InitialScene =
     [
         new(0.00f, 0f, ObjectVisualKind.Cube),
-        new(1.00f, 14f, ObjectVisualKind.Cube),
-        new(2.00f, 28f, ObjectVisualKind.Cube),
+        new(1.00f, 14f, ObjectVisualKind.Crystal, Color.FromRgb(108, 241, 255)),
+        new(2.00f, 28f, ObjectVisualKind.Satellite, Color.FromRgb(88, 160, 255)),
         new(3.00f, 42f, ObjectVisualKind.Cube),
-        new(1.80f, -126f, ObjectVisualKind.Dice, Color.FromRgb(245, 245, 240))
+        new(1.80f, -126f, ObjectVisualKind.Dice, Color.FromRgb(245, 245, 240)),
+        new(2.85f, -92f, ObjectVisualKind.Crystal, Color.FromRgb(255, 112, 214))
+    ];
+
+    private static readonly SpawnSpec[] SpawnCatalog =
+    [
+        new(ObjectVisualKind.Cube),
+        new(ObjectVisualKind.Crystal, Color.FromRgb(108, 241, 255)),
+        new(ObjectVisualKind.Satellite, Color.FromRgb(88, 160, 255)),
+        new(ObjectVisualKind.Dice, Color.FromRgb(245, 245, 240)),
+        new(ObjectVisualKind.Crystal, Color.FromRgb(255, 112, 214))
     ];
 
     private readonly AppConfig _config;
     private readonly PhysicsWorld _physicsWorld;
     private readonly SceneRenderer _sceneRenderer;
     private int _nextCubeColorIndex;
+    private int _nextSpawnCatalogIndex;
 
     public SceneController(AppConfig config, PhysicsWorld physicsWorld, SceneRenderer sceneRenderer)
     {
@@ -45,6 +57,7 @@ public sealed class SceneController
     public void Initialize(in RectF bounds)
     {
         _nextCubeColorIndex = 0;
+        _nextSpawnCatalogIndex = 0;
         SpawnInitialObjects(bounds);
     }
 
@@ -58,14 +71,16 @@ public sealed class SceneController
         _physicsWorld.Step(dt, bounds, _config.SleepThreshold, _config.FloorSnapThreshold);
     }
 
-    public void Render(in RectF bounds)
+    public void Render(in RectF bounds, double elapsedSeconds)
     {
-        _sceneRenderer.Render(_physicsWorld.Objects, bounds);
+        _sceneRenderer.Render(_physicsWorld.Objects, bounds, elapsedSeconds);
     }
 
-    public ObjectState SpawnCube(Vector2 position)
+    public ObjectState SpawnNextObject(Vector2 position)
     {
-        return SpawnObject(position, null, ObjectVisualKind.Cube);
+        var spec = SpawnCatalog[_nextSpawnCatalogIndex % SpawnCatalog.Length];
+        _nextSpawnCatalogIndex++;
+        return SpawnObject(position, spec.Color, spec.VisualKind);
     }
 
     public ObjectState SpawnObject(Vector2 position, Color? color, ObjectVisualKind visualKind)
@@ -89,11 +104,36 @@ public sealed class SceneController
         return state;
     }
 
+    public ObjectState SpawnImportedModel(Vector2 position, string sourcePath, float scaleMultiplier, Color tint)
+    {
+        var state = new ObjectState
+        {
+            ZIndex = _physicsWorld.Objects.Count + 1,
+            BaseColor = tint,
+            VisualKind = ObjectVisualKind.ImportedModel,
+            ModelSourcePath = sourcePath,
+            ModelScaleMultiplier = scaleMultiplier
+        };
+
+        var scaledSize = 84f * scaleMultiplier;
+        state.Body.Width = scaledSize;
+        state.Body.Height = scaledSize;
+        state.Body.Position = position;
+        state.Body.Mass = 1f;
+        state.Body.Restitution = _config.Restitution;
+        state.Body.LinearDamping = _config.LinearDamping;
+
+        _physicsWorld.Add(state);
+        _sceneRenderer.EnsureObjectVisual(state);
+        return state;
+    }
+
     public void Reset(in RectF bounds)
     {
         _physicsWorld.Clear();
         _sceneRenderer.Clear();
         _nextCubeColorIndex = 0;
+        _nextSpawnCatalogIndex = 0;
         SpawnInitialObjects(bounds);
     }
 

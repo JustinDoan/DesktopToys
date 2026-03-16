@@ -15,7 +15,13 @@ public abstract class SceneObjectVisual3DBase : ISceneObjectVisual3D
 
     protected SceneObjectVisual3DBase(Model3D content)
     {
+        var existingTransform = content.Transform;
         var transforms = new Transform3DGroup();
+        if (existingTransform is not null && existingTransform != Transform3D.Identity)
+        {
+            transforms.Children.Add(existingTransform);
+        }
+
         transforms.Children.Add(_scale);
         transforms.Children.Add(new RotateTransform3D(_rotationX));
         transforms.Children.Add(new RotateTransform3D(_rotationY));
@@ -70,6 +76,24 @@ public abstract class SceneObjectVisual3DBase : ISceneObjectVisual3D
         return new GeometryModel3D(mesh, material) { BackMaterial = material };
     }
 
+    protected static GeometryModel3D CreateTriangleModel(
+        Point3D p0,
+        Point3D p1,
+        Point3D p2,
+        Material material)
+    {
+        var mesh = new MeshGeometry3D();
+        mesh.Positions.Add(p0);
+        mesh.Positions.Add(p1);
+        mesh.Positions.Add(p2);
+
+        mesh.TriangleIndices.Add(0);
+        mesh.TriangleIndices.Add(1);
+        mesh.TriangleIndices.Add(2);
+
+        return new GeometryModel3D(mesh, material) { BackMaterial = material };
+    }
+
     protected static GeometryModel3D CreateTexturedQuadModel(
         Point3D p0,
         Point3D p1,
@@ -100,5 +124,23 @@ public abstract class SceneObjectVisual3DBase : ISceneObjectVisual3D
             Scale(color.R, factor),
             Scale(color.G, factor),
             Scale(color.B, factor));
+    }
+
+    protected static Material CreateDiffuseMaterial(Color color)
+    {
+        return new DiffuseMaterial(new SolidColorBrush(color));
+    }
+
+    protected static Material CreateEmissiveMaterial(Color color)
+    {
+        return new EmissiveMaterial(new SolidColorBrush(color));
+    }
+
+    protected static MaterialGroup CreateLayeredMaterial(Color diffuseColor, Color emissiveColor)
+    {
+        var material = new MaterialGroup();
+        material.Children.Add(CreateDiffuseMaterial(diffuseColor));
+        material.Children.Add(CreateEmissiveMaterial(emissiveColor));
+        return material;
     }
 }

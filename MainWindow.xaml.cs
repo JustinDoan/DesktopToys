@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
+using Microsoft.Win32;
 using ScreenOverlayPhysics.Core;
 using ScreenOverlayPhysics.Input;
 using ScreenOverlayPhysics.Models;
@@ -113,7 +114,7 @@ public partial class MainWindow : Window
         }
 
         _sceneController.Step(dt, _screenBounds);
-        _sceneController.Render(_screenBounds);
+        _sceneController.Render(_screenBounds, now);
         _debugOverlayRenderer.Render(_frameClock, _selectedObject, _overlayWindowService.CurrentMode, BuildDebugDiagnostics());
     }
 
@@ -260,13 +261,16 @@ public partial class MainWindow : Window
                 _debugOverlayRenderer.Toggle();
                 break;
             case Key.F2:
-                _selectedObject = _sceneController.SpawnCube(new Vector2(_screenBounds.Width * 0.5f, 40f));
+                _selectedObject = _sceneController.SpawnNextObject(new Vector2(_screenBounds.Width * 0.5f, 40f));
                 break;
             case Key.F3:
                 ResetObjects();
                 break;
             case Key.F4:
                 OpenSettingsPanel();
+                break;
+            case Key.F6:
+                ImportModelFromFile();
                 break;
             case Key.Escape:
                 Close();
@@ -298,9 +302,10 @@ public partial class MainWindow : Window
     {
         var menu = new Forms.ContextMenuStrip();
         menu.Items.Add("Toggle Debug (F1)", null, (_, _) => _debugOverlayRenderer.Toggle());
-        menu.Items.Add("Spawn Cube (F2)", null, (_, _) => _selectedObject = _sceneController.SpawnCube(new Vector2(_screenBounds.Width * 0.5f, 40f)));
+        menu.Items.Add("Spawn Object (F2)", null, (_, _) => _selectedObject = _sceneController.SpawnNextObject(new Vector2(_screenBounds.Width * 0.5f, 40f)));
         menu.Items.Add("Reset (F3)", null, (_, _) => ResetObjects());
         menu.Items.Add("Settings (F4)", null, (_, _) => OpenSettingsPanel());
+        menu.Items.Add("Import Model (F6)", null, (_, _) => ImportModelFromFile());
         menu.Items.Add("-");
         menu.Items.Add("Exit", null, (_, _) => Close());
 
@@ -326,6 +331,50 @@ public partial class MainWindow : Window
         if (settingsWindow.ShowDialog() == true)
         {
             _sceneController.ApplyRuntimePhysicsConfig();
+        }
+    }
+
+    private void ImportModelFromFile()
+    {
+        var dialog = new OpenFileDialog
+        {
+            Title = "Import 3D Model",
+            Filter = "3D Models|*.obj;*.stl;*.fbx|OBJ Files|*.obj|STL Files|*.stl|FBX Files|*.fbx|All Files|*.*",
+            CheckFileExists = true,
+            Multiselect = false
+        };
+
+        if (dialog.ShowDialog(this) != true)
+        {
+            return;
+        }
+
+        var optionsWindow = new ImportedModelOptionsWindow
+        {
+            Owner = this
+        };
+
+        if (optionsWindow.ShowDialog() != true)
+        {
+            return;
+        }
+
+        try
+        {
+            _selectedObject = _sceneController.SpawnImportedModel(
+                new Vector2(_screenBounds.Width * 0.5f, 40f),
+                dialog.FileName,
+                optionsWindow.ScaleMultiplier,
+                optionsWindow.Tint);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                this,
+                $"Failed to import model.\n\n{ex.Message}",
+                "Model Import Error",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
         }
     }
 

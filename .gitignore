@@ -4,3 +4,5 @@ buildcheck-*/
 .vs/
 *.user
 *.suo
+Assets/Models/*
+!Assets/Models/.gitkeep
