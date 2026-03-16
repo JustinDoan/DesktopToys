@@ -110,12 +110,13 @@ public partial class MainWindow : Window
         _sceneController.SetGravity(_config.GravityY);
         UpdateCursorPosition(now);
         UpdateClickThroughMode(now);
-        HandleGlobalMouseButtons(now);
+        var isRightDown = Win32Interop.IsRightMouseButtonDown();
+        HandleGlobalMouseButtons(now, isRightDown);
 
         if (_dragController.IsDragging)
         {
             _dragController.UpdateDrag(_cursorLocal, now);
-            UpdateRotationDrag(now);
+            UpdateRotationDrag(isRightDown);
         }
 
         _sceneController.Step(dt, _screenBounds);
@@ -204,7 +205,7 @@ public partial class MainWindow : Window
         e.Handled = true;
     }
 
-    private void HandleGlobalMouseButtons(double nowSeconds)
+    private void HandleGlobalMouseButtons(double nowSeconds, bool isRightDown)
     {
         if (_overlayWindowService is null)
         {
@@ -212,7 +213,6 @@ public partial class MainWindow : Window
         }
 
         var isLeftDown = Win32Interop.IsLeftMouseButtonDown();
-        var isRightDown = Win32Interop.IsRightMouseButtonDown();
         _debugLeftDown = isLeftDown;
         _debugRightDown = isRightDown;
         if (isLeftDown && !_wasLeftMouseDown)
@@ -256,7 +256,7 @@ public partial class MainWindow : Window
         _isRotationDragging = false;
     }
 
-    private void UpdateRotationDrag(double nowSeconds)
+    private void UpdateRotationDrag(bool isRightDown)
     {
         if (_selectedObject is null || _selectedObject != _dragController.DraggedObject)
         {
@@ -264,7 +264,6 @@ public partial class MainWindow : Window
             return;
         }
 
-        var isRightDown = Win32Interop.IsRightMouseButtonDown();
         if (!isRightDown)
         {
             _isRotationDragging = false;
