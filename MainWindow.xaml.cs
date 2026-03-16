@@ -38,11 +38,15 @@ public partial class MainWindow : Window
     private double _modeCandidateSinceSeconds;
     private bool _isInitialized;
     private bool _wasLeftMouseDown;
+    private bool _wasRightMouseDown;
     private bool _forceInteractiveForDebug;
     private bool _debugHitPrimaryCursor;
     private bool _debugLeftDown;
+    private bool _debugRightDown;
+    private bool _isRotationDragging;
     private string _lastDragAttempt = "none";
     private readonly StringBuilder _debugBuffer = new(256);
+    private Vector2 _lastRotationCursor;
 
     private readonly Forms.NotifyIcon _trayIcon;
 
@@ -111,6 +115,7 @@ public partial class MainWindow : Window
         if (_dragController.IsDragging)
         {
             _dragController.UpdateDrag(_cursorLocal, now);
+            UpdateRotationDrag(now);
         }
 
         _sceneController.Step(dt, _screenBounds);
@@ -207,7 +212,9 @@ public partial class MainWindow : Window
         }
 
         var isLeftDown = Win32Interop.IsLeftMouseButtonDown();
+        var isRightDown = Win32Interop.IsRightMouseButtonDown();
         _debugLeftDown = isLeftDown;
+        _debugRightDown = isRightDown;
         if (isLeftDown && !_wasLeftMouseDown)
         {
             _overlayWindowService.SetInputMode(OverlayInputMode.Interactive);
@@ -226,7 +233,13 @@ public partial class MainWindow : Window
             _lastDragAttempt = "release";
         }
 
+        if (!isRightDown && _wasRightMouseDown)
+        {
+            _isRotationDragging = false;
+        }
+
         _wasLeftMouseDown = isLeftDown;
+        _wasRightMouseDown = isRightDown;
     }
 
     private void EndDragAndApplySpin()
@@ -240,6 +253,42 @@ public partial class MainWindow : Window
         _selectedObject.AngularVelocityY += throwVelocity.X * 0.22;
         _selectedObject.AngularVelocityX += throwVelocity.Y * 0.16;
         _selectedObject.AngularVelocityZ += throwVelocity.X * 0.08;
+        _isRotationDragging = false;
+    }
+
+    private void UpdateRotationDrag(double nowSeconds)
+    {
+        if (_selectedObject is null || _selectedObject != _dragController.DraggedObject)
+        {
+            _isRotationDragging = false;
+            return;
+        }
+
+        var isRightDown = Win32Interop.IsRightMouseButtonDown();
+        if (!isRightDown)
+        {
+            _isRotationDragging = false;
+            return;
+        }
+
+        if (!_isRotationDragging)
+        {
+            _isRotationDragging = true;
+            _lastRotationCursor = _cursorLocal;
+            return;
+        }
+
+        var delta = _cursorLocal - _lastRotationCursor;
+        _lastRotationCursor = _cursorLocal;
+
+        const double rotationSensitivity = 0.72;
+        _selectedObject.RotationY += delta.X * rotationSensitivity;
+        _selectedObject.RotationX += delta.Y * rotationSensitivity;
+        _selectedObject.AngularVelocityY = delta.X * rotationSensitivity * 40.0;
+        _selectedObject.AngularVelocityX = delta.Y * rotationSensitivity * 40.0;
+        _selectedObject.AngularVelocityZ = delta.X * rotationSensitivity * 8.0;
+
+        _lastDragAttempt = $"rotate:{delta.X:0.0},{delta.Y:0.0}";
     }
 
     private ObjectState? HitTestObject(IReadOnlyList<ObjectState> objects, Vector2 cursor)
@@ -384,6 +433,7 @@ public partial class MainWindow : Window
         _debugBuffer.AppendFormat("ForceInteractive(F5): {0}\n", _forceInteractiveForDebug ? "ON" : "off");
         _debugBuffer.AppendFormat("Cursor: ({0:0.0},{1:0.0}) hit={2}\n", _cursorLocal.X, _cursorLocal.Y, _debugHitPrimaryCursor ? "yes" : "no");
         _debugBuffer.AppendFormat("LMB: {0} WasDown: {1}\n", _debugLeftDown ? "down" : "up", _wasLeftMouseDown ? "yes" : "no");
+        _debugBuffer.AppendFormat("RMB: {0} Rotating: {1}\n", _debugRightDown ? "down" : "up", _isRotationDragging ? "yes" : "no");
         _debugBuffer.AppendFormat("DragAttempt: {0}\n", _lastDragAttempt);
         _debugBuffer.AppendFormat("PendingMode: {0}", _pendingMode);
         return _debugBuffer.ToString();

@@ -19,6 +19,7 @@ public static class Win32Interop
     public const uint SwpNoactivate = 0x0010;
     public const uint SwpShowwindow = 0x0040;
     public const int VkLbutton = 0x01;
+    public const int VkRbutton = 0x02;
 
     [StructLayout(LayoutKind.Sequential)]
     public struct Point
@@ -78,5 +79,10 @@ public static class Win32Interop
     public static bool IsLeftMouseButtonDown()
     {
         return (GetAsyncKeyState(VkLbutton) & 0x8000) != 0;
+    }
+
+    public static bool IsRightMouseButtonDown()
+    {
+        return (GetAsyncKeyState(VkRbutton) & 0x8000) != 0;
     }
 }
