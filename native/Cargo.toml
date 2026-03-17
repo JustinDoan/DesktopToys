@@ -1,0 +1,10 @@
+[workspace]
+members = [
+    "app",
+    "core_types",
+    "native_shell",
+    "physics_core",
+    "renderer",
+    "scene_logic",
+]
+resolver = "2"

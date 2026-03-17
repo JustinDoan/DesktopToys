@@ -1,5 +1,4 @@
 using System;
-using System.Windows.Media;
 using ScreenOverlayPhysics.Physics;
 
 namespace ScreenOverlayPhysics.Models;
@@ -26,7 +25,7 @@ public sealed class ObjectState
     public bool IsHovered { get; set; }
     public bool IsDragging { get; set; }
     public int ZIndex { get; set; }
-    public Color BaseColor { get; set; } = Color.FromRgb(127, 202, 255);
+    public AppColor BaseColor { get; set; } = AppColor.FromRgb(127, 202, 255);
     public ObjectVisualKind VisualKind { get; set; } = ObjectVisualKind.Cube;
     public string? ModelSourcePath { get; set; }
     public float ModelScaleMultiplier { get; set; } = 1f;

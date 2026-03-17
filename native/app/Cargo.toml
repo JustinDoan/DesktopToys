@@ -1,0 +1,15 @@
+[package]
+name = "app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.102"
+core_types = { version = "0.1.0", path = "../core_types" }
+native_shell = { version = "0.1.0", path = "../native_shell" }
+physics_core = { version = "0.1.0", path = "../physics_core" }
+pollster = "0.4.0"
+renderer = { version = "0.1.0", path = "../renderer" }
+scene_logic = { version = "0.1.0", path = "../scene_logic" }
+wgpu = "0.19.4"
+winit = "0.30.13"

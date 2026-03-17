@@ -6,3 +6,4 @@ buildcheck-*/
 *.suo
 Assets/Models/*
 !Assets/Models/.gitkeep
+native/target/

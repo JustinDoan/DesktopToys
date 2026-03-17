@@ -1,6 +1,7 @@
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
+using ScreenOverlayPhysics.Models;
 
 namespace ScreenOverlayPhysics;
 
@@ -119,7 +120,7 @@ public sealed class ImportedModelOptionsWindow : Window
 
     public float ScaleMultiplier => (float)_scale.Value;
 
-    public Color Tint => Color.FromRgb((byte)_red.Value, (byte)_green.Value, (byte)_blue.Value);
+    public AppColor Tint => AppColor.FromRgb((byte)_red.Value, (byte)_green.Value, (byte)_blue.Value);
 
     private static Slider AddSlider(Grid parent, int row, string label, double min, double max, double value)
     {
@@ -149,7 +150,7 @@ public sealed class ImportedModelOptionsWindow : Window
 
     private void UpdatePreview()
     {
-        var tintBrush = new SolidColorBrush(Tint);
+        var tintBrush = new SolidColorBrush(Color.FromRgb(Tint.R, Tint.G, Tint.B));
         _preview.Background = tintBrush;
         _scalePreview.Background = tintBrush;
 

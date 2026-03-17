@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Windows.Media;
 using ScreenOverlayPhysics.Models;
 using ScreenOverlayPhysics.Physics;
 using ScreenOverlayPhysics.Rendering;
@@ -9,35 +8,35 @@ namespace ScreenOverlayPhysics.Scene;
 
 public sealed class SceneController
 {
-    private readonly record struct InitialObjectSpec(float XFactor, float YOffset, ObjectVisualKind VisualKind, Color? Color = null);
-    private readonly record struct SpawnSpec(ObjectVisualKind VisualKind, Color? Color = null);
+    private readonly record struct InitialObjectSpec(float XFactor, float YOffset, ObjectVisualKind VisualKind, AppColor? Color = null);
+    private readonly record struct SpawnSpec(ObjectVisualKind VisualKind, AppColor? Color = null);
 
-    private static readonly Color[] CubePalette =
+    private static readonly AppColor[] CubePalette =
     [
-        Color.FromRgb(127, 202, 255),
-        Color.FromRgb(255, 143, 163),
-        Color.FromRgb(255, 192, 104),
-        Color.FromRgb(145, 224, 154),
-        Color.FromRgb(183, 153, 255)
+        AppColor.FromRgb(127, 202, 255),
+        AppColor.FromRgb(255, 143, 163),
+        AppColor.FromRgb(255, 192, 104),
+        AppColor.FromRgb(145, 224, 154),
+        AppColor.FromRgb(183, 153, 255)
     ];
 
     private static readonly InitialObjectSpec[] InitialScene =
     [
         new(0.00f, 0f, ObjectVisualKind.Cube),
-        new(1.00f, 14f, ObjectVisualKind.Crystal, Color.FromRgb(108, 241, 255)),
-        new(2.00f, 28f, ObjectVisualKind.Satellite, Color.FromRgb(88, 160, 255)),
+        new(1.00f, 14f, ObjectVisualKind.Crystal, AppColor.FromRgb(108, 241, 255)),
+        new(2.00f, 28f, ObjectVisualKind.Satellite, AppColor.FromRgb(88, 160, 255)),
         new(3.00f, 42f, ObjectVisualKind.Cube),
-        new(1.80f, -126f, ObjectVisualKind.Dice, Color.FromRgb(245, 245, 240)),
-        new(2.85f, -92f, ObjectVisualKind.Crystal, Color.FromRgb(255, 112, 214))
+        new(1.80f, -126f, ObjectVisualKind.Dice, AppColor.FromRgb(245, 245, 240)),
+        new(2.85f, -92f, ObjectVisualKind.Crystal, AppColor.FromRgb(255, 112, 214))
     ];
 
     private static readonly SpawnSpec[] SpawnCatalog =
     [
         new(ObjectVisualKind.Cube),
-        new(ObjectVisualKind.Crystal, Color.FromRgb(108, 241, 255)),
-        new(ObjectVisualKind.Satellite, Color.FromRgb(88, 160, 255)),
-        new(ObjectVisualKind.Dice, Color.FromRgb(245, 245, 240)),
-        new(ObjectVisualKind.Crystal, Color.FromRgb(255, 112, 214))
+        new(ObjectVisualKind.Crystal, AppColor.FromRgb(108, 241, 255)),
+        new(ObjectVisualKind.Satellite, AppColor.FromRgb(88, 160, 255)),
+        new(ObjectVisualKind.Dice, AppColor.FromRgb(245, 245, 240)),
+        new(ObjectVisualKind.Crystal, AppColor.FromRgb(255, 112, 214))
     ];
 
     private readonly AppConfig _config;
@@ -89,7 +88,7 @@ public sealed class SceneController
         return SpawnObject(position, RandomCrystalColor(), ObjectVisualKind.Crystal);
     }
 
-    public ObjectState SpawnObject(Vector2 position, Color? color, ObjectVisualKind visualKind)
+    public ObjectState SpawnObject(Vector2 position, AppColor? color, ObjectVisualKind visualKind)
     {
         var state = new ObjectState
         {
@@ -115,7 +114,7 @@ public sealed class SceneController
         return state;
     }
 
-    public ObjectState SpawnImportedModel(Vector2 position, string sourcePath, float scaleMultiplier, Color tint)
+    public ObjectState SpawnImportedModel(Vector2 position, string sourcePath, float scaleMultiplier, AppColor tint)
     {
         var state = new ObjectState
         {
@@ -178,20 +177,20 @@ public sealed class SceneController
         }
     }
 
-    private Color NextCubeColor()
+    private AppColor NextCubeColor()
     {
         var color = CubePalette[_nextCubeColorIndex % CubePalette.Length];
         _nextCubeColorIndex++;
         return color;
     }
 
-    private static Color RandomCrystalColor()
+    private static AppColor RandomCrystalColor()
     {
         var hue = Random.Shared.NextDouble() * 360.0;
         return ColorFromHsv(hue, 0.55, 1.0);
     }
 
-    private static Color ColorFromHsv(double hue, double saturation, double value)
+    private static AppColor ColorFromHsv(double hue, double saturation, double value)
     {
         hue = ((hue % 360.0) + 360.0) % 360.0;
         var chroma = value * saturation;
@@ -239,7 +238,7 @@ public sealed class SceneController
         }
 
         var match = value - chroma;
-        return Color.FromRgb(
+        return AppColor.FromRgb(
             ToByte(red + match),
             ToByte(green + match),
             ToByte(blue + match));
