@@ -110,6 +110,7 @@ impl SceneRenderer {
             emit_draw_triangle(&mut vertices, width, height, triangle);
         }
 
+        emit_bouncing_dvd_logo(&mut vertices, width, height, scene.bounds, scene.elapsed_seconds);
         emit_cursor(&mut vertices, width, height, scene.cursor);
         emit_panels(&mut vertices, width, height, scene.hud);
         Ok(vertices)
@@ -122,6 +123,7 @@ impl SceneRenderer {
             ObjectVisualKind::Dice => dice_mesh(size),
             ObjectVisualKind::Crystal => crystal_mesh(size, object.base_color),
             ObjectVisualKind::Satellite => satellite_mesh(size, object.base_color),
+            ObjectVisualKind::DvdLogo => dvd_logo_mesh(object.body.width.max(1.0), object.body.height.max(1.0), object.base_color),
             ObjectVisualKind::ImportedModel => match object.model_source_path.as_deref() {
                 Some(path) => self.imported_model_mesh(path, size, object.base_color)?,
                 None => cube_mesh(size, object.base_color),
@@ -275,6 +277,106 @@ fn emit_cursor(vertices: &mut Vec<GpuVertex>, width: u32, height: u32, cursor: V
         AppColor::from_argb(220, 255, 255, 255),
         0.01,
     );
+}
+
+fn emit_bouncing_dvd_logo(vertices: &mut Vec<GpuVertex>, width: u32, height: u32, bounds: RectF, elapsed_seconds: f64) {
+    let area_width = bounds.width.max(1.0);
+    let area_height = bounds.height.max(1.0);
+    let logo_width = (area_width * 0.2).clamp(170.0, 320.0).round() as i32;
+    let logo_height = (logo_width as f32 * 0.46).round() as i32;
+    let max_x = (area_width.round() as i32 - logo_width).max(0);
+    let max_y = (area_height.round() as i32 - logo_height).max(0);
+    let x = bounce_position(elapsed_seconds, 290.0, max_x);
+    let y = bounce_position(elapsed_seconds + 0.83, 210.0, max_y);
+
+    let pulse = (elapsed_seconds * 2.2).sin() as f32;
+    let accent = AppColor::from_rgb(
+        (166.0 + pulse * 72.0).round().clamp(0.0, 255.0) as u8,
+        (140.0 + (elapsed_seconds * 2.9).sin() as f32 * 84.0)
+            .round()
+            .clamp(0.0, 255.0) as u8,
+        (210.0 + (elapsed_seconds * 2.5).cos() as f32 * 44.0)
+            .round()
+            .clamp(0.0, 255.0) as u8,
+    );
+    let body = scale_color(accent, 0.25);
+    let depth = -1018.0;
+
+    emit_rect(
+        vertices,
+        width,
+        height,
+        x + 4,
+        y + 4,
+        logo_width,
+        logo_height,
+        AppColor::from_argb(180, 0, 0, 0),
+        depth + 1.0,
+    );
+    emit_rect(vertices, width, height, x, y, logo_width, logo_height, body, depth);
+    emit_rect_outline(vertices, width, height, x, y, logo_width, logo_height, accent, depth - 1.0);
+    emit_rect(
+        vertices,
+        width,
+        height,
+        x + 4,
+        y + 4,
+        (logo_width - 8).max(1),
+        (logo_height / 3).max(1),
+        AppColor::from_argb(95, 255, 255, 255),
+        depth - 2.0,
+    );
+
+    let logo_text = "DVD";
+    let subtitle_text = "VIDEO";
+    let logo_scale = 3;
+    let subtitle_scale = 1;
+    let logo_text_width = logo_text.chars().count() as i32 * 8 * logo_scale;
+    let subtitle_text_width = subtitle_text.chars().count() as i32 * 8 * subtitle_scale;
+    let logo_x = x + ((logo_width - logo_text_width) / 2).max(0);
+    let subtitle_x = x + ((logo_width - subtitle_text_width) / 2).max(0);
+    let logo_y = y + ((logo_height - (8 * logo_scale + 8 * subtitle_scale + 4)) / 2).max(0);
+    let subtitle_y = logo_y + (8 * logo_scale) + 4;
+
+    emit_text(
+        vertices,
+        width,
+        height,
+        logo_x,
+        logo_y,
+        logo_text,
+        AppColor::from_rgb(255, 255, 255),
+        logo_scale,
+        depth - 3.0,
+    );
+    emit_text(
+        vertices,
+        width,
+        height,
+        subtitle_x,
+        subtitle_y,
+        subtitle_text,
+        AppColor::from_rgb(255, 255, 255),
+        subtitle_scale,
+        depth - 3.0,
+    );
+}
+
+fn bounce_position(elapsed_seconds: f64, speed_pixels_per_second: f64, max_position: i32) -> i32 {
+    if max_position <= 0 {
+        return 0;
+    }
+
+    let span = max_position as f64;
+    let cycle = span * 2.0;
+    let distance = (elapsed_seconds * speed_pixels_per_second).rem_euclid(cycle);
+    let position = if distance <= span {
+        distance
+    } else {
+        cycle - distance
+    };
+
+    position.round() as i32
 }
 
 fn emit_draw_triangle(vertices: &mut Vec<GpuVertex>, width: u32, height: u32, triangle: DrawTriangle) {
@@ -439,6 +541,7 @@ fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds
         ObjectVisualKind::ImportedModel => {
             center_z += 12.0;
         },
+        ObjectVisualKind::DvdLogo => {},
         ObjectVisualKind::Cube => {},
     }
 
@@ -716,6 +819,112 @@ fn satellite_mesh(size: f32, accent_color: AppColor) -> Mesh {
     }
 
     Mesh { triangles }
+}
+
+fn dvd_logo_mesh(width: f32, height: f32, accent_color: AppColor) -> Mesh {
+    let mut mesh = cuboid(
+        -width * 0.5,
+        -height * 0.5,
+        -height * 0.06,
+        width * 0.5,
+        height * 0.5,
+        height * 0.06,
+        scale_color(accent_color, 0.30),
+    );
+    let front_z = height * 0.06 + 0.08;
+
+    add_front_rect(
+        &mut mesh.triangles,
+        -width * 0.42,
+        -height * 0.42,
+        width * 0.84,
+        height * 0.26,
+        front_z,
+        AppColor::from_argb(164, 255, 255, 255),
+    );
+    add_front_text(
+        &mut mesh.triangles,
+        "DVD",
+        height,
+        front_z + 0.04,
+        AppColor::from_rgb(255, 255, 255),
+        0.088,
+        -0.03,
+    );
+    add_front_text(
+        &mut mesh.triangles,
+        "VIDEO",
+        height,
+        front_z + 0.04,
+        AppColor::from_rgb(255, 255, 255),
+        0.040,
+        0.19,
+    );
+
+    mesh
+}
+
+fn add_front_text(
+    triangles: &mut Vec<SourceTriangle>,
+    text: &str,
+    height: f32,
+    front_z: f32,
+    color: AppColor,
+    pixel_scale_by_height: f32,
+    center_y_by_height: f32,
+) {
+    let pixel = (height * pixel_scale_by_height).max(1.0);
+    let text_width = text.chars().count() as f32 * 8.0 * pixel;
+    let start_x = -text_width * 0.5;
+    let start_y = (height * center_y_by_height) - (4.0 * pixel);
+    let mut cursor_x = start_x;
+    for ch in text.chars() {
+        if let Some(glyph) = font8x8::BASIC_FONTS.get(ch) {
+            for (row_idx, row) in glyph.iter().enumerate() {
+                for col_idx in 0..8usize {
+                    if row & (1 << col_idx) == 0 {
+                        continue;
+                    }
+
+                    add_front_rect(
+                        triangles,
+                        cursor_x + col_idx as f32 * pixel,
+                        start_y + row_idx as f32 * pixel,
+                        pixel,
+                        pixel,
+                        front_z,
+                        color,
+                    );
+                }
+            }
+        }
+        cursor_x += 8.0 * pixel;
+    }
+}
+
+fn add_front_rect(
+    triangles: &mut Vec<SourceTriangle>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    z: f32,
+    color: AppColor,
+) {
+    let p0 = Vec3::new(x, y, z);
+    let p1 = Vec3::new(x + w, y, z);
+    let p2 = Vec3::new(x + w, y + h, z);
+    let p3 = Vec3::new(x, y + h, z);
+    triangles.push(SourceTriangle {
+        vertices: [p0, p1, p2],
+        color,
+        alpha: color.a,
+    });
+    triangles.push(SourceTriangle {
+        vertices: [p0, p2, p3],
+        color,
+        alpha: color.a,
+    });
 }
 
 fn cuboid(min_x: f32, min_y: f32, min_z: f32, max_x: f32, max_y: f32, max_z: f32, color: AppColor) -> Mesh {

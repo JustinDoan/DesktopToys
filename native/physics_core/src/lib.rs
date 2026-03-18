@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-use core_types::{CollisionShape, ObjectState, PhysicsBody, RectF, Vector2};
+use core_types::{AppColor, CollisionShape, ObjectState, ObjectVisualKind, PhysicsBody, RectF, Vector2};
 
 const PENETRATION_SLOP: f32 = 0.75;
 const POSITION_CORRECTION_PERCENT: f32 = 0.8;
@@ -9,6 +10,9 @@ const WAKE_VELOCITY_THRESHOLD: f32 = 95.0;
 const SLEEP_ANGULAR_THRESHOLD: f64 = 18.0;
 const SLEEP_SETTLE_TIME_SECONDS: f32 = 0.55;
 const DEFAULT_CELL_SIZE: f32 = 120.0;
+const COLOR_RANDOMIZER_MULTIPLIER: u64 = 6364136223846793005;
+const COLOR_RANDOMIZER_INCREMENT: u64 = 1442695040888963407;
+static COLOR_RANDOMIZER_STATE: AtomicU64 = AtomicU64::new(0x9E3779B97F4A7C15);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CollisionPair {
@@ -191,7 +195,10 @@ impl PhysicsWorld {
                 continue;
             }
 
-            solve_screen_bounds(body, bounds, sleep_threshold, floor_snap_threshold);
+            let hit_bounds = solve_screen_bounds(body, bounds, sleep_threshold, floor_snap_threshold);
+            if hit_bounds && object.visual_kind == ObjectVisualKind::DvdLogo {
+                object.base_color = random_logo_color();
+            }
 
             object.angular_velocity_y += body.velocity.x as f64 * 0.00045;
             object.angular_velocity_x += body.velocity.y as f64 * 0.00018;
@@ -228,7 +235,12 @@ pub fn solve_object_collisions(objects: &mut [ObjectState], pairs: Option<&[Coll
     }
 }
 
-pub fn solve_screen_bounds(body: &mut PhysicsBody, bounds: RectF, sleep_threshold: f32, floor_snap_threshold: f32) {
+pub fn solve_screen_bounds(
+    body: &mut PhysicsBody,
+    bounds: RectF,
+    sleep_threshold: f32,
+    floor_snap_threshold: f32,
+) -> bool {
     let mut hit_x = false;
     let mut hit_y = false;
     let inset_x = (body.width * 0.5) - effective_half_width(body);
@@ -266,6 +278,8 @@ pub fn solve_screen_bounds(body: &mut PhysicsBody, bounds: RectF, sleep_threshol
     if effective_bottom >= bounds.bottom() - floor_snap_threshold && body.velocity.y.abs() < sleep_threshold {
         body.velocity.y = 0.0;
     }
+
+    hit_x || hit_y
 }
 
 fn update_sleep_state(
@@ -372,12 +386,16 @@ fn resolve_object_pair(left: &mut ObjectState, right: &mut ObjectState) {
     }
 
     if left_body.shape == CollisionShape::Circle && right_body.shape == CollisionShape::Circle {
-        resolve_circle_pair(left, right);
+        if resolve_circle_pair(left, right) {
+            randomize_logo_colors_on_contact(left, right);
+        }
         return;
     }
 
     if left_body.shape == CollisionShape::Circle || right_body.shape == CollisionShape::Circle {
-        resolve_circle_box_pair(left, right);
+        if resolve_circle_box_pair(left, right) {
+            randomize_logo_colors_on_contact(left, right);
+        }
         return;
     }
 
@@ -420,9 +438,10 @@ fn resolve_object_pair(left: &mut ObjectState, right: &mut ObjectState) {
     );
 
     apply_collision_impulse(left, right, normal_x, normal_y, left_inverse_mass, right_inverse_mass, inverse_mass_sum);
+    randomize_logo_colors_on_contact(left, right);
 }
 
-fn resolve_circle_pair(left: &mut ObjectState, right: &mut ObjectState) {
+fn resolve_circle_pair(left: &mut ObjectState, right: &mut ObjectState) -> bool {
     let left_body = left.body;
     let right_body = right.body;
     let left_center_x = left_body.position.x + (left_body.width * 0.5);
@@ -436,7 +455,7 @@ fn resolve_circle_pair(left: &mut ObjectState, right: &mut ObjectState) {
     let right_radius = effective_radius(&right_body);
     let radius_sum = left_radius + right_radius;
     if distance_squared >= radius_sum * radius_sum {
-        return;
+        return false;
     }
 
     let distance = distance_squared.max(0.0001).sqrt();
@@ -448,7 +467,7 @@ fn resolve_circle_pair(left: &mut ObjectState, right: &mut ObjectState) {
     let right_inverse_mass = if right_body.is_dragging { 0.0 } else { inverse_mass(&right_body) };
     let inverse_mass_sum = left_inverse_mass + right_inverse_mass;
     if inverse_mass_sum <= 0.0 {
-        return;
+        return false;
     }
 
     apply_position_correction(
@@ -462,9 +481,10 @@ fn resolve_circle_pair(left: &mut ObjectState, right: &mut ObjectState) {
     );
 
     apply_collision_impulse(left, right, normal_x, normal_y, left_inverse_mass, right_inverse_mass, inverse_mass_sum);
+    true
 }
 
-fn resolve_circle_box_pair(left: &mut ObjectState, right: &mut ObjectState) {
+fn resolve_circle_box_pair(left: &mut ObjectState, right: &mut ObjectState) -> bool {
     let left_is_circle = left.body.shape == CollisionShape::Circle;
     let circle_body = if left_is_circle { left.body } else { right.body };
     let box_body = if left_is_circle { right.body } else { left.body };
@@ -472,7 +492,7 @@ fn resolve_circle_box_pair(left: &mut ObjectState, right: &mut ObjectState) {
     let Some((circle_to_box_normal_x, circle_to_box_normal_y, penetration)) =
         try_get_circle_box_contact(&circle_body, &box_body)
     else {
-        return;
+        return false;
     };
 
     let normal_x = if left_is_circle {
@@ -489,7 +509,7 @@ fn resolve_circle_box_pair(left: &mut ObjectState, right: &mut ObjectState) {
     let right_inverse_mass = if right.body.is_dragging { 0.0 } else { inverse_mass(&right.body) };
     let inverse_mass_sum = left_inverse_mass + right_inverse_mass;
     if inverse_mass_sum <= 0.0 {
-        return;
+        return false;
     }
 
     apply_position_correction(
@@ -503,6 +523,7 @@ fn resolve_circle_box_pair(left: &mut ObjectState, right: &mut ObjectState) {
     );
 
     apply_collision_impulse(left, right, normal_x, normal_y, left_inverse_mass, right_inverse_mass, inverse_mass_sum);
+    true
 }
 
 fn try_get_circle_box_contact(circle_body: &PhysicsBody, box_body: &PhysicsBody) -> Option<(f32, f32, f32)> {
@@ -660,6 +681,62 @@ fn shortest_angle_delta(current: f64, target: f64) -> f64 {
     delta
 }
 
+fn randomize_logo_colors_on_contact(left: &mut ObjectState, right: &mut ObjectState) {
+    if left.visual_kind == ObjectVisualKind::DvdLogo {
+        left.base_color = random_logo_color();
+    }
+    if right.visual_kind == ObjectVisualKind::DvdLogo {
+        right.base_color = random_logo_color();
+    }
+}
+
+fn random_logo_color() -> AppColor {
+    let random = next_random_u32();
+    let hue = (random % 360) as f32;
+    color_from_hsv(hue, 0.82, 1.0)
+}
+
+fn color_from_hsv(hue: f32, saturation: f32, value: f32) -> AppColor {
+    let hue = hue.rem_euclid(360.0);
+    let chroma = value * saturation;
+    let segment = hue / 60.0;
+    let x = chroma * (1.0 - ((segment % 2.0) - 1.0).abs());
+
+    let (r1, g1, b1) = if segment < 1.0 {
+        (chroma, x, 0.0)
+    } else if segment < 2.0 {
+        (x, chroma, 0.0)
+    } else if segment < 3.0 {
+        (0.0, chroma, x)
+    } else if segment < 4.0 {
+        (0.0, x, chroma)
+    } else if segment < 5.0 {
+        (x, 0.0, chroma)
+    } else {
+        (chroma, 0.0, x)
+    };
+
+    let m = value - chroma;
+    AppColor::from_rgb(to_u8((r1 + m) * 255.0), to_u8((g1 + m) * 255.0), to_u8((b1 + m) * 255.0))
+}
+
+fn to_u8(value: f32) -> u8 {
+    value.round().clamp(0.0, 255.0) as u8
+}
+
+fn next_random_u32() -> u32 {
+    let mut current = COLOR_RANDOMIZER_STATE.load(Ordering::Relaxed);
+    loop {
+        let next = current
+            .wrapping_mul(COLOR_RANDOMIZER_MULTIPLIER)
+            .wrapping_add(COLOR_RANDOMIZER_INCREMENT);
+        match COLOR_RANDOMIZER_STATE.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return (next >> 32) as u32,
+            Err(observed) => current = observed,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,8 +771,9 @@ mod tests {
         body.restitution = 0.75;
         let bounds = RectF::new(0.0, 0.0, 320.0, 240.0);
 
-        solve_screen_bounds(&mut body, bounds, 24.0, 3.0);
+        let hit_bounds = solve_screen_bounds(&mut body, bounds, 24.0, 3.0);
 
+        assert!(hit_bounds);
         assert!(body.position.x >= 0.0);
         assert!(body.velocity.x < 0.0);
         assert_eq!(body.velocity.y, 0.0);
