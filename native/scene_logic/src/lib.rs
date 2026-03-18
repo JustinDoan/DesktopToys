@@ -371,6 +371,10 @@ impl SceneController {
         self.spawn_object(position, Some(random_crystal_color()), ObjectVisualKind::Crystal)
     }
 
+    pub fn spawn_random_dvd_logo(&mut self, position: Vector2) -> u64 {
+        self.spawn_object(position, Some(random_logo_color()), ObjectVisualKind::DvdLogo)
+    }
+
     pub fn spawn_object(&mut self, position: Vector2, color: Option<AppColor>, visual_kind: ObjectVisualKind) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -504,6 +508,12 @@ fn random_crystal_color() -> AppColor {
     let mut rng = rand::rng();
     let hue = rng.random_range(0.0..360.0);
     color_from_hsv(hue, 0.55, 1.0)
+}
+
+fn random_logo_color() -> AppColor {
+    let mut rng = rand::rng();
+    let hue = rng.random_range(0.0..360.0);
+    color_from_hsv(hue, 0.82, 1.0)
 }
 
 fn color_from_hsv(hue: f64, saturation: f64, value: f64) -> AppColor {

@@ -328,6 +328,7 @@ pub enum TrayAction {
     ToggleDebug,
     SpawnObject,
     SpawnCrystal,
+    SpawnDvdLogo,
     Reset,
     ToggleSettings,
     ImportModel,
@@ -339,6 +340,7 @@ pub struct TrayController {
     toggle_debug: MenuItem,
     spawn_object: MenuItem,
     spawn_crystal: MenuItem,
+    spawn_dvd_logo: MenuItem,
     reset: MenuItem,
     toggle_settings: MenuItem,
     import_model: MenuItem,
@@ -351,6 +353,7 @@ impl TrayController {
         let toggle_debug = MenuItem::new("Toggle Debug (F1)", true, None);
         let spawn_object = MenuItem::new("Spawn Object (F2)", true, None);
         let spawn_crystal = MenuItem::new("Spawn Crystal (F7)", true, None);
+        let spawn_dvd_logo = MenuItem::new("Spawn DVD Logo (F8)", true, None);
         let reset = MenuItem::new("Reset (F3)", true, None);
         let toggle_settings = MenuItem::new("Settings (F4)", true, None);
         let import_model = MenuItem::new("Import Model (F6)", true, None);
@@ -360,6 +363,7 @@ impl TrayController {
             &toggle_debug,
             &spawn_object,
             &spawn_crystal,
+            &spawn_dvd_logo,
             &reset,
             &toggle_settings,
             &import_model,
@@ -378,6 +382,7 @@ impl TrayController {
             toggle_debug,
             spawn_object,
             spawn_crystal,
+            spawn_dvd_logo,
             reset,
             toggle_settings,
             import_model,
@@ -396,6 +401,8 @@ impl TrayController {
             Some(TrayAction::SpawnObject)
         } else if event.id == self.spawn_crystal.id() {
             Some(TrayAction::SpawnCrystal)
+        } else if event.id == self.spawn_dvd_logo.id() {
+            Some(TrayAction::SpawnDvdLogo)
         } else if event.id == self.reset.id() {
             Some(TrayAction::Reset)
         } else if event.id == self.toggle_settings.id() {

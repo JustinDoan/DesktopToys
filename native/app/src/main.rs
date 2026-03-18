@@ -480,6 +480,10 @@ impl NativeApp {
                 let id = self.scene.spawn_random_crystal(self.default_spawn_position());
                 self.selected_id = Some(id);
             },
+            AppAction::SpawnDvdLogo => {
+                let id = self.scene.spawn_random_dvd_logo(self.default_spawn_position());
+                self.selected_id = Some(id);
+            },
             AppAction::Reset => {
                 self.scene.reset(self.scene_bounds());
                 self.selected_id = self.scene.objects().last().map(|object| object.id);
@@ -555,6 +559,7 @@ impl NativeApp {
             KeyCode::F5 => self.handle_action(AppAction::ToggleForceInteractive, event_loop),
             KeyCode::F6 => self.handle_action(AppAction::RequestImport, event_loop),
             KeyCode::F7 => self.handle_action(AppAction::SpawnCrystal, event_loop),
+            KeyCode::F8 => self.handle_action(AppAction::SpawnDvdLogo, event_loop),
             KeyCode::Escape => self.handle_action(AppAction::Exit, event_loop),
             _ => {},
         }
@@ -920,6 +925,7 @@ impl ApplicationHandler for NativeApp {
                     TrayAction::ToggleDebug => AppAction::ToggleDebug,
                     TrayAction::SpawnObject => AppAction::SpawnObject,
                     TrayAction::SpawnCrystal => AppAction::SpawnCrystal,
+                    TrayAction::SpawnDvdLogo => AppAction::SpawnDvdLogo,
                     TrayAction::Reset => AppAction::Reset,
                     TrayAction::ToggleSettings => AppAction::ToggleSettings,
                     TrayAction::ImportModel => AppAction::RequestImport,
@@ -938,6 +944,7 @@ enum AppAction {
     ToggleDebug,
     SpawnObject,
     SpawnCrystal,
+    SpawnDvdLogo,
     Reset,
     ToggleSettings,
     ToggleForceInteractive,
