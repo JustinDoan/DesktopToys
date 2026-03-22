@@ -24,10 +24,11 @@ const INITIAL_SCENE: [InitialObjectSpec; 6] = [
     InitialObjectSpec::new(2.85, -92.0, ObjectVisualKind::Crystal, Some(AppColor::from_rgb(255, 112, 214))),
 ];
 
-const SPAWN_CATALOG: [SpawnSpec; 5] = [
+const SPAWN_CATALOG: [SpawnSpec; 6] = [
     SpawnSpec::new(ObjectVisualKind::Cube, None),
     SpawnSpec::new(ObjectVisualKind::Crystal, Some(AppColor::from_rgb(108, 241, 255))),
     SpawnSpec::new(ObjectVisualKind::Satellite, Some(AppColor::from_rgb(88, 160, 255))),
+    SpawnSpec::new(ObjectVisualKind::DvdLogo, Some(AppColor::from_rgb(244, 78, 255))),
     SpawnSpec::new(ObjectVisualKind::Dice, Some(AppColor::from_rgb(245, 245, 240))),
     SpawnSpec::new(ObjectVisualKind::Crystal, Some(AppColor::from_rgb(255, 112, 214))),
 ];
@@ -348,6 +349,7 @@ impl SceneController {
         self.next_cube_color_index = 0;
         self.next_spawn_catalog_index = 0;
         self.spawn_initial_objects(bounds);
+        self.spawn_dvd_logo(bounds);
     }
 
     pub fn set_gravity(&mut self, gravity_y: f32) {
@@ -369,6 +371,10 @@ impl SceneController {
         self.spawn_object(position, Some(random_crystal_color()), ObjectVisualKind::Crystal)
     }
 
+    pub fn spawn_random_dvd_logo(&mut self, position: Vector2) -> u64 {
+        self.spawn_object(position, Some(random_logo_color()), ObjectVisualKind::DvdLogo)
+    }
+
     pub fn spawn_object(&mut self, position: Vector2, color: Option<AppColor>, visual_kind: ObjectVisualKind) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -381,19 +387,39 @@ impl SceneController {
             ..ObjectState::default()
         };
 
-        state.body.width = DEFAULT_OBJECT_SIZE;
-        state.body.height = DEFAULT_OBJECT_SIZE;
+        if visual_kind == ObjectVisualKind::DvdLogo {
+            state.body.width = DEFAULT_OBJECT_SIZE * 1.7;
+            state.body.height = DEFAULT_OBJECT_SIZE * 0.78;
+        } else {
+            state.body.width = DEFAULT_OBJECT_SIZE;
+            state.body.height = DEFAULT_OBJECT_SIZE;
+        }
         state.body.position = position;
         state.body.mass = 1.0;
-        state.body.restitution = self.config.restitution;
-        state.body.linear_damping = self.config.linear_damping;
-        state.body.gravity_scale = if visual_kind == ObjectVisualKind::Satellite { 0.0 } else { 1.0 };
+        state.body.restitution = if visual_kind == ObjectVisualKind::DvdLogo {
+            1.0
+        } else {
+            self.config.restitution
+        };
+        state.body.linear_damping = if visual_kind == ObjectVisualKind::DvdLogo {
+            1.0
+        } else {
+            self.config.linear_damping
+        };
+        state.body.gravity_scale = if matches!(visual_kind, ObjectVisualKind::Satellite | ObjectVisualKind::DvdLogo) {
+            0.0
+        } else {
+            1.0
+        };
         state.body.shape = if visual_kind == ObjectVisualKind::Crystal {
             CollisionShape::Circle
         } else {
             CollisionShape::Box
         };
         state.body.collision_scale = if visual_kind == ObjectVisualKind::Crystal { 0.82 } else { 1.0 };
+        if visual_kind == ObjectVisualKind::DvdLogo {
+            state.body.velocity = Vector2::new(420.0, 260.0);
+        }
         self.physics_world.add(state);
         id
     }
@@ -437,6 +463,7 @@ impl SceneController {
         self.next_cube_color_index = 0;
         self.next_spawn_catalog_index = 0;
         self.spawn_initial_objects(bounds);
+        self.spawn_dvd_logo(bounds);
     }
 
     pub fn apply_runtime_physics_config(&mut self) {
@@ -460,6 +487,16 @@ impl SceneController {
         }
     }
 
+    fn spawn_dvd_logo(&mut self, bounds: RectF) {
+        let logo_width = DEFAULT_OBJECT_SIZE * 1.7;
+        let logo_height = DEFAULT_OBJECT_SIZE * 0.78;
+        let centered = Vector2::new(
+            ((bounds.width - logo_width) * 0.5).max(12.0),
+            ((bounds.height - logo_height) * 0.5).max(12.0),
+        );
+        let _ = self.spawn_object(centered, Some(AppColor::from_rgb(244, 78, 255)), ObjectVisualKind::DvdLogo);
+    }
+
     fn next_cube_color(&mut self) -> AppColor {
         let color = CUBE_PALETTE[self.next_cube_color_index % CUBE_PALETTE.len()];
         self.next_cube_color_index += 1;
@@ -471,6 +508,12 @@ fn random_crystal_color() -> AppColor {
     let mut rng = rand::rng();
     let hue = rng.random_range(0.0..360.0);
     color_from_hsv(hue, 0.55, 1.0)
+}
+
+fn random_logo_color() -> AppColor {
+    let mut rng = rand::rng();
+    let hue = rng.random_range(0.0..360.0);
+    color_from_hsv(hue, 0.82, 1.0)
 }
 
 fn color_from_hsv(hue: f64, saturation: f64, value: f64) -> AppColor {

@@ -137,6 +137,7 @@ pub enum ObjectVisualKind {
     Dice,
     Crystal,
     Satellite,
+    DvdLogo,
     ImportedModel,
 }
 
