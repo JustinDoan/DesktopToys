@@ -1,9 +1,12 @@
-use std::{collections::HashMap, fs::File, io::BufReader, mem, path::Path};
+use std::{collections::HashMap, fs::File, io::BufReader, mem, path::Path, sync::OnceLock};
 
 use anyhow::{bail, Context, Result};
 use core_types::{AppColor, ObjectState, ObjectVisualKind, RectF, Vector2};
 use font8x8::UnicodeFonts;
-use gltf::mesh::util::ReadIndices;
+use gltf::{
+    animation::util::ReadOutputs,
+    mesh::util::{ReadIndices, ReadJoints, ReadWeights},
+};
 
 #[derive(Clone, Debug)]
 pub struct PanelLine {
@@ -67,6 +70,73 @@ struct SourceTriangle {
     alpha: u8,
 }
 
+#[derive(Clone, Debug)]
+struct FoxAsset {
+    vertices: Vec<FoxVertex>,
+    indices: Vec<[usize; 3]>,
+    color: AppColor,
+    nodes: Vec<FoxNode>,
+    skin_joints: Vec<usize>,
+    inverse_bind_matrices: Vec<Mat4>,
+    animations: Vec<FoxAnimation>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FoxVertex {
+    position: Vec3,
+    joints: [usize; 4],
+    weights: [f32; 4],
+}
+
+#[derive(Clone, Debug)]
+struct FoxNode {
+    children: Vec<usize>,
+    base_translation: Vec3,
+    base_rotation: Quat,
+    base_scale: Vec3,
+}
+
+#[derive(Clone, Debug)]
+struct FoxAnimation {
+    name: String,
+    duration: f32,
+    channels: Vec<FoxAnimationChannel>,
+}
+
+#[derive(Clone, Debug)]
+struct FoxAnimationChannel {
+    node_index: usize,
+    property: FoxAnimatedProperty,
+    times: Vec<f32>,
+    values: FoxAnimationValues,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum FoxAnimatedProperty {
+    Translation,
+    Rotation,
+    Scale,
+}
+
+#[derive(Clone, Debug)]
+enum FoxAnimationValues {
+    Vec3(Vec<Vec3>),
+    Rotation(Vec<Quat>),
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Mat4 {
+    values: [[f32; 4]; 4],
+}
+
+#[derive(Clone, Copy, Debug)]
+struct Quat {
+    x: f32,
+    y: f32,
+    z: f32,
+    w: f32,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct DrawTriangle {
     points: [Vec3; 3],
@@ -109,6 +179,122 @@ impl Vec3 {
     }
 }
 
+impl Mat4 {
+    fn identity() -> Self {
+        Self {
+            values: [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+        }
+    }
+
+    fn from_gltf_matrix(matrix: [[f32; 4]; 4]) -> Self {
+        let mut values = [[0.0; 4]; 4];
+        for row in 0..4 {
+            for column in 0..4 {
+                values[row][column] = matrix[column][row];
+            }
+        }
+        Self { values }
+    }
+
+    fn from_trs(translation: Vec3, rotation: Quat, scale: Vec3) -> Self {
+        let rotation = rotation.normalized();
+        let x2 = rotation.x + rotation.x;
+        let y2 = rotation.y + rotation.y;
+        let z2 = rotation.z + rotation.z;
+        let xx = rotation.x * x2;
+        let xy = rotation.x * y2;
+        let xz = rotation.x * z2;
+        let yy = rotation.y * y2;
+        let yz = rotation.y * z2;
+        let zz = rotation.z * z2;
+        let wx = rotation.w * x2;
+        let wy = rotation.w * y2;
+        let wz = rotation.w * z2;
+
+        Self {
+            values: [
+                [(1.0 - (yy + zz)) * scale.x, (xy - wz) * scale.y, (xz + wy) * scale.z, translation.x],
+                [(xy + wz) * scale.x, (1.0 - (xx + zz)) * scale.y, (yz - wx) * scale.z, translation.y],
+                [(xz - wy) * scale.x, (yz + wx) * scale.y, (1.0 - (xx + yy)) * scale.z, translation.z],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+        }
+    }
+
+    fn mul(self, rhs: Self) -> Self {
+        let mut values = [[0.0; 4]; 4];
+        for row in 0..4 {
+            for column in 0..4 {
+                values[row][column] = self.values[row][0] * rhs.values[0][column]
+                    + self.values[row][1] * rhs.values[1][column]
+                    + self.values[row][2] * rhs.values[2][column]
+                    + self.values[row][3] * rhs.values[3][column];
+            }
+        }
+        Self { values }
+    }
+
+    fn transform_point(self, point: Vec3) -> Vec3 {
+        Vec3::new(
+            self.values[0][0] * point.x + self.values[0][1] * point.y + self.values[0][2] * point.z + self.values[0][3],
+            self.values[1][0] * point.x + self.values[1][1] * point.y + self.values[1][2] * point.z + self.values[1][3],
+            self.values[2][0] * point.x + self.values[2][1] * point.y + self.values[2][2] * point.z + self.values[2][3],
+        )
+    }
+}
+
+impl Quat {
+    fn new(x: f32, y: f32, z: f32, w: f32) -> Self {
+        Self { x, y, z, w }
+    }
+
+    fn identity() -> Self {
+        Self::new(0.0, 0.0, 0.0, 1.0)
+    }
+
+    fn normalized(self) -> Self {
+        let length = (self.x * self.x + self.y * self.y + self.z * self.z + self.w * self.w).sqrt();
+        if length <= f32::EPSILON {
+            return Self::identity();
+        }
+        Self::new(self.x / length, self.y / length, self.z / length, self.w / length)
+    }
+
+    fn slerp(self, mut rhs: Self, t: f32) -> Self {
+        let mut cos_theta = self.x * rhs.x + self.y * rhs.y + self.z * rhs.z + self.w * rhs.w;
+        if cos_theta < 0.0 {
+            rhs = Self::new(-rhs.x, -rhs.y, -rhs.z, -rhs.w);
+            cos_theta = -cos_theta;
+        }
+
+        if cos_theta > 0.9995 {
+            return Self::new(
+                self.x + (rhs.x - self.x) * t,
+                self.y + (rhs.y - self.y) * t,
+                self.z + (rhs.z - self.z) * t,
+                self.w + (rhs.w - self.w) * t,
+            )
+            .normalized();
+        }
+
+        let theta = cos_theta.acos();
+        let sin_theta = theta.sin();
+        let left = ((1.0 - t) * theta).sin() / sin_theta;
+        let right = (t * theta).sin() / sin_theta;
+        Self::new(
+            self.x * left + rhs.x * right,
+            self.y * left + rhs.y * right,
+            self.z * left + rhs.z * right,
+            self.w * left + rhs.w * right,
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct VisualTransform {
     center_x: f32,
@@ -131,6 +317,22 @@ impl SceneRenderer {
         vertices.clear();
         vertices.reserve(scene.objects.len() * 36 + 4096);
         for object in scene.objects {
+            if object.visual_kind == ObjectVisualKind::FoxBuddy {
+                let mesh = fox_buddy_animated_mesh(
+                    object.body.width.min(object.body.height).max(1.0),
+                    scene.elapsed_seconds,
+                    object.body.velocity,
+                );
+                let transform = compute_visual_transform(object, scene.bounds, scene.elapsed_seconds);
+                for triangle in &mesh.triangles {
+                    emit_draw_triangle(
+                        &mut vertices,
+                        transform_triangle(*triangle, transform, scene.elapsed_seconds),
+                    );
+                }
+                continue;
+            }
+
             let mesh = self.mesh_for_object(object)?;
             let transform = compute_visual_transform(object, scene.bounds, scene.elapsed_seconds);
             for triangle in &mesh.triangles {
@@ -1334,12 +1536,336 @@ fn load_stl_mesh(path: &str) -> Result<Mesh> {
     Ok(Mesh { triangles })
 }
 
+fn fox_buddy_animated_mesh(target_size: f32, elapsed_seconds: f64, velocity: Vector2) -> Mesh {
+    let Some(asset) = fox_asset() else {
+        return fox_buddy_mesh(target_size);
+    };
+    let speed = velocity.x.abs() + velocity.y.abs();
+    let preferred_clip = if speed > 240.0 {
+        "Run"
+    } else if speed > 30.0 {
+        "Walk"
+    } else {
+        "Survey"
+    };
+    let animation = asset
+        .animations
+        .iter()
+        .find(|animation| animation.name == preferred_clip)
+        .or_else(|| asset.animations.first());
+    let mut local_translations: Vec<Vec3> = asset.nodes.iter().map(|node| node.base_translation).collect();
+    let mut local_rotations: Vec<Quat> = asset.nodes.iter().map(|node| node.base_rotation).collect();
+    let mut local_scales: Vec<Vec3> = asset.nodes.iter().map(|node| node.base_scale).collect();
+
+    if let Some(animation) = animation {
+        let time = if animation.duration > 0.0 {
+            (elapsed_seconds as f32 * if preferred_clip == "Survey" { 0.55 } else { 1.0 }) % animation.duration
+        } else {
+            0.0
+        };
+        for channel in &animation.channels {
+            match (&channel.property, &channel.values) {
+                (FoxAnimatedProperty::Translation, FoxAnimationValues::Vec3(values)) => {
+                    local_translations[channel.node_index] = sample_vec3(&channel.times, values, time);
+                },
+                (FoxAnimatedProperty::Rotation, FoxAnimationValues::Rotation(values)) => {
+                    local_rotations[channel.node_index] = sample_quat(&channel.times, values, time);
+                },
+                (FoxAnimatedProperty::Scale, FoxAnimationValues::Vec3(values)) => {
+                    local_scales[channel.node_index] = sample_vec3(&channel.times, values, time);
+                },
+                _ => {},
+            }
+        }
+    }
+
+    let mut local_matrices = Vec::with_capacity(asset.nodes.len());
+    for index in 0..asset.nodes.len() {
+        local_matrices.push(Mat4::from_trs(local_translations[index], local_rotations[index], local_scales[index]));
+    }
+    let globals = compute_global_matrices(&asset.nodes, &local_matrices);
+    let joint_matrices: Vec<Mat4> = asset
+        .skin_joints
+        .iter()
+        .enumerate()
+        .map(|(joint_index, &node_index)| globals[node_index].mul(asset.inverse_bind_matrices[joint_index]))
+        .collect();
+
+    let mut skinned_positions = Vec::with_capacity(asset.vertices.len());
+    for vertex in &asset.vertices {
+        let mut skinned = Vec3::new(0.0, 0.0, 0.0);
+        let mut total_weight = 0.0;
+        for influence in 0..4 {
+            let weight = vertex.weights[influence];
+            let Some(matrix) = joint_matrices.get(vertex.joints[influence]) else {
+                continue;
+            };
+            if weight <= 0.0 {
+                continue;
+            }
+            let transformed = matrix.transform_point(vertex.position);
+            skinned.x += transformed.x * weight;
+            skinned.y += transformed.y * weight;
+            skinned.z += transformed.z * weight;
+            total_weight += weight;
+        }
+        if total_weight <= f32::EPSILON {
+            skinned = vertex.position;
+        }
+        skinned_positions.push(Vec3::new(skinned.x, -skinned.y, skinned.z));
+    }
+
+    let mut mesh = Mesh {
+        triangles: asset
+            .indices
+            .iter()
+            .filter_map(|face| {
+                Some(SourceTriangle {
+                    vertices: [
+                        *skinned_positions.get(face[0])?,
+                        *skinned_positions.get(face[1])?,
+                        *skinned_positions.get(face[2])?,
+                    ],
+                    color: asset.color,
+                    alpha: asset.color.a,
+                })
+            })
+            .collect(),
+    };
+    normalize_mesh(&mut mesh, target_size).unwrap_or(());
+    mesh
+}
+
 fn fox_buddy_mesh(target_size: f32) -> Mesh {
     static FOX_GLB: &[u8] = include_bytes!("../../../Assets/characters/fox/Fox.glb");
     match load_gltf_mesh_from_slice(FOX_GLB, target_size, AppColor::from_rgb(245, 126, 48)) {
         Ok(mesh) => mesh,
         Err(_) => ball_mesh(target_size, AppColor::from_rgb(245, 126, 48)),
     }
+}
+
+fn fox_asset() -> Option<&'static FoxAsset> {
+    static FOX_ASSET: OnceLock<Option<FoxAsset>> = OnceLock::new();
+    FOX_ASSET
+        .get_or_init(|| load_fox_asset().ok())
+        .as_ref()
+}
+
+fn load_fox_asset() -> Result<FoxAsset> {
+    static FOX_GLB: &[u8] = include_bytes!("../../../Assets/characters/fox/Fox.glb");
+    let (document, buffers, _) = gltf::import_slice(FOX_GLB).context("Failed to import fox GLB")?;
+    let buffer_data = |buffer: gltf::Buffer<'_>| buffers.get(buffer.index()).map(|data| data.0.as_slice());
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+    let mut color = AppColor::from_rgb(245, 126, 48);
+
+    for mesh in document.meshes() {
+        for primitive in mesh.primitives() {
+            let reader = primitive.reader(buffer_data);
+            let Some(positions_reader) = reader.read_positions() else {
+                continue;
+            };
+            let base_index = vertices.len();
+            let positions: Vec<[f32; 3]> = positions_reader.collect();
+            let joints: Vec<[u16; 4]> = reader
+                .read_joints(0)
+                .map(ReadJoints::into_u16)
+                .map(|values| values.collect())
+                .unwrap_or_else(|| vec![[0, 0, 0, 0]; positions.len()]);
+            let weights: Vec<[f32; 4]> = reader
+                .read_weights(0)
+                .map(ReadWeights::into_f32)
+                .map(|values| values.collect())
+                .unwrap_or_else(|| vec![[1.0, 0.0, 0.0, 0.0]; positions.len()]);
+            let material = primitive.material();
+            let color_factor = material.pbr_metallic_roughness().base_color_factor();
+            color = AppColor::from_argb(
+                (color_factor[3] * 255.0).round().clamp(0.0, 255.0) as u8,
+                scale_channel(245, color_factor[0]),
+                scale_channel(126, color_factor[1]),
+                scale_channel(48, color_factor[2]),
+            );
+
+            for (index, position) in positions.iter().enumerate() {
+                vertices.push(FoxVertex {
+                    position: Vec3::new(position[0], position[1], position[2]),
+                    joints: [
+                        joints.get(index).copied().unwrap_or_default()[0] as usize,
+                        joints.get(index).copied().unwrap_or_default()[1] as usize,
+                        joints.get(index).copied().unwrap_or_default()[2] as usize,
+                        joints.get(index).copied().unwrap_or_default()[3] as usize,
+                    ],
+                    weights: weights.get(index).copied().unwrap_or([1.0, 0.0, 0.0, 0.0]),
+                });
+            }
+
+            let primitive_indices: Vec<usize> = match reader.read_indices() {
+                Some(ReadIndices::U8(values)) => values.map(|value| base_index + value as usize).collect(),
+                Some(ReadIndices::U16(values)) => values.map(|value| base_index + value as usize).collect(),
+                Some(ReadIndices::U32(values)) => values.map(|value| base_index + value as usize).collect(),
+                None => (base_index..base_index + positions.len()).collect(),
+            };
+            for face in primitive_indices.chunks_exact(3) {
+                indices.push([face[0], face[1], face[2]]);
+            }
+        }
+    }
+
+    let nodes: Vec<FoxNode> = document
+        .nodes()
+        .map(|node| {
+            let (translation, rotation, scale) = node.transform().decomposed();
+            FoxNode {
+                children: node.children().map(|child| child.index()).collect(),
+                base_translation: Vec3::new(translation[0], translation[1], translation[2]),
+                base_rotation: Quat::new(rotation[0], rotation[1], rotation[2], rotation[3]).normalized(),
+                base_scale: Vec3::new(scale[0], scale[1], scale[2]),
+            }
+        })
+        .collect();
+    let skin = document.skins().next().context("Fox GLB did not contain a skin")?;
+    let skin_reader = skin.reader(buffer_data);
+    let skin_joints: Vec<usize> = skin.joints().map(|joint| joint.index()).collect();
+    let inverse_bind_matrices: Vec<Mat4> = skin_reader
+        .read_inverse_bind_matrices()
+        .map(|matrices| matrices.map(Mat4::from_gltf_matrix).collect())
+        .unwrap_or_else(|| vec![Mat4::identity(); skin_joints.len()]);
+    let animations = load_fox_animations(&document, &buffers);
+
+    Ok(FoxAsset {
+        vertices,
+        indices,
+        color,
+        nodes,
+        skin_joints,
+        inverse_bind_matrices,
+        animations,
+    })
+}
+
+fn load_fox_animations(document: &gltf::Document, buffers: &[gltf::buffer::Data]) -> Vec<FoxAnimation> {
+    let mut animations = Vec::new();
+    for animation in document.animations() {
+        let mut channels = Vec::new();
+        let mut duration = 0.0f32;
+        for channel in animation.channels() {
+            let reader = channel.reader(|buffer| buffers.get(buffer.index()).map(|data| data.0.as_slice()));
+            let Some(times) = reader.read_inputs().map(|values| values.collect::<Vec<_>>()) else {
+                continue;
+            };
+            if let Some(last) = times.last() {
+                duration = duration.max(*last);
+            }
+            let Some(outputs) = reader.read_outputs() else {
+                continue;
+            };
+            let node_index = channel.target().node().index();
+            match outputs {
+                ReadOutputs::Translations(values) => channels.push(FoxAnimationChannel {
+                    node_index,
+                    property: FoxAnimatedProperty::Translation,
+                    times,
+                    values: FoxAnimationValues::Vec3(values.map(|value| Vec3::new(value[0], value[1], value[2])).collect()),
+                }),
+                ReadOutputs::Rotations(values) => channels.push(FoxAnimationChannel {
+                    node_index,
+                    property: FoxAnimatedProperty::Rotation,
+                    times,
+                    values: FoxAnimationValues::Rotation(
+                        values
+                            .into_f32()
+                            .map(|value| Quat::new(value[0], value[1], value[2], value[3]).normalized())
+                            .collect(),
+                    ),
+                }),
+                ReadOutputs::Scales(values) => channels.push(FoxAnimationChannel {
+                    node_index,
+                    property: FoxAnimatedProperty::Scale,
+                    times,
+                    values: FoxAnimationValues::Vec3(values.map(|value| Vec3::new(value[0], value[1], value[2])).collect()),
+                }),
+                ReadOutputs::MorphTargetWeights(_) => {},
+            }
+        }
+        animations.push(FoxAnimation {
+            name: animation.name().unwrap_or("Animation").to_string(),
+            duration,
+            channels,
+        });
+    }
+    animations
+}
+
+fn sample_vec3(times: &[f32], values: &[Vec3], time: f32) -> Vec3 {
+    if values.is_empty() {
+        return Vec3::new(0.0, 0.0, 0.0);
+    }
+    let (left, right, blend) = sample_span(times, time);
+    lerp_vec3(values[left.min(values.len() - 1)], values[right.min(values.len() - 1)], blend)
+}
+
+fn sample_quat(times: &[f32], values: &[Quat], time: f32) -> Quat {
+    if values.is_empty() {
+        return Quat::identity();
+    }
+    let (left, right, blend) = sample_span(times, time);
+    values[left.min(values.len() - 1)]
+        .slerp(values[right.min(values.len() - 1)], blend)
+        .normalized()
+}
+
+fn sample_span(times: &[f32], time: f32) -> (usize, usize, f32) {
+    if times.len() <= 1 {
+        return (0, 0, 0.0);
+    }
+    for index in 0..times.len() - 1 {
+        let start = times[index];
+        let end = times[index + 1];
+        if time >= start && time <= end {
+            let blend = if (end - start).abs() <= f32::EPSILON {
+                0.0
+            } else {
+                (time - start) / (end - start)
+            };
+            return (index, index + 1, blend.clamp(0.0, 1.0));
+        }
+    }
+    (times.len() - 1, times.len() - 1, 0.0)
+}
+
+fn compute_global_matrices(nodes: &[FoxNode], local_matrices: &[Mat4]) -> Vec<Mat4> {
+    let mut has_parent = vec![false; nodes.len()];
+    for node in nodes {
+        for &child in &node.children {
+            if let Some(slot) = has_parent.get_mut(child) {
+                *slot = true;
+            }
+        }
+    }
+
+    let mut globals = vec![Mat4::identity(); nodes.len()];
+    for index in 0..nodes.len() {
+        if !has_parent[index] {
+            fill_global_matrices(index, Mat4::identity(), nodes, local_matrices, &mut globals);
+        }
+    }
+    globals
+}
+
+fn fill_global_matrices(index: usize, parent: Mat4, nodes: &[FoxNode], local_matrices: &[Mat4], globals: &mut [Mat4]) {
+    let global = parent.mul(local_matrices[index]);
+    globals[index] = global;
+    for &child in &nodes[index].children {
+        fill_global_matrices(child, global, nodes, local_matrices, globals);
+    }
+}
+
+fn lerp_vec3(left: Vec3, right: Vec3, t: f32) -> Vec3 {
+    Vec3::new(
+        left.x + (right.x - left.x) * t,
+        left.y + (right.y - left.y) * t,
+        left.z + (right.z - left.z) * t,
+    )
 }
 
 fn load_gltf_mesh_from_slice(bytes: &[u8], target_size: f32, fallback_color: AppColor) -> Result<Mesh> {

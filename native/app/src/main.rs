@@ -394,6 +394,7 @@ impl NativeApp {
         self.handle_global_fox_buddy(pointer.fox_buddy_down);
         self.handle_global_import_keys(pointer.import_keys);
         self.update_slingshot_game();
+        self.update_fox_buddies(dt);
         self.scene.step(dt, self.scene_bounds());
         self.sync_panels();
         window.request_redraw();
@@ -552,6 +553,63 @@ impl NativeApp {
         );
         self.selected_id = Some(id);
         self.push_status_message("Fox buddy joined the desktop.".to_string());
+    }
+
+    fn update_fox_buddies(&mut self, dt: f32) {
+        if self.slingshot_game.active {
+            return;
+        }
+        let bounds = self.scene_bounds();
+        let objects = self.scene.objects().to_vec();
+        let fox_ids: Vec<u64> = objects
+            .iter()
+            .filter(|object| object.visual_kind == ObjectVisualKind::FoxBuddy)
+            .map(|object| object.id)
+            .collect();
+
+        for fox_id in fox_ids {
+            let Some(fox_snapshot) = objects.iter().find(|object| object.id == fox_id) else {
+                continue;
+            };
+            if self.drag_controller.dragged_id() == Some(fox_id) || fox_snapshot.is_dragging {
+                continue;
+            }
+
+            let fox_center = Vector2::new(
+                fox_snapshot.body.position.x + fox_snapshot.body.width * 0.5,
+                fox_snapshot.body.position.y + fox_snapshot.body.height * 0.5,
+            );
+            let nearest = objects
+                .iter()
+                .filter(|object| object.id != fox_id && object.body.collidable && object.visual_kind != ObjectVisualKind::FoxBuddy)
+                .map(|object| {
+                    let center = Vector2::new(
+                        object.body.position.x + object.body.width * 0.5,
+                        object.body.position.y + object.body.height * 0.5,
+                    );
+                    (center, (center - fox_center).length_squared())
+                })
+                .filter(|(_, distance)| *distance < 620.0 * 620.0)
+                .min_by(|(_, left), (_, right)| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+
+            let patrol = ((self.frame_clock.elapsed_seconds * 0.42 + fox_id as f64 * 0.11).sin() as f32).signum();
+            let target_x = nearest.map(|(center, _)| center.x).unwrap_or(fox_center.x + patrol * 220.0);
+            let direction = (target_x - fox_center.x).clamp(-1.0, 1.0);
+            let speed = if nearest.is_some() { 118.0 } else { 76.0 };
+            let floor_y = bounds.bottom() - FLOOR_MARGIN_PIXELS - fox_snapshot.body.height;
+
+            if let Some(fox) = self.scene.objects_mut().iter_mut().find(|object| object.id == fox_id) {
+                fox.body.is_dragging = true;
+                fox.is_dragging = false;
+                fox.body.is_sleeping = false;
+                fox.body.velocity = Vector2::new(direction * speed, 0.0);
+                fox.body.position.x = (fox.body.position.x + fox.body.velocity.x * dt).clamp(12.0, bounds.right() - fox.body.width - 12.0);
+                if fox.body.position.y > floor_y - 4.0 {
+                    fox.body.position.y = floor_y;
+                }
+                fox.rotation_z = (direction as f64 * -4.0) + (self.frame_clock.elapsed_seconds * 5.5).sin() * 1.5;
+            }
+        }
     }
 
     fn toggle_slingshot_game(&mut self) {
