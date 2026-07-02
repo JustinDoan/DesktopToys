@@ -145,6 +145,7 @@ pub enum ObjectVisualKind {
 pub enum CollisionShape {
     Box,
     Circle,
+    Diamond,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

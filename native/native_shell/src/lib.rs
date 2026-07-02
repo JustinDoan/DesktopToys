@@ -10,7 +10,7 @@ use core_foundation::{
     string::{CFString, CFStringRef},
 };
 #[cfg(not(target_os = "macos"))]
-use device_query::DeviceState;
+use device_query::{DeviceState, Keycode};
 #[cfg(not(target_os = "macos"))]
 use device_query::DeviceQuery;
 #[cfg(not(target_os = "macos"))]
@@ -33,13 +33,23 @@ use tray_icon::{
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize, Position, Size},
     error::ExternalError,
-    monitor::MonitorHandle,
     raw_window_handle::{HasWindowHandle, RawWindowHandle},
     window::{Window, WindowAttributes, WindowLevel},
 };
+#[cfg(target_os = "macos")]
+use winit::monitor::MonitorHandle;
 
 #[cfg(target_os = "linux")]
 use winit::platform::x11::WindowAttributesExtX11;
+#[cfg(target_os = "windows")]
+use windows::Win32::{
+    Foundation::HWND,
+    UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOMOVE,
+        SWP_NOSIZE, SWP_NOZORDER, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        WS_EX_TRANSPARENT,
+    },
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverlayInputMode {
@@ -53,6 +63,7 @@ pub struct GlobalPointerState {
     pub local_position: Vector2,
     pub left_down: bool,
     pub right_down: bool,
+    pub spawn_stress_down: bool,
 }
 
 pub fn overlay_window_attributes(title: &str, bounds: RectF) -> WindowAttributes {
@@ -60,13 +71,15 @@ pub fn overlay_window_attributes(title: &str, bounds: RectF) -> WindowAttributes
         .with_title(title)
         .with_decorations(false)
         .with_resizable(false)
-        .with_transparent(true)
         .with_position(Position::Physical(PhysicalPosition::new(bounds.x as i32, bounds.y as i32)))
         .with_inner_size(Size::Physical(PhysicalSize::new(
             bounds.width.max(1.0) as u32,
             bounds.height.max(1.0) as u32,
         )))
         .with_window_level(WindowLevel::AlwaysOnTop);
+
+    #[cfg(not(target_os = "windows"))]
+    let attributes = attributes.with_transparent(true);
 
     #[cfg(target_os = "linux")]
     let attributes = attributes.with_override_redirect(true);
@@ -137,8 +150,41 @@ pub fn configure_overlay_window(window: &Window) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 pub fn configure_overlay_window(_window: &Window) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub fn configure_overlay_window(window: &Window) -> Result<()> {
+    let handle = window
+        .window_handle()
+        .map_err(|error| anyhow::anyhow!("Failed to access native window handle: {error}"))?;
+    let RawWindowHandle::Win32(win32) = handle.as_raw() else {
+        return Ok(());
+    };
+
+    let hwnd = HWND(win32.hwnd.get() as isize);
+    unsafe {
+        let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let next_ex_style = (ex_style
+            | WS_EX_LAYERED.0 as isize
+            | WS_EX_NOACTIVATE.0 as isize
+            | WS_EX_TRANSPARENT.0 as isize
+            | WS_EX_TOOLWINDOW.0 as isize)
+            & !(WS_EX_APPWINDOW.0 as isize);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, next_ex_style);
+        SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+        )?;
+    }
+
     Ok(())
 }
 
@@ -205,6 +251,7 @@ impl GlobalInputPoller {
                 local_position: Vector2::new(cursor.2, cursor.3),
                 left_down: Mouse::Left.is_pressed(),
                 right_down: Mouse::Right.is_pressed(),
+                spawn_stress_down: false,
             });
         }
 
@@ -212,6 +259,8 @@ impl GlobalInputPoller {
         {
             let mouse = std::panic::catch_unwind(AssertUnwindSafe(|| self.device_state.get_mouse()))
                 .map_err(|_| anyhow::anyhow!("Global mouse access requires OS accessibility permissions."))?;
+            let keys = std::panic::catch_unwind(AssertUnwindSafe(|| self.device_state.get_keys()))
+                .map_err(|_| anyhow::anyhow!("Global keyboard access requires OS accessibility permissions."))?;
             let local_x = (mouse.coords.0 as f32 - bounds.x).clamp(0.0, bounds.width.max(1.0));
             let local_y = (mouse.coords.1 as f32 - bounds.y).clamp(0.0, bounds.height.max(1.0));
 
@@ -220,6 +269,7 @@ impl GlobalInputPoller {
                 local_position: Vector2::new(local_x, local_y),
                 left_down: *mouse.button_pressed.get(1).unwrap_or(&false),
                 right_down: *mouse.button_pressed.get(3).unwrap_or(&false),
+                spawn_stress_down: keys.contains(&Keycode::F9),
             })
         }
     }
@@ -329,6 +379,7 @@ pub enum TrayAction {
     SpawnObject,
     SpawnCrystal,
     SpawnDvdLogo,
+    SpawnStressCubes,
     Reset,
     ToggleSettings,
     ImportModel,
@@ -341,6 +392,7 @@ pub struct TrayController {
     spawn_object: MenuItem,
     spawn_crystal: MenuItem,
     spawn_dvd_logo: MenuItem,
+    spawn_stress_cubes: MenuItem,
     reset: MenuItem,
     toggle_settings: MenuItem,
     import_model: MenuItem,
@@ -354,6 +406,7 @@ impl TrayController {
         let spawn_object = MenuItem::new("Spawn Object (F2)", true, None);
         let spawn_crystal = MenuItem::new("Spawn Crystal (F7)", true, None);
         let spawn_dvd_logo = MenuItem::new("Spawn DVD Logo (F8)", true, None);
+        let spawn_stress_cubes = MenuItem::new("Spawn Stress Cubes (F9)", true, None);
         let reset = MenuItem::new("Reset (F3)", true, None);
         let toggle_settings = MenuItem::new("Settings (F4)", true, None);
         let import_model = MenuItem::new("Import Model (F6)", true, None);
@@ -364,6 +417,7 @@ impl TrayController {
             &spawn_object,
             &spawn_crystal,
             &spawn_dvd_logo,
+            &spawn_stress_cubes,
             &reset,
             &toggle_settings,
             &import_model,
@@ -383,6 +437,7 @@ impl TrayController {
             spawn_object,
             spawn_crystal,
             spawn_dvd_logo,
+            spawn_stress_cubes,
             reset,
             toggle_settings,
             import_model,
@@ -403,6 +458,8 @@ impl TrayController {
             Some(TrayAction::SpawnCrystal)
         } else if event.id == self.spawn_dvd_logo.id() {
             Some(TrayAction::SpawnDvdLogo)
+        } else if event.id == self.spawn_stress_cubes.id() {
+            Some(TrayAction::SpawnStressCubes)
         } else if event.id == self.reset.id() {
             Some(TrayAction::Reset)
         } else if event.id == self.toggle_settings.id() {

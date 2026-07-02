@@ -13,16 +13,9 @@ const CUBE_PALETTE: [AppColor; 5] = [
 ];
 
 const DEFAULT_OBJECT_SIZE: f32 = 132.0;
-const INITIAL_OBJECT_SPACING: f32 = 156.0;
-
-const INITIAL_SCENE: [InitialObjectSpec; 6] = [
-    InitialObjectSpec::new(0.00, 0.0, ObjectVisualKind::Cube, None),
-    InitialObjectSpec::new(1.00, 14.0, ObjectVisualKind::Crystal, Some(AppColor::from_rgb(108, 241, 255))),
-    InitialObjectSpec::new(2.00, 28.0, ObjectVisualKind::Satellite, Some(AppColor::from_rgb(88, 160, 255))),
-    InitialObjectSpec::new(3.00, 42.0, ObjectVisualKind::Cube, None),
-    InitialObjectSpec::new(1.80, -126.0, ObjectVisualKind::Dice, Some(AppColor::from_rgb(245, 245, 240))),
-    InitialObjectSpec::new(2.85, -92.0, ObjectVisualKind::Crystal, Some(AppColor::from_rgb(255, 112, 214))),
-];
+const STARTUP_CUBE_COUNT: usize = 100;
+const STARTUP_CUBE_COLUMNS: usize = 10;
+const STARTUP_CUBE_SIZE: f32 = DEFAULT_OBJECT_SIZE * 0.2;
 
 const SPAWN_CATALOG: [SpawnSpec; 6] = [
     SpawnSpec::new(ObjectVisualKind::Cube, None),
@@ -32,25 +25,6 @@ const SPAWN_CATALOG: [SpawnSpec; 6] = [
     SpawnSpec::new(ObjectVisualKind::Dice, Some(AppColor::from_rgb(245, 245, 240))),
     SpawnSpec::new(ObjectVisualKind::Crystal, Some(AppColor::from_rgb(255, 112, 214))),
 ];
-
-#[derive(Clone, Copy, Debug)]
-struct InitialObjectSpec {
-    x_factor: f32,
-    y_offset: f32,
-    visual_kind: ObjectVisualKind,
-    color: Option<AppColor>,
-}
-
-impl InitialObjectSpec {
-    const fn new(x_factor: f32, y_offset: f32, visual_kind: ObjectVisualKind, color: Option<AppColor>) -> Self {
-        Self {
-            x_factor,
-            y_offset,
-            visual_kind,
-            color,
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug)]
 struct SpawnSpec {
@@ -87,7 +61,7 @@ impl Default for FrameClock {
 impl FrameClock {
     pub fn tick(&mut self) {
         let now = Instant::now();
-        self.delta_time_seconds = (now - self.last_tick).as_secs_f32().clamp(1.0 / 240.0, 1.0 / 20.0);
+        self.delta_time_seconds = (now - self.last_tick).as_secs_f32().min(1.0 / 20.0);
         self.elapsed_seconds = (now - self.started_at).as_secs_f64();
         self.last_tick = now;
     }
@@ -211,6 +185,16 @@ fn contains_point(body: &PhysicsBody, point: Vector2) -> bool {
         return (delta_x * delta_x) + (delta_y * delta_y) <= radius * radius;
     }
 
+    if body.shape == CollisionShape::Diamond {
+        let half_width = body.width * 0.34 * body.collision_scale;
+        let half_height = body.height * 0.5 * body.collision_scale;
+        let center_x = body.position.x + (body.width * 0.5);
+        let center_y = body.position.y + (body.height * 0.5);
+        let normalized_x = (point.x - center_x).abs() / half_width.max(1.0);
+        let normalized_y = (point.y - center_y).abs() / half_height.max(1.0);
+        return normalized_x + normalized_y <= 1.0;
+    }
+
     RectF::new(body.position.x, body.position.y, body.width, body.height).contains(point)
 }
 
@@ -219,6 +203,7 @@ pub struct DragController {
     mouse_tracker: MouseTracker,
     dragged_id: Option<u64>,
     cursor_offset: Vector2,
+    last_drag_update_seconds: f64,
 }
 
 impl DragController {
@@ -227,6 +212,7 @@ impl DragController {
             mouse_tracker: MouseTracker::new(sample_capacity),
             dragged_id: None,
             cursor_offset: Vector2::ZERO,
+            last_drag_update_seconds: 0.0,
         }
     }
 
@@ -258,6 +244,7 @@ impl DragController {
         object.body.sleep_timer_seconds = 0.0;
         object.body.velocity = Vector2::ZERO;
         self.cursor_offset = cursor - object.body.position;
+        self.last_drag_update_seconds = now_seconds;
 
         self.mouse_tracker.clear();
         self.mouse_tracker.add_sample(cursor, now_seconds);
@@ -271,7 +258,14 @@ impl DragController {
 
         self.mouse_tracker.add_sample(cursor, now_seconds);
         if let Some(object) = objects.iter_mut().find(|object| object.id == dragged_id) {
-            object.body.position = cursor - self.cursor_offset;
+            let previous_position = object.body.position;
+            let next_position = cursor - self.cursor_offset;
+            let elapsed = (now_seconds - self.last_drag_update_seconds).max(1.0 / 240.0) as f32;
+            object.body.velocity = (next_position - previous_position) / elapsed;
+            object.body.position = next_position;
+            object.body.is_sleeping = false;
+            object.body.sleep_timer_seconds = 0.0;
+            self.last_drag_update_seconds = now_seconds;
         }
     }
 
@@ -349,7 +343,6 @@ impl SceneController {
         self.next_cube_color_index = 0;
         self.next_spawn_catalog_index = 0;
         self.spawn_initial_objects(bounds);
-        self.spawn_dvd_logo(bounds);
     }
 
     pub fn set_gravity(&mut self, gravity_y: f32) {
@@ -375,7 +368,45 @@ impl SceneController {
         self.spawn_object(position, Some(random_logo_color()), ObjectVisualKind::DvdLogo)
     }
 
+    pub fn spawn_small_cube_batch(&mut self, center: Vector2, count: usize) -> Option<u64> {
+        if count == 0 {
+            return None;
+        }
+
+        let columns = (count as f32).sqrt().ceil().max(1.0) as usize;
+        let spacing = STARTUP_CUBE_SIZE * 1.35;
+        let rows = count.div_ceil(columns);
+        let total_width = (columns as f32 - 1.0) * spacing + STARTUP_CUBE_SIZE;
+        let total_height = (rows as f32 - 1.0) * spacing + STARTUP_CUBE_SIZE;
+        let start_x = center.x - (total_width * 0.5);
+        let start_y = center.y - (total_height * 0.5);
+        let mut last_id = None;
+
+        for index in 0..count {
+            let column = index % columns;
+            let row = index / columns;
+            let stagger = if row % 2 == 0 { 0.0 } else { spacing * 0.5 };
+            let position = Vector2::new(
+                start_x + (column as f32 * spacing) + stagger,
+                start_y + (row as f32 * spacing),
+            );
+            last_id = Some(self.spawn_object_with_size(position, None, ObjectVisualKind::Cube, STARTUP_CUBE_SIZE));
+        }
+
+        last_id
+    }
+
     pub fn spawn_object(&mut self, position: Vector2, color: Option<AppColor>, visual_kind: ObjectVisualKind) -> u64 {
+        self.spawn_object_with_size(position, color, visual_kind, DEFAULT_OBJECT_SIZE)
+    }
+
+    fn spawn_object_with_size(
+        &mut self,
+        position: Vector2,
+        color: Option<AppColor>,
+        visual_kind: ObjectVisualKind,
+        base_size: f32,
+    ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -388,11 +419,11 @@ impl SceneController {
         };
 
         if visual_kind == ObjectVisualKind::DvdLogo {
-            state.body.width = DEFAULT_OBJECT_SIZE * 1.7;
-            state.body.height = DEFAULT_OBJECT_SIZE * 0.78;
+            state.body.width = base_size * 1.7;
+            state.body.height = base_size * 0.78;
         } else {
-            state.body.width = DEFAULT_OBJECT_SIZE;
-            state.body.height = DEFAULT_OBJECT_SIZE;
+            state.body.width = base_size;
+            state.body.height = base_size;
         }
         state.body.position = position;
         state.body.mass = 1.0;
@@ -412,11 +443,11 @@ impl SceneController {
             1.0
         };
         state.body.shape = if visual_kind == ObjectVisualKind::Crystal {
-            CollisionShape::Circle
+            CollisionShape::Diamond
         } else {
             CollisionShape::Box
         };
-        state.body.collision_scale = if visual_kind == ObjectVisualKind::Crystal { 0.82 } else { 1.0 };
+        state.body.collision_scale = 1.0;
         if visual_kind == ObjectVisualKind::DvdLogo {
             state.body.velocity = Vector2::new(420.0, 260.0);
         }
@@ -463,7 +494,6 @@ impl SceneController {
         self.next_cube_color_index = 0;
         self.next_spawn_catalog_index = 0;
         self.spawn_initial_objects(bounds);
-        self.spawn_dvd_logo(bounds);
     }
 
     pub fn apply_runtime_physics_config(&mut self) {
@@ -474,27 +504,21 @@ impl SceneController {
     }
 
     fn spawn_initial_objects(&mut self, bounds: RectF) {
-        let start_x = bounds.width * 0.32;
-        let spacing = INITIAL_OBJECT_SPACING;
-        let start_y = bounds.height * 0.14;
+        let spacing = STARTUP_CUBE_SIZE * 1.35;
+        let total_width = (STARTUP_CUBE_COLUMNS as f32 - 1.0) * spacing + STARTUP_CUBE_SIZE;
+        let start_x = ((bounds.width - total_width) * 0.5).max(12.0);
+        let start_y = (bounds.height * 0.10).max(12.0);
 
-        for spec in INITIAL_SCENE {
-            self.spawn_object(
-                Vector2::new(start_x + (spacing * spec.x_factor), start_y + spec.y_offset),
-                spec.color,
-                spec.visual_kind,
+        for index in 0..STARTUP_CUBE_COUNT {
+            let column = index % STARTUP_CUBE_COLUMNS;
+            let row = index / STARTUP_CUBE_COLUMNS;
+            let stagger = if row % 2 == 0 { 0.0 } else { spacing * 0.5 };
+            let position = Vector2::new(
+                start_x + (column as f32 * spacing) + stagger,
+                start_y + (row as f32 * spacing),
             );
+            self.spawn_object_with_size(position, None, ObjectVisualKind::Cube, STARTUP_CUBE_SIZE);
         }
-    }
-
-    fn spawn_dvd_logo(&mut self, bounds: RectF) {
-        let logo_width = DEFAULT_OBJECT_SIZE * 1.7;
-        let logo_height = DEFAULT_OBJECT_SIZE * 0.78;
-        let centered = Vector2::new(
-            ((bounds.width - logo_width) * 0.5).max(12.0),
-            ((bounds.height - logo_height) * 0.5).max(12.0),
-        );
-        let _ = self.spawn_object(centered, Some(AppColor::from_rgb(244, 78, 255)), ObjectVisualKind::DvdLogo);
     }
 
     fn next_cube_color(&mut self) -> AppColor {

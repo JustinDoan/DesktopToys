@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs::File, io::BufReader, path::Path};
+use std::{collections::HashMap, fs::File, io::BufReader, mem, path::Path};
 
 use anyhow::{bail, Context, Result};
 use core_types::{AppColor, ObjectState, ObjectVisualKind, RectF, Vector2};
@@ -40,7 +40,18 @@ pub struct GpuVertex {
 
 #[derive(Default)]
 pub struct SceneRenderer {
+    generated_models: HashMap<MeshCacheKey, Mesh>,
     imported_models: HashMap<String, Mesh>,
+    vertices: Vec<GpuVertex>,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct MeshCacheKey {
+    kind: u8,
+    width_milli: i32,
+    height_milli: i32,
+    size_milli: i32,
+    color: AppColor,
 }
 
 #[derive(Clone, Debug)]
@@ -59,7 +70,6 @@ struct SourceTriangle {
 struct DrawTriangle {
     points: [Vec3; 3],
     color: AppColor,
-    depth: f32,
     alpha: u8,
 }
 
@@ -93,54 +103,105 @@ impl SceneRenderer {
         Self::default()
     }
 
-    pub fn build_vertices(&mut self, width: u32, height: u32, scene: &RenderScene<'_>) -> Result<Vec<GpuVertex>> {
-        let mut triangles = Vec::new();
+    pub fn build_vertices(&mut self, width: u32, height: u32, scene: &RenderScene<'_>) -> Result<&[GpuVertex]> {
+        let mut vertices = mem::take(&mut self.vertices);
+        vertices.clear();
+        vertices.reserve(scene.objects.len() * 36 + 4096);
         for object in scene.objects {
             let mesh = self.mesh_for_object(object)?;
             let transform = compute_visual_transform(object, scene.bounds, scene.elapsed_seconds);
             for triangle in &mesh.triangles {
-                triangles.push(transform_triangle(*triangle, transform, scene.elapsed_seconds));
+                emit_draw_triangle(
+                    &mut vertices,
+                    transform_triangle(*triangle, transform, scene.elapsed_seconds),
+                );
             }
         }
 
-        triangles.sort_by(|left, right| left.depth.partial_cmp(&right.depth).unwrap_or(std::cmp::Ordering::Equal));
-
-        let mut vertices = Vec::with_capacity(triangles.len() * 3 + 4096);
-        for triangle in triangles {
-            emit_draw_triangle(&mut vertices, width, height, triangle);
-        }
-
-        emit_bouncing_dvd_logo(&mut vertices, width, height, scene.bounds, scene.elapsed_seconds);
         emit_cursor(&mut vertices, width, height, scene.cursor);
         emit_panels(&mut vertices, width, height, scene.hud);
-        Ok(vertices)
+        self.vertices = vertices;
+        Ok(&self.vertices)
     }
 
-    fn mesh_for_object(&mut self, object: &ObjectState) -> Result<Mesh> {
+    fn mesh_for_object(&mut self, object: &ObjectState) -> Result<&Mesh> {
         let size = object.body.width.min(object.body.height).max(1.0);
-        Ok(match object.visual_kind {
-            ObjectVisualKind::Cube => cube_mesh(size, object.base_color),
-            ObjectVisualKind::Dice => dice_mesh(size),
-            ObjectVisualKind::Crystal => crystal_mesh(size, object.base_color),
-            ObjectVisualKind::Satellite => satellite_mesh(size, object.base_color),
-            ObjectVisualKind::DvdLogo => dvd_logo_mesh(object.body.width.max(1.0), object.body.height.max(1.0), object.base_color),
-            ObjectVisualKind::ImportedModel => match object.model_source_path.as_deref() {
-                Some(path) => self.imported_model_mesh(path, size, object.base_color)?,
-                None => cube_mesh(size, object.base_color),
-            },
-        })
-    }
-
-    fn imported_model_mesh(&mut self, path: &str, target_size: f32, tint: AppColor) -> Result<Mesh> {
-        let cache_key = format!("{path}|{target_size:.3}");
-        if let Some(mesh) = self.imported_models.get(&cache_key) {
-            return Ok(tint_mesh(mesh.clone(), tint));
+        if object.visual_kind == ObjectVisualKind::ImportedModel {
+            return match object.model_source_path.as_deref() {
+                Some(path) => self.imported_model_mesh(path, size, object.base_color),
+                None => self.generated_mesh(MeshCacheKey::for_object(object), || cube_mesh(size, object.base_color)),
+            };
         }
 
-        let imported = load_mesh(path, target_size)?;
-        self.imported_models.insert(cache_key, imported.clone());
-        Ok(tint_mesh(imported, tint))
+        let key = MeshCacheKey::for_object(object);
+        match object.visual_kind {
+            ObjectVisualKind::Cube => self.generated_mesh(key, || cube_mesh(size, object.base_color)),
+            ObjectVisualKind::Dice => self.generated_mesh(key, || dice_mesh(size)),
+            ObjectVisualKind::Crystal => self.generated_mesh(key, || crystal_mesh(size, object.base_color)),
+            ObjectVisualKind::Satellite => self.generated_mesh(key, || satellite_mesh(size, object.base_color)),
+            ObjectVisualKind::DvdLogo => self.generated_mesh(key, || {
+                dvd_logo_mesh(object.body.width.max(1.0), object.body.height.max(1.0), object.base_color)
+            }),
+            ObjectVisualKind::ImportedModel => unreachable!(),
+        }
     }
+
+    fn generated_mesh(&mut self, key: MeshCacheKey, create: impl FnOnce() -> Mesh) -> Result<&Mesh> {
+        if !self.generated_models.contains_key(&key) {
+            self.generated_models.insert(key, create());
+        }
+
+        Ok(self
+            .generated_models
+            .get(&key)
+            .expect("generated mesh cache should contain inserted key"))
+    }
+
+    fn imported_model_mesh(&mut self, path: &str, target_size: f32, tint: AppColor) -> Result<&Mesh> {
+        let cache_key = format!(
+            "{path}|{target_size:.3}|{:02x}{:02x}{:02x}{:02x}",
+            tint.a, tint.r, tint.g, tint.b
+        );
+        if !self.imported_models.contains_key(&cache_key) {
+            let imported = load_mesh(path, target_size)?;
+            self.imported_models.insert(cache_key.clone(), tint_mesh(imported, tint));
+        }
+
+        Ok(self
+            .imported_models
+            .get(&cache_key)
+            .expect("imported mesh cache should contain inserted key"))
+    }
+}
+
+impl MeshCacheKey {
+    fn for_object(object: &ObjectState) -> Self {
+        let size = object.body.width.min(object.body.height).max(1.0);
+        Self {
+            kind: match object.visual_kind {
+                ObjectVisualKind::Cube => 0,
+                ObjectVisualKind::Dice => 1,
+                ObjectVisualKind::Crystal => 2,
+                ObjectVisualKind::Satellite => 3,
+                ObjectVisualKind::DvdLogo => 4,
+                ObjectVisualKind::ImportedModel => 5,
+            },
+            width_milli: quantize_size(object.body.width.max(1.0)),
+            height_milli: quantize_size(object.body.height.max(1.0)),
+            size_milli: quantize_size(size),
+            color: object.base_color,
+        }
+    }
+}
+
+fn quantize_size(value: f32) -> i32 {
+    (value * 1000.0).round() as i32
+}
+
+const SCREEN_OVERLAY_Z: f32 = 900.0;
+
+fn screen_overlay_z(layer: f32) -> f32 {
+    SCREEN_OVERLAY_Z + layer.clamp(-16.0, 16.0)
 }
 
 fn emit_panels(vertices: &mut Vec<GpuVertex>, width: u32, height: u32, hud: &HudState) {
@@ -279,111 +340,11 @@ fn emit_cursor(vertices: &mut Vec<GpuVertex>, width: u32, height: u32, cursor: V
     );
 }
 
-fn emit_bouncing_dvd_logo(vertices: &mut Vec<GpuVertex>, width: u32, height: u32, bounds: RectF, elapsed_seconds: f64) {
-    let area_width = bounds.width.max(1.0);
-    let area_height = bounds.height.max(1.0);
-    let logo_width = (area_width * 0.2).clamp(170.0, 320.0).round() as i32;
-    let logo_height = (logo_width as f32 * 0.46).round() as i32;
-    let max_x = (area_width.round() as i32 - logo_width).max(0);
-    let max_y = (area_height.round() as i32 - logo_height).max(0);
-    let x = bounce_position(elapsed_seconds, 290.0, max_x);
-    let y = bounce_position(elapsed_seconds + 0.83, 210.0, max_y);
-
-    let pulse = (elapsed_seconds * 2.2).sin() as f32;
-    let accent = AppColor::from_rgb(
-        (166.0 + pulse * 72.0).round().clamp(0.0, 255.0) as u8,
-        (140.0 + (elapsed_seconds * 2.9).sin() as f32 * 84.0)
-            .round()
-            .clamp(0.0, 255.0) as u8,
-        (210.0 + (elapsed_seconds * 2.5).cos() as f32 * 44.0)
-            .round()
-            .clamp(0.0, 255.0) as u8,
-    );
-    let body = scale_color(accent, 0.25);
-    let depth = -1018.0;
-
-    emit_rect(
-        vertices,
-        width,
-        height,
-        x + 4,
-        y + 4,
-        logo_width,
-        logo_height,
-        AppColor::from_argb(180, 0, 0, 0),
-        depth + 1.0,
-    );
-    emit_rect(vertices, width, height, x, y, logo_width, logo_height, body, depth);
-    emit_rect_outline(vertices, width, height, x, y, logo_width, logo_height, accent, depth - 1.0);
-    emit_rect(
-        vertices,
-        width,
-        height,
-        x + 4,
-        y + 4,
-        (logo_width - 8).max(1),
-        (logo_height / 3).max(1),
-        AppColor::from_argb(95, 255, 255, 255),
-        depth - 2.0,
-    );
-
-    let logo_text = "DVD";
-    let subtitle_text = "VIDEO";
-    let logo_scale = 3;
-    let subtitle_scale = 1;
-    let logo_text_width = logo_text.chars().count() as i32 * 8 * logo_scale;
-    let subtitle_text_width = subtitle_text.chars().count() as i32 * 8 * subtitle_scale;
-    let logo_x = x + ((logo_width - logo_text_width) / 2).max(0);
-    let subtitle_x = x + ((logo_width - subtitle_text_width) / 2).max(0);
-    let logo_y = y + ((logo_height - (8 * logo_scale + 8 * subtitle_scale + 4)) / 2).max(0);
-    let subtitle_y = logo_y + (8 * logo_scale) + 4;
-
-    emit_text(
-        vertices,
-        width,
-        height,
-        logo_x,
-        logo_y,
-        logo_text,
-        AppColor::from_rgb(255, 255, 255),
-        logo_scale,
-        depth - 3.0,
-    );
-    emit_text(
-        vertices,
-        width,
-        height,
-        subtitle_x,
-        subtitle_y,
-        subtitle_text,
-        AppColor::from_rgb(255, 255, 255),
-        subtitle_scale,
-        depth - 3.0,
-    );
-}
-
-fn bounce_position(elapsed_seconds: f64, speed_pixels_per_second: f64, max_position: i32) -> i32 {
-    if max_position <= 0 {
-        return 0;
-    }
-
-    let span = max_position as f64;
-    let cycle = span * 2.0;
-    let distance = (elapsed_seconds * speed_pixels_per_second).rem_euclid(cycle);
-    let position = if distance <= span {
-        distance
-    } else {
-        cycle - distance
-    };
-
-    position.round() as i32
-}
-
-fn emit_draw_triangle(vertices: &mut Vec<GpuVertex>, width: u32, height: u32, triangle: DrawTriangle) {
+fn emit_draw_triangle(vertices: &mut Vec<GpuVertex>, triangle: DrawTriangle) {
     let color = color_to_f32(triangle.color, triangle.alpha);
     for point in triangle.points {
         vertices.push(GpuVertex {
-            position: to_ndc(point.x, point.y, depth_to_ndc(triangle.depth), width, height),
+            position: [point.x, point.y, point.z],
             color,
         });
     }
@@ -391,8 +352,8 @@ fn emit_draw_triangle(vertices: &mut Vec<GpuVertex>, width: u32, height: u32, tr
 
 fn emit_rect(
     vertices: &mut Vec<GpuVertex>,
-    width: u32,
-    height: u32,
+    _width: u32,
+    _height: u32,
     x: i32,
     y: i32,
     w: i32,
@@ -404,26 +365,23 @@ fn emit_rect(
     let top = y as f32;
     let right = (x + w) as f32;
     let bottom = (y + h) as f32;
-    let p0 = Vec3::new(left, top, depth);
-    let p1 = Vec3::new(right, top, depth);
-    let p2 = Vec3::new(right, bottom, depth);
-    let p3 = Vec3::new(left, bottom, depth);
+    let z = screen_overlay_z(depth);
+    let p0 = Vec3::new(left, top, z);
+    let p1 = Vec3::new(right, top, z);
+    let p2 = Vec3::new(right, bottom, z);
+    let p3 = Vec3::new(left, bottom, z);
     let alpha = color.a;
     let draw = DrawTriangle {
         points: [p0, p1, p2],
         color,
-        depth,
         alpha,
     };
-    emit_draw_triangle(vertices, width, height, draw);
+    emit_draw_triangle(vertices, draw);
     emit_draw_triangle(
         vertices,
-        width,
-        height,
         DrawTriangle {
             points: [p0, p2, p3],
             color,
-            depth,
             alpha,
         },
     );
@@ -498,18 +456,6 @@ fn color_to_f32(color: AppColor, alpha_override: u8) -> [f32; 4] {
     ]
 }
 
-fn to_ndc(x: f32, y: f32, z: f32, width: u32, height: u32) -> [f32; 3] {
-    let w = width.max(1) as f32;
-    let h = height.max(1) as f32;
-    let ndc_x = (x / w) * 2.0 - 1.0;
-    let ndc_y = 1.0 - (y / h) * 2.0;
-    [ndc_x, ndc_y, z]
-}
-
-fn depth_to_ndc(depth: f32) -> f32 {
-    ((depth + 1024.0) / 2048.0).clamp(0.0, 1.0)
-}
-
 fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds: f64) -> VisualTransform {
     let center_x = object.body.position.x + (object.body.width * 0.5);
     let center_y = object.body.position.y + (object.body.height * 0.5);
@@ -576,12 +522,10 @@ fn get_phase(id: u64) -> f64 {
 fn transform_triangle(source: SourceTriangle, transform: VisualTransform, elapsed_seconds: f64) -> DrawTriangle {
     let _ = elapsed_seconds;
     let points = source.vertices.map(|vertex| project_vertex(vertex, transform));
-    let depth = (points[0].z + points[1].z + points[2].z) / 3.0;
 
     DrawTriangle {
         points,
         color: source.color,
-        depth,
         alpha: source.alpha,
     }
 }
@@ -645,50 +589,50 @@ fn cube_mesh(size: f32, base_color: AppColor) -> Mesh {
 fn dice_mesh(size: f32) -> Mesh {
     let mut mesh = cube_mesh(size, AppColor::from_rgb(245, 245, 240));
     let hs = size * 0.5;
-    let pip_half = size * 0.065;
-    let pip_inset = size * 0.045;
+    let pip_radius = size * 0.07;
+    let pip_surface_offset = size * 0.006;
     let pip_offset = size * 0.22;
     let pip_color = AppColor::from_rgb(42, 48, 58);
 
     add_z_face_pips(
         &mut mesh.triangles,
-        hs - pip_inset,
-        pip_half,
+        hs + pip_surface_offset,
+        pip_radius,
         pip_color,
         &[(-pip_offset, -pip_offset), (pip_offset, pip_offset)],
     );
     add_z_face_pips(
         &mut mesh.triangles,
-        -hs + pip_inset,
-        pip_half,
+        -hs - pip_surface_offset,
+        pip_radius,
         pip_color,
         &[(-pip_offset, -pip_offset), (pip_offset, -pip_offset), (0.0, 0.0), (-pip_offset, pip_offset), (pip_offset, pip_offset)],
     );
     add_x_face_pips(
         &mut mesh.triangles,
-        hs - pip_inset,
-        pip_half,
+        hs + pip_surface_offset,
+        pip_radius,
         pip_color,
         &[(-pip_offset, -pip_offset), (pip_offset, 0.0), (-pip_offset, pip_offset)],
     );
     add_x_face_pips(
         &mut mesh.triangles,
-        -hs + pip_inset,
-        pip_half,
+        -hs - pip_surface_offset,
+        pip_radius,
         pip_color,
         &[(-pip_offset, -pip_offset), (pip_offset, -pip_offset), (-pip_offset, pip_offset), (pip_offset, pip_offset)],
     );
     add_y_face_pips(
         &mut mesh.triangles,
-        -hs + pip_inset,
-        pip_half,
+        -hs - pip_surface_offset,
+        pip_radius,
         pip_color,
         &[(0.0, 0.0)],
     );
     add_y_face_pips(
         &mut mesh.triangles,
-        hs - pip_inset,
-        pip_half,
+        hs + pip_surface_offset,
+        pip_radius,
         pip_color,
         &[(-pip_offset, -pip_offset), (pip_offset, -pip_offset), (-pip_offset, 0.0), (pip_offset, 0.0), (-pip_offset, pip_offset), (pip_offset, pip_offset)],
     );
@@ -699,75 +643,94 @@ fn dice_mesh(size: f32) -> Mesh {
 fn add_z_face_pips(
     triangles: &mut Vec<SourceTriangle>,
     pip_z: f32,
-    pip_half: f32,
+    pip_radius: f32,
     color: AppColor,
     positions: &[(f32, f32)],
 ) {
     for &(center_x, center_y) in positions {
-        let p0 = Vec3::new(center_x - pip_half, center_y - pip_half, pip_z);
-        let p1 = Vec3::new(center_x + pip_half, center_y - pip_half, pip_z);
-        let p2 = Vec3::new(center_x + pip_half, center_y + pip_half, pip_z);
-        let p3 = Vec3::new(center_x - pip_half, center_y + pip_half, pip_z);
-        extend_face_quad(triangles, [p0, p1, p2, p3], color, pip_z >= 0.0);
+        add_disk(
+            triangles,
+            Vec3::new(center_x, center_y, pip_z),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            pip_radius,
+            color,
+            pip_z >= 0.0,
+        );
     }
 }
 
 fn add_x_face_pips(
     triangles: &mut Vec<SourceTriangle>,
     pip_x: f32,
-    pip_half: f32,
+    pip_radius: f32,
     color: AppColor,
     positions: &[(f32, f32)],
 ) {
     for &(center_z, center_y) in positions {
-        let p0 = Vec3::new(pip_x, center_y - pip_half, center_z - pip_half);
-        let p1 = Vec3::new(pip_x, center_y - pip_half, center_z + pip_half);
-        let p2 = Vec3::new(pip_x, center_y + pip_half, center_z + pip_half);
-        let p3 = Vec3::new(pip_x, center_y + pip_half, center_z - pip_half);
-        extend_face_quad(triangles, [p0, p1, p2, p3], color, pip_x < 0.0);
+        add_disk(
+            triangles,
+            Vec3::new(pip_x, center_y, center_z),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            pip_radius,
+            color,
+            pip_x < 0.0,
+        );
     }
 }
 
 fn add_y_face_pips(
     triangles: &mut Vec<SourceTriangle>,
     pip_y: f32,
-    pip_half: f32,
+    pip_radius: f32,
     color: AppColor,
     positions: &[(f32, f32)],
 ) {
     for &(center_x, center_z) in positions {
-        let p0 = Vec3::new(center_x - pip_half, pip_y, center_z - pip_half);
-        let p1 = Vec3::new(center_x + pip_half, pip_y, center_z - pip_half);
-        let p2 = Vec3::new(center_x + pip_half, pip_y, center_z + pip_half);
-        let p3 = Vec3::new(center_x - pip_half, pip_y, center_z + pip_half);
-        extend_face_quad(triangles, [p0, p1, p2, p3], color, pip_y < 0.0);
+        add_disk(
+            triangles,
+            Vec3::new(center_x, pip_y, center_z),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            pip_radius,
+            color,
+            pip_y < 0.0,
+        );
     }
 }
 
-fn extend_face_quad(
+fn add_disk(
     triangles: &mut Vec<SourceTriangle>,
-    [p0, p1, p2, p3]: [Vec3; 4],
+    center: Vec3,
+    axis_u: Vec3,
+    axis_v: Vec3,
+    radius: f32,
     color: AppColor,
     outward_winding: bool,
 ) {
-    let (first, second) = if outward_winding {
-        ([p0, p1, p2], [p0, p2, p3])
-    } else {
-        ([p0, p2, p1], [p0, p3, p2])
-    };
+    const SEGMENTS: usize = 18;
+    for index in 0..SEGMENTS {
+        let a0 = (index as f32 / SEGMENTS as f32) * std::f32::consts::TAU;
+        let a1 = ((index + 1) as f32 / SEGMENTS as f32) * std::f32::consts::TAU;
+        let p0 = offset_disk_point(center, axis_u, axis_v, radius, a0);
+        let p1 = offset_disk_point(center, axis_u, axis_v, radius, a1);
+        let vertices = if outward_winding { [center, p0, p1] } else { [center, p1, p0] };
+        triangles.push(SourceTriangle {
+            vertices,
+            color,
+            alpha: 255,
+        });
+    }
+}
 
-    triangles.extend([
-        SourceTriangle {
-            vertices: first,
-            color,
-            alpha: 255,
-        },
-        SourceTriangle {
-            vertices: second,
-            color,
-            alpha: 255,
-        },
-    ]);
+fn offset_disk_point(center: Vec3, axis_u: Vec3, axis_v: Vec3, radius: f32, angle: f32) -> Vec3 {
+    let (sin, cos) = angle.sin_cos();
+    Vec3::new(
+        center.x + ((axis_u.x * cos + axis_v.x * sin) * radius),
+        center.y + ((axis_u.y * cos + axis_v.y * sin) * radius),
+        center.z + ((axis_u.z * cos + axis_v.z * sin) * radius),
+    )
 }
 
 fn crystal_mesh(size: f32, base_color: AppColor) -> Mesh {

@@ -17,3 +17,6 @@ objc2 = "0.5.2"
 objc2-app-kit = { version = "0.2.2", features = ["NSScreen", "NSView", "NSWindow"] }
 objc2-foundation = "0.2.2"
 readmouse = "0.2.1"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.52.0", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_UI_Controls", "Win32_UI_WindowsAndMessaging"] }

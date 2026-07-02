@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "app",
+    "box3d_spike",
     "core_types",
     "native_shell",
     "physics_core",

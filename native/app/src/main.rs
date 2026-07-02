@@ -1,4 +1,9 @@
-use std::{borrow::Cow, error::Error, sync::Arc};
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
+use std::{borrow::Cow, error::Error, sync::Arc, time::{Duration, Instant}};
+
+#[cfg(target_os = "windows")]
+use std::ffi::CString;
 
 use anyhow::{Context, Result};
 use core_types::{AppColor, AppConfig, RectF, Vector2};
@@ -16,6 +21,100 @@ use winit::{
     keyboard::{KeyCode, PhysicalKey},
     window::{Window, WindowId},
 };
+#[cfg(target_os = "windows")]
+use windows::Win32::{
+    Foundation::{BOOL, HINSTANCE, HWND, HMODULE, LPARAM, LRESULT, WPARAM},
+    Graphics::{
+        Direct3D::{
+            Fxc::D3DCompile, ID3DBlob, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, D3D_DRIVER_TYPE_HARDWARE,
+            D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL,
+        },
+        Direct3D11::{
+            D3D11CreateDevice, ID3D11BlendState, ID3D11Buffer, ID3D11DepthStencilState, ID3D11DepthStencilView,
+            ID3D11Device, ID3D11DeviceContext, ID3D11InputLayout, ID3D11PixelShader, ID3D11RasterizerState,
+            ID3D11RenderTargetView, ID3D11Texture2D, ID3D11VertexShader, D3D11_BIND_CONSTANT_BUFFER,
+            D3D11_BIND_DEPTH_STENCIL, D3D11_BIND_VERTEX_BUFFER, D3D11_BLEND_DESC, D3D11_BLEND_INV_SRC_ALPHA,
+            D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_BUFFER_DESC, D3D11_CLEAR_DEPTH,
+            D3D11_COLOR_WRITE_ENABLE_ALL, D3D11_COMPARISON_LESS_EQUAL, D3D11_CPU_ACCESS_WRITE,
+            D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_SINGLETHREADED, D3D11_CULL_NONE,
+            D3D11_DEPTH_STENCIL_DESC, D3D11_DEPTH_WRITE_MASK_ALL, D3D11_FILL_SOLID, D3D11_INPUT_ELEMENT_DESC,
+            D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAP_WRITE_DISCARD, D3D11_MAPPED_SUBRESOURCE,
+            D3D11_RASTERIZER_DESC, D3D11_RENDER_TARGET_BLEND_DESC, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
+            D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
+        },
+        DirectComposition::{DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual},
+        Dxgi::{
+            CreateDXGIFactory1, IDXGIDevice, IDXGIFactory2, IDXGISwapChain1, DXGI_SWAP_CHAIN_DESC1,
+            DXGI_SCALING_STRETCH, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
+        },
+        Dxgi::Common::{
+            DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_D32_FLOAT,
+            DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R32G32B32_FLOAT, DXGI_SAMPLE_DESC,
+        },
+    },
+    System::LibraryLoader::GetModuleHandleW,
+    UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, RegisterClassW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
+        GWL_EXSTYLE, HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNA,
+        WINDOW_EX_STYLE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+        WS_EX_TRANSPARENT, WS_POPUP,
+    },
+};
+#[cfg(target_os = "windows")]
+use windows::core::{w, ComInterface, HRESULT, PCSTR};
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct RenderUniforms {
+    viewport_size: [f32; 2],
+    camera_distance: f32,
+    _padding: f32,
+}
+
+impl RenderUniforms {
+    fn new(width: u32, height: u32) -> Self {
+        let width = width.max(1) as f32;
+        let height = height.max(1) as f32;
+        Self {
+            viewport_size: [width, height],
+            camera_distance: width.max(height) * 1.25,
+            _padding: 0.0,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct FpsCounter {
+    sample_started_at: Instant,
+    frames: u32,
+    fps: f32,
+}
+
+impl Default for FpsCounter {
+    fn default() -> Self {
+        Self {
+            sample_started_at: Instant::now(),
+            frames: 0,
+            fps: 0.0,
+        }
+    }
+}
+
+impl FpsCounter {
+    fn record_frame(&mut self, now: Instant) {
+        self.frames = self.frames.saturating_add(1);
+        let elapsed = now.saturating_duration_since(self.sample_started_at);
+        if elapsed >= Duration::from_millis(250) {
+            self.fps = self.frames as f32 / elapsed.as_secs_f32().max(0.001);
+            self.frames = 0;
+            self.sample_started_at = now;
+        }
+    }
+
+    fn fps(&self) -> f32 {
+        self.fps
+    }
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
     let event_loop = EventLoop::new()?;
@@ -27,6 +126,8 @@ struct NativeApp {
     window: Option<Arc<Window>>,
     window_id: Option<WindowId>,
     gpu: Option<GpuState>,
+    #[cfg(target_os = "windows")]
+    d3d_renderer: Option<WindowsD3dRenderer>,
     renderer: SceneRenderer,
     scene: SceneController,
     frame_clock: FrameClock,
@@ -46,6 +147,7 @@ struct NativeApp {
     debug_right_down: bool,
     was_left_down: bool,
     was_right_down: bool,
+    was_stress_spawn_down: bool,
     force_interactive_for_debug: bool,
     is_rotation_dragging: bool,
     last_drag_attempt: String,
@@ -57,17 +159,24 @@ struct NativeApp {
     import_panel: Option<ImportPanel>,
     fallback_left_down: bool,
     fallback_right_down: bool,
+    target_frame_duration: Duration,
+    next_frame_at: Instant,
+    fps_counter: FpsCounter,
 }
 
 const FLOOR_MARGIN_PIXELS: f32 = 18.0;
+const STRESS_SPAWN_COUNT: usize = 25;
 
 impl Default for NativeApp {
     fn default() -> Self {
         let config = AppConfig::default();
+        let now = Instant::now();
         Self {
             window: None,
             window_id: None,
             gpu: None,
+            #[cfg(target_os = "windows")]
+            d3d_renderer: None,
             renderer: SceneRenderer::new(),
             scene: SceneController::new(config),
             frame_clock: FrameClock::default(),
@@ -87,6 +196,7 @@ impl Default for NativeApp {
             debug_right_down: false,
             was_left_down: false,
             was_right_down: false,
+            was_stress_spawn_down: false,
             force_interactive_for_debug: false,
             is_rotation_dragging: false,
             last_drag_attempt: "none".to_string(),
@@ -98,6 +208,9 @@ impl Default for NativeApp {
             import_panel: None,
             fallback_left_down: false,
             fallback_right_down: false,
+            target_frame_duration: Duration::ZERO,
+            next_frame_at: now,
+            fps_counter: FpsCounter::default(),
         }
     }
 }
@@ -138,6 +251,9 @@ impl NativeApp {
             };
         }
 
+        let initial_bounds = monitor_bounds(event_loop).unwrap_or(self.bounds);
+        self.bounds = initial_bounds;
+
         let window = Arc::new(
             event_loop
                 .create_window(overlay_window_attributes("ScreenOverlayPhysics Native", self.bounds))
@@ -145,6 +261,7 @@ impl NativeApp {
         );
         configure_overlay_window(&window)?;
         self.bounds = sync_window_to_monitor(&window);
+        self.target_frame_duration = Duration::ZERO;
         self.overlay_mode = if self.scene.config().start_in_pass_through {
             OverlayInputMode::PassThrough
         } else {
@@ -153,13 +270,25 @@ impl NativeApp {
         self.pending_mode = self.overlay_mode;
         let _ = set_overlay_input_mode(&window, self.overlay_mode);
 
-        let size = window.inner_size();
-        let gpu = pollster::block_on(GpuState::new(window.clone(), size.width, size.height))
-            .context("Failed to create GPU renderer")?;
+        #[cfg(target_os = "windows")]
+        {
+            let renderer = WindowsD3dRenderer::new(self.bounds)?;
+            renderer.set_input_mode(self.overlay_mode)?;
+            self.d3d_renderer = Some(renderer);
+            window.set_visible(false);
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let gpu_width = self.bounds.width.max(1.0).round() as u32;
+            let gpu_height = self.bounds.height.max(1.0).round() as u32;
+            let gpu = pollster::block_on(GpuState::new(window.clone(), gpu_width, gpu_height))
+                .context("Failed to create GPU renderer")?;
+            self.gpu = Some(gpu);
+        }
 
         self.window_id = Some(window.id());
         self.window = Some(window);
-        self.gpu = Some(gpu);
         self.scene.initialize(self.scene_bounds());
         self.selected_id = self.scene.objects().last().map(|object| object.id);
         self.settings_panel = SettingsPanel::from_config(*self.scene.config());
@@ -167,9 +296,13 @@ impl NativeApp {
         if self.tray.is_none() {
             self.status_message = Some("Tray icon unavailable on this host.".to_string());
         }
+        #[cfg(target_os = "windows")]
+        self.push_status_message("Renderer backend: Direct3D 11 + DirectComposition".to_string());
+        #[cfg(not(target_os = "windows"))]
         if let Some(gpu) = &self.gpu {
             self.push_status_message(format!("Renderer backend: {}", gpu.backend_label));
         }
+        self.push_status_message("Frame pacing: uncapped".to_string());
         Ok(())
     }
 
@@ -214,6 +347,7 @@ impl NativeApp {
                         local_position: self.cursor_local,
                         left_down: self.fallback_left_down,
                         right_down: self.fallback_right_down,
+                        spawn_stress_down: false,
                     }
                 },
             }
@@ -223,6 +357,7 @@ impl NativeApp {
                 local_position: self.cursor_local,
                 left_down: self.fallback_left_down,
                 right_down: self.fallback_right_down,
+                spawn_stress_down: false,
             }
         };
         self.debug_left_down = pointer.left_down;
@@ -240,6 +375,7 @@ impl NativeApp {
         }
 
         self.handle_global_mouse_buttons(now, pointer.left_down, pointer.right_down);
+        self.handle_global_stress_spawn(pointer.spawn_stress_down);
         self.scene.step(dt, self.scene_bounds());
         self.sync_panels();
         window.request_redraw();
@@ -269,7 +405,20 @@ impl NativeApp {
         }
 
         if now_seconds - self.mode_candidate_since_seconds >= debounce_seconds && desired_mode != self.overlay_mode {
-            if set_overlay_input_mode(window, desired_mode).is_ok() {
+            let mut applied_mode = set_overlay_input_mode(window, desired_mode).is_ok();
+            #[cfg(target_os = "windows")]
+            {
+                if let Some(renderer) = &self.d3d_renderer {
+                    match renderer.set_input_mode(desired_mode) {
+                        Ok(()) => applied_mode = true,
+                        Err(error) => {
+                            self.status_message = Some(format!("Overlay input mode update failed: {error:#}"));
+                        },
+                    }
+                }
+            }
+
+            if applied_mode {
                 self.overlay_mode = desired_mode;
             }
         }
@@ -307,6 +456,21 @@ impl NativeApp {
 
         self.was_left_down = is_left_down;
         self.was_right_down = is_right_down;
+    }
+
+    fn handle_global_stress_spawn(&mut self, is_down: bool) {
+        if is_down && !self.was_stress_spawn_down {
+            self.spawn_stress_cubes();
+        }
+        self.was_stress_spawn_down = is_down;
+    }
+
+    fn spawn_stress_cubes(&mut self) {
+        let id = self
+            .scene
+            .spawn_small_cube_batch(self.default_spawn_position(), STRESS_SPAWN_COUNT);
+        self.selected_id = id;
+        self.push_status_message(format!("Spawned {STRESS_SPAWN_COUNT} stress cubes."));
     }
 
     fn end_drag_and_apply_spin(&mut self, now_seconds: f64) {
@@ -372,6 +536,24 @@ impl NativeApp {
 
     fn sync_panels(&mut self) {
         let mut panels = Vec::new();
+        panels.push(OverlayPanel {
+            title: "Perf".to_string(),
+            lines: vec![
+                PanelLine {
+                    text: format!("FPS: {:.0}", self.fps_counter.fps()),
+                    selected: false,
+                },
+                PanelLine {
+                    text: format!("Objects: {}", self.scene.objects().len()),
+                    selected: false,
+                },
+                PanelLine {
+                    text: format!("F9: +{} cubes", STRESS_SPAWN_COUNT),
+                    selected: false,
+                },
+            ],
+            footer: Vec::new(),
+        });
 
         if self.debug_visible {
             let lines = vec![
@@ -428,10 +610,6 @@ impl NativeApp {
 
     fn render(&mut self) -> Result<()> {
         let scene_bounds = self.scene_bounds();
-        let Some(gpu) = &mut self.gpu else {
-            return Ok(());
-        };
-
         let size = self
             .window
             .as_ref()
@@ -445,7 +623,22 @@ impl NativeApp {
             hud: &self.hud,
         };
         let vertices = self.renderer.build_vertices(size.width, size.height, &scene)?;
-        gpu.render(&vertices)
+
+        #[cfg(target_os = "windows")]
+        {
+            let Some(d3d_renderer) = &mut self.d3d_renderer else {
+                return Ok(());
+            };
+            return d3d_renderer.render(&vertices);
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            let Some(gpu) = &mut self.gpu else {
+                return Ok(());
+            };
+            gpu.render(&vertices)
+        }
     }
 
     fn resize(&mut self, size: winit::dpi::PhysicalSize<u32>) {
@@ -457,6 +650,10 @@ impl NativeApp {
         self.bounds.height = size.height as f32;
         if let Some(gpu) = &mut self.gpu {
             gpu.resize(size.width, size.height);
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(d3d_renderer) = &mut self.d3d_renderer {
+            d3d_renderer.resize(size.width, size.height);
         }
     }
 
@@ -483,6 +680,9 @@ impl NativeApp {
             AppAction::SpawnDvdLogo => {
                 let id = self.scene.spawn_random_dvd_logo(self.default_spawn_position());
                 self.selected_id = Some(id);
+            },
+            AppAction::SpawnStressCubes => {
+                self.spawn_stress_cubes();
             },
             AppAction::Reset => {
                 self.scene.reset(self.scene_bounds());
@@ -560,6 +760,7 @@ impl NativeApp {
             KeyCode::F6 => self.handle_action(AppAction::RequestImport, event_loop),
             KeyCode::F7 => self.handle_action(AppAction::SpawnCrystal, event_loop),
             KeyCode::F8 => self.handle_action(AppAction::SpawnDvdLogo, event_loop),
+            KeyCode::F9 => self.handle_action(AppAction::SpawnStressCubes, event_loop),
             KeyCode::Escape => self.handle_action(AppAction::Exit, event_loop),
             _ => {},
         }
@@ -571,6 +772,19 @@ impl NativeApp {
     }
 }
 
+fn monitor_bounds(event_loop: &ActiveEventLoop) -> Option<RectF> {
+    let monitor = event_loop.primary_monitor()?;
+    let position = monitor.position();
+    let size = monitor.size();
+    Some(RectF::new(
+        position.x as f32,
+        position.y as f32,
+        size.width as f32,
+        size.height as f32,
+    ))
+}
+
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 struct GpuState {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -579,15 +793,20 @@ struct GpuState {
     render_pipeline: wgpu::RenderPipeline,
     depth_texture: wgpu::Texture,
     depth_view: wgpu::TextureView,
+    uniform_buffer: wgpu::Buffer,
+    uniform_bind_group: wgpu::BindGroup,
     vertex_buffer: wgpu::Buffer,
     vertex_capacity: usize,
     backend_label: String,
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 impl GpuState {
     async fn new(window: Arc<Window>, width: u32, height: u32) -> Result<Self> {
         let backends = if cfg!(target_os = "macos") {
             wgpu::Backends::METAL
+        } else if cfg!(target_os = "windows") {
+            wgpu::Backends::VULKAN
         } else {
             wgpu::Backends::VULKAN | wgpu::Backends::GL
         };
@@ -610,6 +829,9 @@ impl GpuState {
         if cfg!(target_os = "macos") && adapter_info.backend != wgpu::Backend::Metal {
             anyhow::bail!("Expected Metal backend on macOS, got {:?}", adapter_info.backend);
         }
+        if cfg!(target_os = "windows") && adapter_info.backend != wgpu::Backend::Vulkan {
+            anyhow::bail!("Expected Vulkan backend on Windows, got {:?}", adapter_info.backend);
+        }
 
         let (device, queue) = adapter
             .request_device(
@@ -630,10 +852,12 @@ impl GpuState {
             .copied()
             .find(wgpu::TextureFormat::is_srgb)
             .unwrap_or(caps.formats[0]);
-        let alpha_mode = if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied) {
+        let alpha_mode = if cfg!(target_os = "windows") && caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied) {
             wgpu::CompositeAlphaMode::PostMultiplied
         } else if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
             wgpu::CompositeAlphaMode::PreMultiplied
+        } else if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied) {
+            wgpu::CompositeAlphaMode::PostMultiplied
         } else {
             caps.alpha_modes[0]
         };
@@ -665,10 +889,32 @@ struct VertexOutput {
     @location(0) color: vec4<f32>,
 };
 
+struct RenderUniforms {
+    viewport_size: vec2<f32>,
+    camera_distance: f32,
+    padding: f32,
+};
+
+@group(0) @binding(0)
+var<uniform> uniforms: RenderUniforms;
+
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.position = vec4<f32>(input.position, 1.0);
+    let center = uniforms.viewport_size * 0.5;
+    var screen = input.position.xy;
+    var clip_z = 0.0;
+    if (input.position.z < 800.0) {
+        let denominator = max(uniforms.camera_distance - input.position.z, 1.0);
+        let perspective = uniforms.camera_distance / denominator;
+        screen = center + ((input.position.xy - center) * perspective);
+        clip_z = clamp(0.5 - (input.position.z / (uniforms.camera_distance * 2.0)), 0.0, 1.0);
+    }
+    let clip_xy = vec2<f32>(
+        (screen.x / uniforms.viewport_size.x) * 2.0 - 1.0,
+        1.0 - ((screen.y / uniforms.viewport_size.y) * 2.0)
+    );
+    out.position = vec4<f32>(clip_xy, clip_z, 1.0);
     out.color = input.color;
     return out;
 }
@@ -681,9 +927,37 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             )),
         });
 
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("screen-overlay-physics-uniforms"),
+            size: std::mem::size_of::<RenderUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let uniform_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("screen-overlay-physics-uniform-layout"),
+            entries: &[wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }],
+        });
+        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("screen-overlay-physics-uniform-bind-group"),
+            layout: &uniform_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+
         let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("screen-overlay-physics-pipeline-layout"),
-            bind_group_layouts: &[],
+            bind_group_layouts: &[&uniform_bind_group_layout],
             push_constant_ranges: &[],
         });
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -709,13 +983,13 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
-                cull_mode: Some(wgpu::Face::Back),
+                cull_mode: None,
                 ..Default::default()
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: wgpu::TextureFormat::Depth32Float,
                 depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_compare: wgpu::CompareFunction::LessEqual,
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -739,6 +1013,8 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             render_pipeline,
             depth_texture,
             depth_view,
+            uniform_buffer,
+            uniform_bind_group,
             vertex_buffer,
             vertex_capacity,
             backend_label: format!("{:?}", adapter_info.backend),
@@ -763,6 +1039,9 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         }
 
         self.ensure_vertex_capacity(vertices.len());
+        let uniforms = RenderUniforms::new(self.config.width, self.config.height);
+        self.queue
+            .write_buffer(&self.uniform_buffer, 0, render_uniforms_as_bytes(&uniforms));
         if !vertices.is_empty() {
             self.queue
                 .write_buffer(&self.vertex_buffer, 0, gpu_vertices_as_bytes(vertices));
@@ -794,12 +1073,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
-                            a: 0.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(overlay_clear_color()),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -815,6 +1089,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                 timestamp_writes: None,
             });
             render_pass.set_pipeline(&self.render_pipeline);
+            render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
             if !vertices.is_empty() {
                 render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
                 render_pass.draw(0..vertices.len() as u32, 0..1);
@@ -841,6 +1116,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn create_depth_buffer(
     device: &wgpu::Device,
     width: u32,
@@ -864,6 +1140,668 @@ fn create_depth_buffer(
     (depth_texture, depth_view)
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+fn overlay_clear_color() -> wgpu::Color {
+    wgpu::Color {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: if cfg!(target_os = "windows") { 1.0 } else { 0.0 },
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsD3dRenderer {
+    hwnd: HWND,
+    device: ID3D11Device,
+    context: ID3D11DeviceContext,
+    dxgi_device: IDXGIDevice,
+    factory: IDXGIFactory2,
+    dcomp_device: IDCompositionDevice,
+    dcomp_target: Option<IDCompositionTarget>,
+    dcomp_visual: Option<IDCompositionVisual>,
+    swap_chain: Option<IDXGISwapChain1>,
+    render_target: Option<ID3D11RenderTargetView>,
+    depth_view: Option<ID3D11DepthStencilView>,
+    vertex_shader: ID3D11VertexShader,
+    pixel_shader: ID3D11PixelShader,
+    input_layout: ID3D11InputLayout,
+    blend_state: ID3D11BlendState,
+    depth_stencil_state: ID3D11DepthStencilState,
+    rasterizer_state: ID3D11RasterizerState,
+    uniform_buffer: ID3D11Buffer,
+    vertex_buffer: Option<ID3D11Buffer>,
+    vertex_capacity: usize,
+    width: u32,
+    height: u32,
+}
+
+#[cfg(target_os = "windows")]
+impl WindowsD3dRenderer {
+    fn new(bounds: RectF) -> Result<Self> {
+        let hwnd = create_dcomp_overlay_window(bounds).context("Failed to create DirectComposition overlay window")?;
+        let (device, context) = create_d3d_device().context("Failed to create Direct3D 11 device")?;
+        let dxgi_device: IDXGIDevice = device.cast().context("Failed to query IDXGIDevice")?;
+        let factory: IDXGIFactory2 = unsafe { CreateDXGIFactory1().context("Failed to create DXGI factory")? };
+        let dcomp_device: IDCompositionDevice =
+            unsafe { DCompositionCreateDevice(&dxgi_device).context("Failed to create DirectComposition device")? };
+        let (vertex_shader, pixel_shader, input_layout, blend_state, depth_stencil_state, rasterizer_state) =
+            create_d3d_pipeline(&device).context("Failed to create Direct3D pipeline")?;
+        let uniform_buffer = create_d3d_uniform_buffer(&device).context("Failed to create Direct3D uniform buffer")?;
+
+        let mut renderer = Self {
+            hwnd,
+            device,
+            context,
+            dxgi_device,
+            factory,
+            dcomp_device,
+            dcomp_target: None,
+            dcomp_visual: None,
+            swap_chain: None,
+            render_target: None,
+            depth_view: None,
+            vertex_shader,
+            pixel_shader,
+            input_layout,
+            blend_state,
+            depth_stencil_state,
+            rasterizer_state,
+            uniform_buffer,
+            vertex_buffer: None,
+            vertex_capacity: 0,
+            width: 0,
+            height: 0,
+        };
+        renderer.resize(
+            bounds.width.max(1.0).round() as u32,
+            bounds.height.max(1.0).round() as u32,
+        );
+        Ok(renderer)
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+
+        if let Err(error) = self.ensure_target(width, height) {
+            self.swap_chain = None;
+            self.render_target = None;
+            self.depth_view = None;
+            self.width = 0;
+            self.height = 0;
+            eprintln!("Direct3D target resize failed: {error:#}");
+        }
+    }
+
+    fn render(&mut self, vertices: &[GpuVertex]) -> Result<()> {
+        self.ensure_target(self.width.max(1), self.height.max(1))?;
+        self.ensure_vertex_buffer(vertices.len())?;
+        self.upload_uniforms()?;
+        self.upload_vertices(vertices)?;
+        self.bind_pipeline();
+
+        let clear = [0.0f32, 0.0, 0.0, 0.0];
+        unsafe {
+            self.context
+                .ClearRenderTargetView(self.render_target.as_ref().context("Missing D3D render target")?, &clear);
+            self.context.ClearDepthStencilView(
+                self.depth_view.as_ref().context("Missing D3D depth view")?,
+                D3D11_CLEAR_DEPTH.0 as u32,
+                1.0,
+                0,
+            );
+            if !vertices.is_empty() {
+                self.context.Draw(vertices.len() as u32, 0);
+            }
+        }
+
+        let Some(swap_chain) = &self.swap_chain else {
+            anyhow::bail!("Missing D3D swap chain");
+        };
+        let present = unsafe { swap_chain.Present(0, 0) };
+        if present == HRESULT(0x087A0001u32 as i32) {
+            return Ok(());
+        }
+        present.ok().context("Direct3D swap chain present failed")
+    }
+
+    fn set_input_mode(&self, mode: OverlayInputMode) -> Result<()> {
+        let transparent_bit = WS_EX_TRANSPARENT.0 as isize;
+        unsafe {
+            let ex_style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE);
+            let next_ex_style = if mode == OverlayInputMode::PassThrough {
+                ex_style | transparent_bit
+            } else {
+                ex_style & !transparent_bit
+            };
+
+            if next_ex_style != ex_style {
+                SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, next_ex_style);
+                SetWindowPos(
+                    self.hwnd,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED,
+                )
+                .context("Failed to update DirectComposition overlay input mode")?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn ensure_target(&mut self, width: u32, height: u32) -> Result<()> {
+        if self.swap_chain.is_none() {
+            self.create_swap_chain(width, height)?;
+            return Ok(());
+        }
+
+        if self.width == width && self.height == height && self.render_target.is_some() {
+            return Ok(());
+        }
+
+        self.render_target = None;
+        self.depth_view = None;
+        let swap_chain = self.swap_chain.as_ref().context("Missing D3D swap chain")?;
+        unsafe {
+            swap_chain.ResizeBuffers(0, width, height, DXGI_FORMAT(0), 0)?;
+        }
+        self.create_render_target(width, height)
+    }
+
+    fn create_swap_chain(&mut self, width: u32, height: u32) -> Result<()> {
+        let desc = DXGI_SWAP_CHAIN_DESC1 {
+            Width: width,
+            Height: height,
+            Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+            Stereo: BOOL(0),
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
+            BufferCount: 2,
+            Scaling: DXGI_SCALING_STRETCH,
+            SwapEffect: DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+            AlphaMode: DXGI_ALPHA_MODE_PREMULTIPLIED,
+            Flags: 0,
+        };
+
+        let swap_chain = unsafe {
+            self.factory
+                .CreateSwapChainForComposition(&self.dxgi_device, &desc, None)
+                .context("Failed to create DirectComposition swap chain")?
+        };
+        let target = unsafe {
+            self.dcomp_device
+                .CreateTargetForHwnd(self.hwnd, true)
+                .context("Failed to create DirectComposition target")?
+        };
+        let visual = unsafe {
+            self.dcomp_device
+                .CreateVisual()
+                .context("Failed to create DirectComposition visual")?
+        };
+        unsafe {
+            visual.SetContent(&swap_chain)?;
+            target.SetRoot(&visual)?;
+            self.dcomp_device.Commit()?;
+        }
+
+        self.swap_chain = Some(swap_chain);
+        self.dcomp_target = Some(target);
+        self.dcomp_visual = Some(visual);
+        self.create_render_target(width, height)
+    }
+
+    fn create_render_target(&mut self, width: u32, height: u32) -> Result<()> {
+        let swap_chain = self.swap_chain.as_ref().context("Missing D3D swap chain")?;
+        let back_buffer: ID3D11Texture2D = unsafe { swap_chain.GetBuffer(0).context("Failed to get swap chain buffer")? };
+        let mut render_target = None;
+        unsafe {
+            self.device
+                .CreateRenderTargetView(&back_buffer, None, Some(&mut render_target))
+                .context("Failed to create render target view")?;
+        }
+        self.render_target = Some(render_target.context("CreateRenderTargetView returned no target")?);
+        self.depth_view = Some(create_d3d_depth_view(&self.device, width, height)?);
+        self.width = width;
+        self.height = height;
+        Ok(())
+    }
+
+    fn ensure_vertex_buffer(&mut self, needed_vertices: usize) -> Result<()> {
+        if needed_vertices <= self.vertex_capacity && self.vertex_buffer.is_some() {
+            return Ok(());
+        }
+
+        let mut capacity = self.vertex_capacity.max(4096);
+        while capacity < needed_vertices {
+            capacity *= 2;
+        }
+        let desc = D3D11_BUFFER_DESC {
+            ByteWidth: (capacity * std::mem::size_of::<GpuVertex>()) as u32,
+            Usage: D3D11_USAGE_DYNAMIC,
+            BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as u32,
+            CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
+            ..Default::default()
+        };
+        let mut buffer = None;
+        unsafe {
+            self.device
+                .CreateBuffer(&desc, None, Some(&mut buffer))
+                .context("Failed to create D3D vertex buffer")?;
+        }
+        self.vertex_buffer = Some(buffer.context("CreateBuffer returned no vertex buffer")?);
+        self.vertex_capacity = capacity;
+        Ok(())
+    }
+
+    fn upload_uniforms(&self) -> Result<()> {
+        let uniforms = RenderUniforms::new(self.width, self.height);
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe {
+            self.context
+                .Map(&self.uniform_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped))
+                .context("Failed to map D3D uniform buffer")?;
+            std::ptr::copy_nonoverlapping(
+                (&uniforms as *const RenderUniforms).cast::<u8>(),
+                mapped.pData.cast::<u8>(),
+                std::mem::size_of::<RenderUniforms>(),
+            );
+            self.context.Unmap(&self.uniform_buffer, 0);
+        }
+        Ok(())
+    }
+
+    fn upload_vertices(&self, vertices: &[GpuVertex]) -> Result<()> {
+        if vertices.is_empty() {
+            return Ok(());
+        }
+
+        let buffer = self.vertex_buffer.as_ref().context("Missing D3D vertex buffer")?;
+        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+        unsafe {
+            self.context
+                .Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped))
+                .context("Failed to map D3D vertex buffer")?;
+            std::ptr::copy_nonoverlapping(
+                vertices.as_ptr(),
+                mapped.pData.cast::<GpuVertex>(),
+                vertices.len(),
+            );
+            self.context.Unmap(buffer, 0);
+        }
+        Ok(())
+    }
+
+    fn bind_pipeline(&self) {
+        let stride = std::mem::size_of::<GpuVertex>() as u32;
+        let offset = 0u32;
+        let viewport = D3D11_VIEWPORT {
+            TopLeftX: 0.0,
+            TopLeftY: 0.0,
+            Width: self.width as f32,
+            Height: self.height as f32,
+            MinDepth: 0.0,
+            MaxDepth: 1.0,
+        };
+        let blend_factor = [0.0f32, 0.0, 0.0, 0.0];
+        let render_target = self.render_target.clone();
+        let depth_view = self.depth_view.clone();
+        let vertex_buffers = [self.vertex_buffer.clone()];
+        let strides = [stride];
+        let offsets = [offset];
+        let constant_buffers = [Some(self.uniform_buffer.clone())];
+
+        unsafe {
+            self.context.OMSetRenderTargets(Some(&[render_target]), depth_view.as_ref());
+            self.context.RSSetViewports(Some(&[viewport]));
+            self.context.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            self.context.IASetInputLayout(&self.input_layout);
+            self.context.IASetVertexBuffers(
+                0,
+                vertex_buffers.len() as u32,
+                Some(vertex_buffers.as_ptr()),
+                Some(strides.as_ptr()),
+                Some(offsets.as_ptr()),
+            );
+            self.context.VSSetShader(&self.vertex_shader, None);
+            self.context.VSSetConstantBuffers(0, Some(&constant_buffers));
+            self.context.PSSetShader(&self.pixel_shader, None);
+            self.context
+                .OMSetBlendState(&self.blend_state, Some(&blend_factor), u32::MAX);
+            self.context
+                .OMSetDepthStencilState(&self.depth_stencil_state, 0);
+            self.context.RSSetState(&self.rasterizer_state);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn create_dcomp_overlay_window(bounds: RectF) -> Result<HWND> {
+    unsafe {
+        let instance = GetModuleHandleW(None).context("GetModuleHandleW failed")?;
+        let class_name = w!("ScreenOverlayPhysicsDcompOverlay");
+        let window_class = WNDCLASSW {
+            lpfnWndProc: Some(dcomp_overlay_wnd_proc),
+            hInstance: HINSTANCE(instance.0),
+            lpszClassName: class_name,
+            ..Default::default()
+        };
+        RegisterClassW(&window_class);
+
+        let hwnd = CreateWindowExW(
+            WINDOW_EX_STYLE(
+                WS_EX_LAYERED.0
+                    | WS_EX_NOACTIVATE.0
+                    | WS_EX_TRANSPARENT.0
+                    | WS_EX_TOPMOST.0
+                    | WS_EX_TOOLWINDOW.0,
+            ),
+            class_name,
+            w!("ScreenOverlayPhysics DirectComposition"),
+            WS_POPUP,
+            bounds.x.round() as i32,
+            bounds.y.round() as i32,
+            bounds.width.max(1.0).round() as i32,
+            bounds.height.max(1.0).round() as i32,
+            None,
+            None,
+            instance,
+            None,
+        );
+        if hwnd.0 == 0 {
+            anyhow::bail!("CreateWindowExW failed for DirectComposition overlay");
+        }
+        ShowWindow(hwnd, SW_SHOWNA);
+        Ok(hwnd)
+    }
+}
+
+#[cfg(target_os = "windows")]
+extern "system" fn dcomp_overlay_wnd_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+}
+
+#[cfg(target_os = "windows")]
+fn create_d3d_device() -> Result<(ID3D11Device, ID3D11DeviceContext)> {
+    unsafe {
+        let mut device = None;
+        let mut context = None;
+        let mut feature_level = D3D_FEATURE_LEVEL::default();
+        let flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_SINGLETHREADED;
+        let hardware = D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            HMODULE(0),
+            flags,
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            Some(&mut feature_level),
+            Some(&mut context),
+        );
+        if hardware.is_err() {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_WARP,
+                HMODULE(0),
+                flags,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                Some(&mut feature_level),
+                Some(&mut context),
+            )?;
+        }
+        Ok((
+            device.context("D3D11CreateDevice returned no device")?,
+            context.context("D3D11CreateDevice returned no context")?,
+        ))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn create_d3d_uniform_buffer(device: &ID3D11Device) -> Result<ID3D11Buffer> {
+    let desc = D3D11_BUFFER_DESC {
+        ByteWidth: std::mem::size_of::<RenderUniforms>() as u32,
+        Usage: D3D11_USAGE_DYNAMIC,
+        BindFlags: D3D11_BIND_CONSTANT_BUFFER.0 as u32,
+        CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
+        ..Default::default()
+    };
+    let mut buffer = None;
+    unsafe {
+        device
+            .CreateBuffer(&desc, None, Some(&mut buffer))
+            .context("Failed to create D3D uniform buffer")?;
+    }
+    buffer.context("CreateBuffer returned no uniform buffer")
+}
+
+#[cfg(target_os = "windows")]
+fn create_d3d_depth_view(device: &ID3D11Device, width: u32, height: u32) -> Result<ID3D11DepthStencilView> {
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: width.max(1),
+        Height: height.max(1),
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_D32_FLOAT,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: D3D11_BIND_DEPTH_STENCIL.0 as u32,
+        CPUAccessFlags: 0,
+        MiscFlags: 0,
+    };
+    let mut texture = None;
+    unsafe {
+        device
+            .CreateTexture2D(&desc, None, Some(&mut texture))
+            .context("Failed to create D3D depth texture")?;
+    }
+    let texture = texture.context("CreateTexture2D returned no depth texture")?;
+    let mut view = None;
+    unsafe {
+        device
+            .CreateDepthStencilView(&texture, None, Some(&mut view))
+            .context("Failed to create D3D depth view")?;
+    }
+    view.context("CreateDepthStencilView returned no depth view")
+}
+
+#[cfg(target_os = "windows")]
+fn create_d3d_pipeline(
+    device: &ID3D11Device,
+) -> Result<(
+    ID3D11VertexShader,
+    ID3D11PixelShader,
+    ID3D11InputLayout,
+    ID3D11BlendState,
+    ID3D11DepthStencilState,
+    ID3D11RasterizerState,
+)> {
+    let shader_source = br#"
+cbuffer RenderUniforms : register(b0) {
+    float2 viewport_size;
+    float camera_distance;
+    float padding;
+};
+
+struct VSInput {
+    float3 position : POSITION;
+    float4 color : COLOR0;
+};
+struct PSInput {
+    float4 position : SV_POSITION;
+    float4 color : COLOR0;
+};
+PSInput vs_main(VSInput input) {
+    PSInput output;
+    float2 center = viewport_size * 0.5f;
+    float2 screen = input.position.xy;
+    float clip_z = 0.0f;
+    if (input.position.z < 800.0f) {
+        float denominator = max(camera_distance - input.position.z, 1.0f);
+        float perspective = camera_distance / denominator;
+        screen = center + ((input.position.xy - center) * perspective);
+        clip_z = saturate(0.5f - (input.position.z / (camera_distance * 2.0f)));
+    }
+    float2 clip_xy = float2(
+        (screen.x / viewport_size.x) * 2.0f - 1.0f,
+        1.0f - ((screen.y / viewport_size.y) * 2.0f)
+    );
+    output.position = float4(clip_xy, clip_z, 1.0f);
+    output.color = input.color;
+    return output;
+}
+float4 ps_main(PSInput input) : SV_TARGET {
+    return float4(input.color.rgb * input.color.a, input.color.a);
+}
+"#;
+    let vertex_blob = compile_shader(shader_source, "vs_main", "vs_4_0")?;
+    let pixel_blob = compile_shader(shader_source, "ps_main", "ps_4_0")?;
+
+    unsafe {
+        let vertex_bytecode = std::slice::from_raw_parts(
+            vertex_blob.GetBufferPointer().cast::<u8>(),
+            vertex_blob.GetBufferSize(),
+        );
+        let pixel_bytecode = std::slice::from_raw_parts(
+            pixel_blob.GetBufferPointer().cast::<u8>(),
+            pixel_blob.GetBufferSize(),
+        );
+
+        let mut vertex_shader = None;
+        device.CreateVertexShader(vertex_bytecode, None, Some(&mut vertex_shader))?;
+        let mut pixel_shader = None;
+        device.CreatePixelShader(pixel_bytecode, None, Some(&mut pixel_shader))?;
+
+        let position_name = CString::new("POSITION")?;
+        let color_name = CString::new("COLOR")?;
+        let elements = [
+            D3D11_INPUT_ELEMENT_DESC {
+                SemanticName: PCSTR(position_name.as_ptr().cast()),
+                SemanticIndex: 0,
+                Format: DXGI_FORMAT_R32G32B32_FLOAT,
+                InputSlot: 0,
+                AlignedByteOffset: 0,
+                InputSlotClass: D3D11_INPUT_PER_VERTEX_DATA,
+                InstanceDataStepRate: 0,
+            },
+            D3D11_INPUT_ELEMENT_DESC {
+                SemanticName: PCSTR(color_name.as_ptr().cast()),
+                SemanticIndex: 0,
+                Format: DXGI_FORMAT_R32G32B32A32_FLOAT,
+                InputSlot: 0,
+                AlignedByteOffset: 12,
+                InputSlotClass: D3D11_INPUT_PER_VERTEX_DATA,
+                InstanceDataStepRate: 0,
+            },
+        ];
+        let mut input_layout = None;
+        device.CreateInputLayout(&elements, vertex_bytecode, Some(&mut input_layout))?;
+
+        let blend_desc = D3D11_BLEND_DESC {
+            AlphaToCoverageEnable: BOOL(0),
+            IndependentBlendEnable: BOOL(0),
+            RenderTarget: [
+                D3D11_RENDER_TARGET_BLEND_DESC {
+                    BlendEnable: BOOL(1),
+                    SrcBlend: D3D11_BLEND_ONE,
+                    DestBlend: D3D11_BLEND_INV_SRC_ALPHA,
+                    BlendOp: D3D11_BLEND_OP_ADD,
+                    SrcBlendAlpha: D3D11_BLEND_ONE,
+                    DestBlendAlpha: D3D11_BLEND_INV_SRC_ALPHA,
+                    BlendOpAlpha: D3D11_BLEND_OP_ADD,
+                    RenderTargetWriteMask: D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8,
+                },
+                D3D11_RENDER_TARGET_BLEND_DESC::default(),
+                D3D11_RENDER_TARGET_BLEND_DESC::default(),
+                D3D11_RENDER_TARGET_BLEND_DESC::default(),
+                D3D11_RENDER_TARGET_BLEND_DESC::default(),
+                D3D11_RENDER_TARGET_BLEND_DESC::default(),
+                D3D11_RENDER_TARGET_BLEND_DESC::default(),
+                D3D11_RENDER_TARGET_BLEND_DESC::default(),
+            ],
+        };
+        let mut blend_state = None;
+        device.CreateBlendState(&blend_desc, Some(&mut blend_state))?;
+
+        let depth_desc = D3D11_DEPTH_STENCIL_DESC {
+            DepthEnable: BOOL(1),
+            DepthWriteMask: D3D11_DEPTH_WRITE_MASK_ALL,
+            DepthFunc: D3D11_COMPARISON_LESS_EQUAL,
+            StencilEnable: BOOL(0),
+            ..Default::default()
+        };
+        let mut depth_stencil_state = None;
+        device.CreateDepthStencilState(&depth_desc, Some(&mut depth_stencil_state))?;
+
+        let rasterizer_desc = D3D11_RASTERIZER_DESC {
+            FillMode: D3D11_FILL_SOLID,
+            CullMode: D3D11_CULL_NONE,
+            FrontCounterClockwise: BOOL(0),
+            DepthBias: 0,
+            DepthBiasClamp: 0.0,
+            SlopeScaledDepthBias: 0.0,
+            DepthClipEnable: BOOL(1),
+            ScissorEnable: BOOL(0),
+            MultisampleEnable: BOOL(0),
+            AntialiasedLineEnable: BOOL(0),
+        };
+        let mut rasterizer_state = None;
+        device.CreateRasterizerState(&rasterizer_desc, Some(&mut rasterizer_state))?;
+
+        Ok((
+            vertex_shader.context("CreateVertexShader returned no shader")?,
+            pixel_shader.context("CreatePixelShader returned no shader")?,
+            input_layout.context("CreateInputLayout returned no layout")?,
+            blend_state.context("CreateBlendState returned no state")?,
+            depth_stencil_state.context("CreateDepthStencilState returned no state")?,
+            rasterizer_state.context("CreateRasterizerState returned no state")?,
+        ))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn compile_shader(source: &[u8], entry: &str, target: &str) -> Result<ID3DBlob> {
+    let entry = CString::new(entry)?;
+    let target = CString::new(target)?;
+    let mut blob = None;
+    let mut errors = None;
+    let result = unsafe {
+        D3DCompile(
+            source.as_ptr().cast(),
+            source.len(),
+            PCSTR::null(),
+            None,
+            None,
+            PCSTR(entry.as_ptr().cast()),
+            PCSTR(target.as_ptr().cast()),
+            0,
+            0,
+            &mut blob,
+            Some(&mut errors),
+        )
+    };
+    if let Err(error) = result {
+        if let Some(errors) = errors {
+            let message = unsafe {
+                let bytes = std::slice::from_raw_parts(errors.GetBufferPointer().cast::<u8>(), errors.GetBufferSize());
+                String::from_utf8_lossy(bytes).into_owned()
+            };
+            anyhow::bail!("Shader compile failed: {message}");
+        }
+        return Err(error).context("Shader compile failed");
+    }
+    blob.context("D3DCompile returned no bytecode")
+}
+
+
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn gpu_vertices_as_bytes(vertices: &[GpuVertex]) -> &[u8] {
     unsafe {
         std::slice::from_raw_parts(
@@ -873,9 +1811,23 @@ fn gpu_vertices_as_bytes(vertices: &[GpuVertex]) -> &[u8] {
     }
 }
 
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+fn render_uniforms_as_bytes(uniforms: &RenderUniforms) -> &[u8] {
+    unsafe {
+        std::slice::from_raw_parts(
+            (uniforms as *const RenderUniforms).cast::<u8>(),
+            std::mem::size_of::<RenderUniforms>(),
+        )
+    }
+}
+
 impl ApplicationHandler for NativeApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        event_loop.set_control_flow(ControlFlow::Poll);
+        if self.target_frame_duration.is_zero() {
+            event_loop.set_control_flow(ControlFlow::Poll);
+        } else {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame_at));
+        }
         if self.window.is_none() {
             if let Err(error) = self.create_window(event_loop) {
                 show_error_dialog("Startup Error", &format!("{error:#}"));
@@ -919,6 +1871,24 @@ impl ApplicationHandler for NativeApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let now = Instant::now();
+        if !self.target_frame_duration.is_zero() && now < self.next_frame_at {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame_at));
+            return;
+        }
+
+        self.fps_counter.record_frame(now);
+
+        if !self.target_frame_duration.is_zero() {
+            self.next_frame_at = self
+                .next_frame_at
+                .checked_add(self.target_frame_duration)
+                .unwrap_or(now + self.target_frame_duration);
+            if self.next_frame_at <= now {
+                self.next_frame_at = now + self.target_frame_duration;
+            }
+        }
+
         if let Some(tray) = &self.tray {
             if let Some(action) = tray.poll_action() {
                 let mapped = match action {
@@ -926,6 +1896,7 @@ impl ApplicationHandler for NativeApp {
                     TrayAction::SpawnObject => AppAction::SpawnObject,
                     TrayAction::SpawnCrystal => AppAction::SpawnCrystal,
                     TrayAction::SpawnDvdLogo => AppAction::SpawnDvdLogo,
+                    TrayAction::SpawnStressCubes => AppAction::SpawnStressCubes,
                     TrayAction::Reset => AppAction::Reset,
                     TrayAction::ToggleSettings => AppAction::ToggleSettings,
                     TrayAction::ImportModel => AppAction::RequestImport,
@@ -936,6 +1907,16 @@ impl ApplicationHandler for NativeApp {
         }
 
         self.update();
+        #[cfg(target_os = "windows")]
+        if let Err(error) = self.render() {
+            show_error_dialog("Render Error", &format!("{error:#}"));
+            event_loop.exit();
+        }
+        if self.target_frame_duration.is_zero() {
+            event_loop.set_control_flow(ControlFlow::Poll);
+        } else {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_frame_at));
+        }
     }
 }
 
@@ -945,6 +1926,7 @@ enum AppAction {
     SpawnObject,
     SpawnCrystal,
     SpawnDvdLogo,
+    SpawnStressCubes,
     Reset,
     ToggleSettings,
     ToggleForceInteractive,

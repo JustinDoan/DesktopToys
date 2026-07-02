@@ -1,4 +1,6 @@
 use std::collections::{HashMap, HashSet};
+use std::ffi::c_void;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use core_types::{AppColor, CollisionShape, ObjectState, ObjectVisualKind, PhysicsBody, RectF, Vector2};
@@ -7,12 +9,230 @@ const PENETRATION_SLOP: f32 = 0.75;
 const POSITION_CORRECTION_PERCENT: f32 = 0.8;
 const WAKE_IMPULSE_THRESHOLD: f32 = 75.0;
 const WAKE_VELOCITY_THRESHOLD: f32 = 95.0;
+#[allow(dead_code)]
 const SLEEP_ANGULAR_THRESHOLD: f64 = 18.0;
 const SLEEP_SETTLE_TIME_SECONDS: f32 = 0.55;
 const DEFAULT_CELL_SIZE: f32 = 120.0;
+const BOX3D_PIXELS_PER_METER: f32 = 100.0;
+const BOX3D_SUB_STEPS: i32 = 4;
 const COLOR_RANDOMIZER_MULTIPLIER: u64 = 6364136223846793005;
 const COLOR_RANDOMIZER_INCREMENT: u64 = 1442695040888963407;
 static COLOR_RANDOMIZER_STATE: AtomicU64 = AtomicU64::new(0x9E3779B97F4A7C15);
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SopBox3dBodyDef {
+    id: u64,
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    velocity_x: f32,
+    velocity_y: f32,
+    mass: f32,
+    restitution: f32,
+    linear_damping: f32,
+    gravity_scale: f32,
+    collision_scale: f32,
+    shape: i32,
+    is_dragging: bool,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct SopBox3dSnapshot {
+    id: u64,
+    x: f32,
+    y: f32,
+    velocity_x: f32,
+    velocity_y: f32,
+    rotation_x: f32,
+    rotation_y: f32,
+    rotation_z: f32,
+    rotation_w: f32,
+    is_awake: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct BodySyncState {
+    width: f32,
+    height: f32,
+    mass: f32,
+    restitution: f32,
+    linear_damping: f32,
+    gravity_scale: f32,
+    collision_scale: f32,
+    shape: i32,
+    is_dragging: bool,
+}
+
+impl BodySyncState {
+    fn static_fields_changed(self, next: Self) -> bool {
+        self.width != next.width
+            || self.height != next.height
+            || self.mass != next.mass
+            || self.restitution != next.restitution
+            || self.linear_damping != next.linear_damping
+            || self.gravity_scale != next.gravity_scale
+            || self.collision_scale != next.collision_scale
+            || self.shape != next.shape
+    }
+}
+
+unsafe extern "C" {
+    fn sop_box3d_create(
+        gravity_y: f32,
+        bounds_width: f32,
+        bounds_height: f32,
+        pixels_per_meter: f32,
+    ) -> *mut c_void;
+    fn sop_box3d_destroy(world: *mut c_void);
+    fn sop_box3d_reset(world: *mut c_void, gravity_y: f32, bounds_width: f32, bounds_height: f32);
+    fn sop_box3d_set_gravity(world: *mut c_void, gravity_y: f32);
+    fn sop_box3d_sync_body(world: *mut c_void, def: *const SopBox3dBodyDef);
+    fn sop_box3d_step(world: *mut c_void, time_step: f32, sub_step_count: i32);
+    fn sop_box3d_snapshot_count(world: *const c_void) -> i32;
+    fn sop_box3d_get_snapshots(
+        world: *mut c_void,
+        snapshots: *mut SopBox3dSnapshot,
+        capacity: i32,
+    ) -> i32;
+}
+
+#[derive(Debug)]
+struct Box3dBackend {
+    raw: NonNull<c_void>,
+    synced_bodies: HashMap<u64, BodySyncState>,
+    snapshot_buffer: Vec<SopBox3dSnapshot>,
+    gravity_y: f32,
+}
+
+impl Box3dBackend {
+    fn new(gravity_y: f32, bounds: RectF) -> Self {
+        let raw = unsafe {
+            sop_box3d_create(
+                gravity_y,
+                bounds.width.max(1.0),
+                bounds.height.max(1.0),
+                BOX3D_PIXELS_PER_METER,
+            )
+        };
+        let raw = NonNull::new(raw).expect("Box3D backend allocation failed");
+        Self {
+            raw,
+            synced_bodies: HashMap::new(),
+            snapshot_buffer: Vec::new(),
+            gravity_y,
+        }
+    }
+
+    fn reset(&mut self, gravity_y: f32, bounds: RectF) {
+        unsafe {
+            sop_box3d_reset(
+                self.raw.as_ptr(),
+                gravity_y,
+                bounds.width.max(1.0),
+                bounds.height.max(1.0),
+            )
+        };
+        self.synced_bodies.clear();
+        self.snapshot_buffer.clear();
+        self.gravity_y = gravity_y;
+    }
+
+    fn set_gravity(&mut self, gravity_y: f32) {
+        if self.gravity_y == gravity_y {
+            return;
+        }
+        unsafe { sop_box3d_set_gravity(self.raw.as_ptr(), gravity_y) };
+        self.gravity_y = gravity_y;
+    }
+
+    fn sync_body_if_needed(&mut self, object: &ObjectState) {
+        let body = &object.body;
+        let shape = match body.shape {
+            CollisionShape::Box => 0,
+            CollisionShape::Circle => 1,
+            CollisionShape::Diamond => 2,
+        };
+        let is_dragging = body.is_dragging || object.is_dragging;
+        let next_state = BodySyncState {
+            width: body.width.max(1.0),
+            height: body.height.max(1.0),
+            mass: body.mass,
+            restitution: body.restitution,
+            linear_damping: body.linear_damping,
+            gravity_scale: body.gravity_scale,
+            collision_scale: body.collision_scale,
+            shape,
+            is_dragging,
+        };
+        let should_sync = match self.synced_bodies.get(&object.id) {
+            None => true,
+            Some(previous) => is_dragging || previous.is_dragging || previous.static_fields_changed(next_state),
+        };
+        if !should_sync {
+            return;
+        }
+
+        let def = SopBox3dBodyDef {
+            id: object.id,
+            x: body.position.x,
+            y: body.position.y,
+            width: next_state.width,
+            height: next_state.height,
+            velocity_x: body.velocity.x,
+            velocity_y: body.velocity.y,
+            mass: body.mass,
+            restitution: body.restitution,
+            linear_damping: body.linear_damping,
+            gravity_scale: body.gravity_scale,
+            collision_scale: body.collision_scale,
+            shape,
+            is_dragging,
+        };
+        unsafe { sop_box3d_sync_body(self.raw.as_ptr(), &def) };
+        self.synced_bodies.insert(object.id, next_state);
+    }
+
+    fn step(&mut self, dt: f32) {
+        unsafe { sop_box3d_step(self.raw.as_ptr(), dt, BOX3D_SUB_STEPS) };
+    }
+
+    fn snapshots(&mut self) -> &[SopBox3dSnapshot] {
+        let count = unsafe { sop_box3d_snapshot_count(self.raw.as_ptr()) }.max(0);
+        if count == 0 {
+            self.snapshot_buffer.clear();
+            return &self.snapshot_buffer;
+        }
+
+        let empty_snapshot = SopBox3dSnapshot {
+                id: 0,
+                x: 0.0,
+                y: 0.0,
+                velocity_x: 0.0,
+                velocity_y: 0.0,
+                rotation_x: 0.0,
+                rotation_y: 0.0,
+                rotation_z: 0.0,
+                rotation_w: 1.0,
+                is_awake: false,
+        };
+        self.snapshot_buffer.resize(count as usize, empty_snapshot);
+        let filled =
+            unsafe { sop_box3d_get_snapshots(self.raw.as_ptr(), self.snapshot_buffer.as_mut_ptr(), count) }
+                .max(0) as usize;
+        self.snapshot_buffer.truncate(filled);
+
+        &self.snapshot_buffer
+    }
+}
+
+impl Drop for Box3dBackend {
+    fn drop(&mut self) {
+        unsafe { sop_box3d_destroy(self.raw.as_ptr()) };
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CollisionPair {
@@ -138,16 +358,20 @@ impl BroadphaseGrid {
 #[derive(Debug)]
 pub struct PhysicsWorld {
     objects: Vec<ObjectState>,
-    broadphase: BroadphaseGrid,
     gravity: Vector2,
+    box3d: Option<Box3dBackend>,
+    box3d_bounds: Option<(u32, u32)>,
+    object_indices: HashMap<u64, usize>,
 }
 
 impl PhysicsWorld {
     pub fn new(gravity: Vector2) -> Self {
         Self {
             objects: Vec::new(),
-            broadphase: BroadphaseGrid::default(),
             gravity,
+            box3d: None,
+            box3d_bounds: None,
+            object_indices: HashMap::new(),
         }
     }
 
@@ -169,55 +393,103 @@ impl PhysicsWorld {
 
     pub fn clear(&mut self) {
         self.objects.clear();
+        if let (Some(box3d), Some((width, height))) = (&mut self.box3d, self.box3d_bounds) {
+            let bounds = RectF::new(0.0, 0.0, width as f32, height as f32);
+            box3d.reset(self.gravity.y, bounds);
+        }
     }
 
     pub fn step(&mut self, dt: f32, bounds: RectF, sleep_threshold: f32, floor_snap_threshold: f32) {
-        for object in &mut self.objects {
-            let body = &mut object.body;
+        let _ = (sleep_threshold, floor_snap_threshold);
+        self.ensure_box3d(bounds);
 
-            if body.is_dragging || body.is_sleeping {
+        let Some(box3d) = &mut self.box3d else {
+            return;
+        };
+
+        box3d.set_gravity(self.gravity.y);
+        for object in &self.objects {
+            box3d.sync_body_if_needed(object);
+        }
+
+        box3d.step(dt);
+        let snapshots = box3d.snapshots();
+        self.object_indices.clear();
+        self.object_indices
+            .extend(self.objects.iter().enumerate().map(|(index, object)| (object.id, index)));
+        for snapshot in snapshots {
+            let Some(&object_index) = self.object_indices.get(&snapshot.id) else {
+                continue;
+            };
+            let object = &mut self.objects[object_index];
+
+            if object.body.is_dragging || object.is_dragging {
+                object.body.is_sleeping = false;
+                object.body.sleep_timer_seconds = 0.0;
                 continue;
             }
 
-            let scaled_gravity = self.gravity * body.gravity_scale;
-            body.velocity += (scaled_gravity + body.acceleration) * dt;
-            body.velocity *= body.linear_damping;
-            body.position += body.velocity * dt;
+            object.body.position = Vector2::new(snapshot.x, snapshot.y);
+            object.body.velocity = Vector2::new(snapshot.velocity_x, snapshot.velocity_y);
+            object.body.is_sleeping = !snapshot.is_awake;
+            object.body.sleep_timer_seconds = if snapshot.is_awake {
+                0.0
+            } else {
+                SLEEP_SETTLE_TIME_SECONDS
+            };
+
+            let (rotation_x, rotation_y, rotation_z) = quat_to_euler_degrees(
+                snapshot.rotation_x as f64,
+                snapshot.rotation_y as f64,
+                snapshot.rotation_z as f64,
+                snapshot.rotation_w as f64,
+            );
+            object.rotation_x = rotation_x;
+            object.rotation_y = rotation_y;
+            object.rotation_z = rotation_z;
+            object.angular_velocity_x = 0.0;
+            object.angular_velocity_y = 0.0;
+            object.angular_velocity_z = 0.0;
         }
 
-        let pairs = self.broadphase.build_pairs(&self.objects).to_vec();
-        solve_object_collisions(&mut self.objects, Some(&pairs));
-
-        for object in &mut self.objects {
-            let body = &mut object.body;
-
-            if body.is_dragging || body.is_sleeping {
-                continue;
-            }
-
-            let hit_bounds = solve_screen_bounds(body, bounds, sleep_threshold, floor_snap_threshold);
-            if hit_bounds && object.visual_kind == ObjectVisualKind::DvdLogo {
-                object.base_color = random_logo_color();
-            }
-
-            object.angular_velocity_y += body.velocity.x as f64 * 0.00045;
-            object.angular_velocity_x += body.velocity.y as f64 * 0.00018;
-            object.angular_velocity_z += body.velocity.x as f64 * 0.00012;
-
-            object.angular_velocity_x = clamp(object.angular_velocity_x * 0.992, -340.0, 340.0);
-            object.angular_velocity_y = clamp(object.angular_velocity_y * 0.992, -420.0, 420.0);
-            object.angular_velocity_z = clamp(object.angular_velocity_z * 0.992, -280.0, 280.0);
-
-            if matches!(object.visual_kind, core_types::ObjectVisualKind::Dice) {
-                apply_dice_face_settling(object, bounds, dt, sleep_threshold);
-            }
-
-            object.rotation_x += object.angular_velocity_x * dt as f64;
-            object.rotation_y += object.angular_velocity_y * dt as f64;
-            object.rotation_z += object.angular_velocity_z * dt as f64;
-            update_sleep_state(object, bounds, dt, sleep_threshold, floor_snap_threshold);
-        }
     }
+
+    fn ensure_box3d(&mut self, bounds: RectF) {
+        let key = (bounds.width.max(1.0).round() as u32, bounds.height.max(1.0).round() as u32);
+        if self.box3d.is_none() {
+            self.box3d = Some(Box3dBackend::new(self.gravity.y, bounds));
+            self.box3d_bounds = Some(key);
+            return;
+        }
+
+        if self.box3d_bounds == Some(key) {
+            return;
+        }
+
+        if let Some(box3d) = &mut self.box3d {
+            box3d.reset(self.gravity.y, bounds);
+        }
+        self.box3d_bounds = Some(key);
+    }
+}
+
+fn quat_to_euler_degrees(x: f64, y: f64, z: f64, w: f64) -> (f64, f64, f64) {
+    let sinr_cosp = 2.0 * (w * x + y * z);
+    let cosr_cosp = 1.0 - 2.0 * (x * x + y * y);
+    let roll = sinr_cosp.atan2(cosr_cosp);
+
+    let sinp = 2.0 * (w * y - z * x);
+    let pitch = if sinp.abs() >= 1.0 {
+        sinp.signum() * std::f64::consts::FRAC_PI_2
+    } else {
+        sinp.asin()
+    };
+
+    let siny_cosp = 2.0 * (w * z + x * y);
+    let cosy_cosp = 1.0 - 2.0 * (y * y + z * z);
+    let yaw = siny_cosp.atan2(cosy_cosp);
+
+    (roll.to_degrees(), pitch.to_degrees(), yaw.to_degrees())
 }
 
 pub fn solve_object_collisions(objects: &mut [ObjectState], pairs: Option<&[CollisionPair]>) {
@@ -282,6 +554,7 @@ pub fn solve_screen_bounds(
     hit_x || hit_y
 }
 
+#[allow(dead_code)]
 fn update_sleep_state(
     object: &mut ObjectState,
     bounds: RectF,
@@ -323,6 +596,7 @@ fn update_sleep_state(
     object.angular_velocity_z = 0.0;
 }
 
+#[allow(dead_code)]
 fn apply_dice_face_settling(object: &mut ObjectState, bounds: RectF, dt: f32, sleep_threshold: f32) {
     let body = &mut object.body;
     let is_near_floor = body.position.y + body.height >= bounds.bottom() - 2.0;
@@ -662,14 +936,17 @@ fn pack_cell_key(cell_x: i32, cell_y: i32) -> i64 {
     ((cell_x as i64) << 32) | ((cell_y as u32) as i64)
 }
 
+#[allow(dead_code)]
 fn clamp(value: f64, min: f64, max: f64) -> f64 {
     value.max(min).min(max)
 }
 
+#[allow(dead_code)]
 fn nearest_quarter_turn(angle: f64) -> f64 {
     (angle / 90.0).round() * 90.0
 }
 
+#[allow(dead_code)]
 fn shortest_angle_delta(current: f64, target: f64) -> f64 {
     let mut delta = (target - current) % 360.0;
     if delta > 180.0 {
