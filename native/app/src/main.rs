@@ -171,7 +171,7 @@ struct NativeApp {
     fps_counter: FpsCounter,
 }
 
-const FLOOR_MARGIN_PIXELS: f32 = 18.0;
+const FLOOR_MARGIN_PIXELS: f32 = 0.0;
 const STRESS_SPAWN_COUNT: usize = 25;
 const ROBOT_STACK_DROP_COOLDOWN_SECONDS: f64 = 1.8;
 const ROBOT_THROW_HOLD_SECONDS: f64 = 0.55;
@@ -473,12 +473,16 @@ impl NativeApp {
         }
 
         if is_left_down && !self.was_left_down {
-            let began = self.drag_controller.begin_drag(
-                self.scene.objects_mut(),
-                self.cursor_local,
-                now_seconds,
-                &self.hit_tester,
-            );
+            let began = if self.cursor_is_over_robot_bin() {
+                None
+            } else {
+                self.drag_controller.begin_drag(
+                    self.scene.objects_mut(),
+                    self.cursor_local,
+                    now_seconds,
+                    &self.hit_tester,
+                )
+            };
             self.last_drag_attempt = if let Some(id) = began {
                 self.selected_id = Some(id);
                 self.last_rotation_cursor = self.cursor_local;
@@ -808,7 +812,7 @@ impl NativeApp {
 
     fn robot_bin_rect(&self) -> RectF {
         let bottom = self.scene_bounds().bottom();
-        RectF::new(42.0, bottom - ROBOT_BIN_HEIGHT - 4.0, ROBOT_BIN_WIDTH, ROBOT_BIN_HEIGHT)
+        RectF::new(42.0, bottom - ROBOT_BIN_HEIGHT, ROBOT_BIN_WIDTH, ROBOT_BIN_HEIGHT)
     }
 
     fn robot_bin_target(&self) -> Vector2 {
@@ -844,6 +848,12 @@ impl NativeApp {
             ObjectVisualKind::GamePlank,
         );
         self.robot_bin_ids.extend([floor_id, left_id, right_id]);
+    }
+
+    fn cursor_is_over_robot_bin(&self) -> bool {
+        self.hit_tester
+            .hit_test_topmost(self.scene.objects(), self.cursor_local)
+            .is_some_and(|object| self.robot_bin_ids.contains(&object.id))
     }
 
     fn collect_robot_bin_cubes(&mut self) {
