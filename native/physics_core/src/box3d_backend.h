@@ -25,6 +25,7 @@ typedef struct SopBox3dBodyDef
     float gravityScale;
     bool motorEnabled;
     float motorVelocityX;
+    bool lockRotation;
     float collisionScale;
     int shape;
     bool isDragging;

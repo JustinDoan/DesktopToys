@@ -461,8 +461,8 @@ impl SceneController {
             state.body.width = base_size * 1.7;
             state.body.height = base_size * 0.78;
         } else if visual_kind == ObjectVisualKind::RobotBuddy {
-            state.body.width = base_size * 1.35;
-            state.body.height = base_size * 0.92;
+            state.body.width = base_size * 0.92;
+            state.body.height = base_size * 0.72;
         } else {
             state.body.width = base_size;
             state.body.height = base_size;
@@ -496,6 +496,14 @@ impl SceneController {
             state.body.mass = 1.45;
             state.body.friction = 1.05;
             state.body.restitution = 0.28;
+        }
+        if visual_kind == ObjectVisualKind::RobotBuddy {
+            state.body.mass = 2.2;
+            state.body.friction = 1.35;
+            state.body.restitution = 0.08;
+            state.body.linear_damping = 0.975;
+            state.body.collision_scale = 0.88;
+            state.body.lock_rotation = true;
         }
         if visual_kind == ObjectVisualKind::DvdLogo {
             state.body.velocity = Vector2::new(420.0, 260.0);

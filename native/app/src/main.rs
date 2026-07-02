@@ -172,6 +172,8 @@ struct NativeApp {
 
 const FLOOR_MARGIN_PIXELS: f32 = 18.0;
 const STRESS_SPAWN_COUNT: usize = 25;
+const ROBOT_STACK_MAX_LEVELS: usize = 10;
+const ROBOT_STACK_DROP_COOLDOWN_SECONDS: f64 = 1.8;
 
 impl Default for NativeApp {
     fn default() -> Self {
@@ -400,6 +402,7 @@ impl NativeApp {
         self.update_slingshot_game();
         self.update_robot_buddies(dt);
         self.scene.step(dt, self.scene_bounds());
+        self.stabilize_robot_buddies();
         self.sync_panels();
         window.request_redraw();
     }
@@ -572,7 +575,7 @@ impl NativeApp {
         self.robot_carries
             .retain(|robot_id, carry| robot_ids.contains(robot_id) && objects.iter().any(|object| object.id == carry.object_id));
         self.robot_drop_cooldowns.retain(|robot_id, cooldown| {
-            robot_ids.contains(robot_id) && self.frame_clock.elapsed_seconds - cooldown.dropped_at < 1.6
+            robot_ids.contains(robot_id) && self.frame_clock.elapsed_seconds - cooldown.dropped_at < ROBOT_STACK_DROP_COOLDOWN_SECONDS
         });
 
         for robot_id in robot_ids {
@@ -601,10 +604,16 @@ impl NativeApp {
             if let Some(carry) = self.robot_carries.get(&robot_id).copied() {
                 let held_seconds = self.frame_clock.elapsed_seconds - carry.picked_up_at;
                 let near_edge = robot_center.x < 80.0 || robot_center.x > self.scene_bounds().right() - 80.0;
-                if held_seconds > 2.35 || near_edge {
-                    self.drop_robot_carry(robot_id, facing * 95.0);
+                let stack_x = self.robot_stack_x(robot_id);
+                let stack_dx = stack_x - robot_center.x;
+                if near_edge || held_seconds > 7.0 {
+                    self.drop_robot_carry(robot_id, facing * 70.0);
+                } else if stack_dx.abs() < robot_snapshot.body.width * 0.52 {
+                    self.place_robot_carry_on_stack(robot_id, carry.object_id);
                 } else {
                     self.position_robot_carry(robot_snapshot, carry.object_id, facing);
+                    self.drive_robot(robot_id, stack_dx.clamp(-1.0, 1.0), 86.0);
+                    continue;
                 }
             }
 
@@ -642,8 +651,8 @@ impl NativeApp {
                 continue;
             }
 
-            let patrol = ((self.frame_clock.elapsed_seconds * 0.38 + robot_id as f64 * 0.17).sin() as f32).signum();
-            let target_x = robot_center.x + patrol * 240.0;
+            let patrol = ((self.frame_clock.elapsed_seconds * 0.32 + robot_id as f64 * 0.17).sin() as f32).signum();
+            let target_x = self.robot_stack_x(robot_id) - 180.0 + patrol * 220.0;
             let direction = (target_x - robot_center.x).clamp(-1.0, 1.0);
             let speed = if is_carrying { 72.0 } else { 64.0 };
             self.drive_robot(robot_id, direction, speed);
@@ -651,12 +660,19 @@ impl NativeApp {
     }
 
     fn is_robot_carry_candidate(&self, robot_id: u64, object: &ObjectState) -> bool {
+        let bounds = self.scene_bounds();
+        let stack_x = self.robot_stack_x(robot_id);
+        let center_x = object.body.position.x + object.body.width * 0.5;
+        let bottom_y = object.body.position.y + object.body.height;
         object.id != robot_id
             && object.body.collidable
             && !object.is_dragging
             && !object.body.is_dragging
+            && object.visual_kind == ObjectVisualKind::Cube
             && object.body.width <= 120.0
             && object.body.height <= 120.0
+            && bottom_y > bounds.bottom() - 210.0
+            && (center_x - stack_x).abs() > object.body.width.max(42.0) * 1.35
             && !self.robot_carries.values().any(|carry| carry.object_id == object.id)
             && !self
                 .robot_drop_cooldowns
@@ -683,7 +699,12 @@ impl NativeApp {
             robot.body.motor_enabled = motor_velocity != 0.0;
             robot.body.motor_velocity_x = motor_velocity;
             robot.body.velocity.x = motor_velocity;
+            robot.rotation_x *= 0.65;
+            robot.rotation_y *= 0.65;
             robot.rotation_z = 0.0;
+            robot.angular_velocity_x = 0.0;
+            robot.angular_velocity_y = 0.0;
+            robot.angular_velocity_z = 0.0;
         }
     }
 
@@ -724,6 +745,95 @@ impl NativeApp {
                 dropped_at: self.frame_clock.elapsed_seconds,
             },
         );
+    }
+
+    fn place_robot_carry_on_stack(&mut self, robot_id: u64, object_id: u64) {
+        let Some(carry) = self.robot_carries.remove(&robot_id) else {
+            return;
+        };
+        let Some(slot) = self.robot_stack_slot(robot_id, object_id) else {
+            self.robot_carries.insert(robot_id, carry);
+            return;
+        };
+        if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == object_id) {
+            object.is_dragging = false;
+            object.body.is_dragging = false;
+            object.body.is_sleeping = false;
+            object.body.position = slot;
+            object.body.velocity = Vector2::ZERO;
+            object.rotation_x = 0.0;
+            object.rotation_y = 0.0;
+            object.rotation_z = 0.0;
+            object.angular_velocity_x = 0.0;
+            object.angular_velocity_y = 0.0;
+            object.angular_velocity_z = 0.0;
+        }
+        self.robot_drop_cooldowns.insert(
+            robot_id,
+            RobotDropCooldown {
+                object_id,
+                dropped_at: self.frame_clock.elapsed_seconds,
+            },
+        );
+    }
+
+    fn robot_stack_x(&self, robot_id: u64) -> f32 {
+        let offset = ((robot_id % 5) as f32 - 2.0) * 34.0;
+        (self.scene_bounds().width * 0.72 + offset).clamp(120.0, self.scene_bounds().right() - 120.0)
+    }
+
+    fn robot_stack_slot(&self, robot_id: u64, object_id: u64) -> Option<Vector2> {
+        let object = self.scene.objects().iter().find(|object| object.id == object_id)?;
+        let stack_x = self.robot_stack_x(robot_id);
+        let level = self.robot_stack_level(stack_x, object);
+        Some(Vector2::new(
+            stack_x - object.body.width * 0.5,
+            self.scene_bounds().bottom() - object.body.height * (level as f32 + 1.0) - 2.0,
+        ))
+    }
+
+    fn robot_stack_level(&self, stack_x: f32, carried: &ObjectState) -> usize {
+        let bottom = self.scene_bounds().bottom();
+        self.scene
+            .objects()
+            .iter()
+            .filter(|object| object.id != carried.id)
+            .filter(|object| object.visual_kind == ObjectVisualKind::Cube)
+            .filter(|object| {
+                let center_x = object.body.position.x + object.body.width * 0.5;
+                let object_bottom = object.body.position.y + object.body.height;
+                (center_x - stack_x).abs() < carried.body.width.max(42.0) * 0.85
+                    && object_bottom > bottom - carried.body.height * (ROBOT_STACK_MAX_LEVELS as f32 + 1.0)
+            })
+            .count()
+            .min(ROBOT_STACK_MAX_LEVELS)
+    }
+
+    fn stabilize_robot_buddies(&mut self) {
+        for object in self
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .filter(|object| object.visual_kind == ObjectVisualKind::RobotBuddy)
+        {
+            object.rotation_x *= 0.35;
+            object.rotation_y *= 0.35;
+            object.rotation_z *= 0.2;
+            if object.rotation_x.abs() < 1.0 {
+                object.rotation_x = 0.0;
+            }
+            if object.rotation_y.abs() < 1.0 {
+                object.rotation_y = 0.0;
+            }
+            if object.rotation_z.abs() < 1.0 {
+                object.rotation_z = 0.0;
+            }
+            object.angular_velocity_x = 0.0;
+            object.angular_velocity_y = 0.0;
+            object.angular_velocity_z = 0.0;
+            object.body.lock_rotation = true;
+            object.body.is_sleeping = false;
+        }
     }
 
     fn toggle_slingshot_game(&mut self) {

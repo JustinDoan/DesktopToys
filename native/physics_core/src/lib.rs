@@ -36,6 +36,7 @@ struct SopBox3dBodyDef {
     gravity_scale: f32,
     motor_enabled: bool,
     motor_velocity_x: f32,
+    lock_rotation: bool,
     collision_scale: f32,
     shape: i32,
     is_dragging: bool,
@@ -67,6 +68,7 @@ struct BodySyncState {
     gravity_scale: f32,
     motor_enabled: bool,
     motor_velocity_x: f32,
+    lock_rotation: bool,
     collision_scale: f32,
     shape: i32,
     is_dragging: bool,
@@ -83,6 +85,7 @@ impl BodySyncState {
             || self.gravity_scale != next.gravity_scale
             || self.motor_enabled != next.motor_enabled
             || self.motor_velocity_x != next.motor_velocity_x
+            || self.lock_rotation != next.lock_rotation
             || self.collision_scale != next.collision_scale
             || self.shape != next.shape
     }
@@ -179,6 +182,7 @@ impl Box3dBackend {
             gravity_scale: body.gravity_scale,
             motor_enabled: body.motor_enabled,
             motor_velocity_x: body.motor_velocity_x,
+            lock_rotation: body.lock_rotation,
             collision_scale: body.collision_scale,
             shape,
             is_dragging,
@@ -208,6 +212,7 @@ impl Box3dBackend {
             gravity_scale: body.gravity_scale,
             motor_enabled: body.motor_enabled,
             motor_velocity_x: body.motor_velocity_x,
+            lock_rotation: body.lock_rotation,
             collision_scale: body.collision_scale,
             shape,
             is_dragging,

@@ -216,6 +216,9 @@ void sop_box3d_add_body(SopBox3dWorld* world, const SopBox3dBodyDef* def)
     bodyDef.gravityScale = def->gravityScale;
     bodyDef.sleepThreshold = 0.08f;
     bodyDef.motionLocks.linearZ = true;
+    bodyDef.motionLocks.angularX = def->lockRotation;
+    bodyDef.motionLocks.angularY = def->lockRotation;
+    bodyDef.motionLocks.angularZ = def->lockRotation;
     bodyDef.enableSleep = true;
     bodyDef.isAwake = true;
 
@@ -292,6 +295,12 @@ void sop_box3d_sync_body(SopBox3dWorld* world, const SopBox3dBodyDef* def)
 
     b3Body_SetGravityScale(body->bodyId, def->gravityScale);
     b3Body_SetLinearDamping(body->bodyId, fmaxf(0.0f, (1.0f - def->linearDamping) * 8.0f));
+    b3MotionLocks locks = b3Body_GetMotionLocks(body->bodyId);
+    locks.linearZ = true;
+    locks.angularX = def->lockRotation;
+    locks.angularY = def->lockRotation;
+    locks.angularZ = def->lockRotation;
+    b3Body_SetMotionLocks(body->bodyId, locks);
     if (b3Shape_IsValid(body->shapeId))
     {
         b3Shape_SetFriction(body->shapeId, fmaxf(def->friction, 0.0f));
