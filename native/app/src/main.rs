@@ -375,7 +375,7 @@ impl NativeApp {
         if self.drag_controller.is_dragging() {
             self.drag_controller
                 .update_drag(self.scene.objects_mut(), self.cursor_local, now);
-            self.update_rotation_drag(pointer.right_down);
+            self.update_held_object_rotation(pointer.right_down);
         }
 
         self.handle_global_mouse_buttons(now, pointer.left_down, pointer.right_down);
@@ -446,6 +446,7 @@ impl NativeApp {
             );
             self.last_drag_attempt = if let Some(id) = began {
                 self.selected_id = Some(id);
+                self.last_rotation_cursor = self.cursor_local;
                 "begin:primary".to_string()
             } else {
                 "miss:primary".to_string()
@@ -534,7 +535,7 @@ impl NativeApp {
         self.is_rotation_dragging = false;
     }
 
-    fn update_rotation_drag(&mut self, is_right_down: bool) {
+    fn update_held_object_rotation(&mut self, precision_twist: bool) {
         let Some(selected_id) = self.selected_id else {
             self.is_rotation_dragging = false;
             return;
@@ -545,7 +546,7 @@ impl NativeApp {
             return;
         };
 
-        if self.drag_controller.dragged_id() != Some(selected_id) || !is_right_down {
+        if self.drag_controller.dragged_id() != Some(selected_id) {
             self.is_rotation_dragging = false;
             return;
         }
@@ -558,13 +559,31 @@ impl NativeApp {
 
         let delta = self.cursor_local - self.last_rotation_cursor;
         self.last_rotation_cursor = self.cursor_local;
-        let rotation_sensitivity = 0.72f64;
-        object.rotation_y += delta.x as f64 * rotation_sensitivity;
-        object.rotation_x += delta.y as f64 * rotation_sensitivity;
-        object.angular_velocity_y = delta.x as f64 * rotation_sensitivity * 40.0;
-        object.angular_velocity_x = delta.y as f64 * rotation_sensitivity * 40.0;
-        object.angular_velocity_z = delta.x as f64 * rotation_sensitivity * 8.0;
-        self.last_drag_attempt = format!("rotate:{:.1},{:.1}", delta.x, delta.y);
+        if delta.length_squared() <= 0.01 {
+            return;
+        }
+
+        let size = object.body.width.max(object.body.height).max(1.0) as f64;
+        let center = Vector2::new(
+            object.body.position.x + object.body.width * 0.5,
+            object.body.position.y + object.body.height * 0.5,
+        );
+        let grab = self.cursor_local - center;
+        let torque = ((grab.x * delta.y) - (grab.y * delta.x)) as f64 / size;
+        let tumble = if precision_twist { 1.28 } else { 0.72 };
+        let roll = if precision_twist { 0.34 } else { 0.18 };
+
+        object.rotation_y += (delta.x as f64 / size) * tumble;
+        object.rotation_x += (delta.y as f64 / size) * tumble;
+        object.rotation_z += torque * roll;
+        object.angular_velocity_y = (delta.x as f64 / size) * tumble * 48.0;
+        object.angular_velocity_x = (delta.y as f64 / size) * tumble * 48.0;
+        object.angular_velocity_z = torque * roll * 56.0;
+        self.last_drag_attempt = if precision_twist {
+            format!("twist:{:.1},{:.1}", delta.x, delta.y)
+        } else {
+            format!("tumble:{:.1},{:.1}", delta.x, delta.y)
+        };
     }
 
     fn sync_panels(&mut self) {
