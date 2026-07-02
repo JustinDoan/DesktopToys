@@ -553,13 +553,13 @@ impl NativeApp {
 
     fn build_slingshot_level(&mut self, bounds: RectF) {
         let anchor = self.slingshot_game.anchor;
-        self.spawn_pinned_game_object(
+        self.spawn_static_game_object(
             Vector2::new(bounds.width * 0.5 - 220.0, bounds.bottom() - 28.0),
             Vector2::new(440.0, 28.0),
             AppColor::from_rgb(76, 124, 64),
             ObjectVisualKind::GamePlank,
         );
-        self.spawn_pinned_game_object(
+        self.spawn_static_game_object(
             Vector2::new((bounds.width * 0.66).max(anchor.x + 340.0) - 28.0, bounds.bottom() - 34.0),
             Vector2::new(500.0, 34.0),
             AppColor::from_rgb(84, 130, 68),
@@ -613,7 +613,7 @@ impl NativeApp {
         }
         self.update_slingshot_bands();
 
-        let floor = bounds.bottom() - FLOOR_MARGIN_PIXELS;
+        let floor = bounds.bottom() - 34.0;
         let base_x = (bounds.width * 0.66).max(anchor.x + 340.0);
         let block = AppColor::from_rgb(165, 116, 75);
         let glass = AppColor::from_rgb(105, 218, 236);
@@ -621,35 +621,33 @@ impl NativeApp {
 
         for tower in 0..2 {
             let x = base_x + tower as f32 * 175.0;
-            for row in 0..4 {
-                let y = floor - 34.0 - row as f32 * 54.0;
+            for row in 0..3 {
+                let y = floor - 62.0 - row as f32 * 86.0;
                 self.scene.spawn_custom_object(
                     Vector2::new(x, y),
-                    Vector2::new(26.0, 58.0),
+                    Vector2::new(26.0, 62.0),
                     block,
                     ObjectVisualKind::GamePlank,
                     CollisionShape::Box,
                 );
                 self.scene.spawn_custom_object(
                     Vector2::new(x + 92.0, y),
-                    Vector2::new(26.0, 58.0),
+                    Vector2::new(26.0, 62.0),
                     block,
                     ObjectVisualKind::GamePlank,
                     CollisionShape::Box,
                 );
-                if row % 2 == 0 {
-                    self.scene.spawn_custom_object(
-                        Vector2::new(x + 15.0, y - 18.0),
-                        Vector2::new(90.0, 22.0),
-                        glass,
-                        ObjectVisualKind::GamePlank,
-                        CollisionShape::Box,
-                    );
-                }
+                self.scene.spawn_custom_object(
+                    Vector2::new(x + 8.0, y - 24.0),
+                    Vector2::new(102.0, 20.0),
+                    glass,
+                    ObjectVisualKind::GamePlank,
+                    CollisionShape::Box,
+                );
             }
 
             let target_id = self.scene.spawn_custom_object(
-                Vector2::new(x + 39.0, floor - 78.0),
+                Vector2::new(x + 39.0, floor - 104.0),
                 Vector2::new(42.0, 42.0),
                 target,
                 ObjectVisualKind::GameTarget,
@@ -657,11 +655,11 @@ impl NativeApp {
             );
             self.slingshot_game.targets.push(TargetMarker {
                 id: target_id,
-                start_position: Vector2::new(x + 39.0, floor - 78.0),
+                start_position: Vector2::new(x + 39.0, floor - 104.0),
             });
 
             self.scene.spawn_custom_object(
-                Vector2::new(x + 21.0, floor - 252.0),
+                Vector2::new(x + 21.0, floor - 284.0),
                 Vector2::new(78.0, 24.0),
                 AppColor::from_rgb(248, 211, 84),
                 ObjectVisualKind::GamePlank,
@@ -685,6 +683,28 @@ impl NativeApp {
             object.is_dragging = true;
             object.body.gravity_scale = 0.0;
             object.body.velocity = Vector2::ZERO;
+            object.body.collidable = false;
+        }
+        id
+    }
+
+    fn spawn_static_game_object(
+        &mut self,
+        position: Vector2,
+        size: Vector2,
+        color: AppColor,
+        visual_kind: ObjectVisualKind,
+    ) -> u64 {
+        let id = self
+            .scene
+            .spawn_custom_object(position, size, color, visual_kind, CollisionShape::Box);
+        if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == id) {
+            object.body.is_dragging = true;
+            object.is_dragging = true;
+            object.body.gravity_scale = 0.0;
+            object.body.velocity = Vector2::ZERO;
+            object.body.restitution = 0.18;
+            object.body.linear_damping = 1.0;
         }
         id
     }

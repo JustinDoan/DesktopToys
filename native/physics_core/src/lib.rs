@@ -150,6 +150,10 @@ impl Box3dBackend {
 
     fn sync_body_if_needed(&mut self, object: &ObjectState) {
         let body = &object.body;
+        if !body.collidable {
+            self.synced_bodies.remove(&object.id);
+            return;
+        }
         let shape = match body.shape {
             CollisionShape::Box => 0,
             CollisionShape::Circle => 1,
@@ -297,6 +301,9 @@ impl BroadphaseGrid {
     fn fill_cells(&mut self, objects: &[ObjectState]) {
         for (object_index, object) in objects.iter().enumerate() {
             let body = &object.body;
+            if !body.collidable {
+                continue;
+            }
             let min_cell_x = self.to_cell_index(body.position.x);
             let max_cell_x = self.to_cell_index(body.position.x + body.width);
             let min_cell_y = self.to_cell_index(body.position.y);
@@ -409,6 +416,9 @@ impl PhysicsWorld {
 
         box3d.set_gravity(self.gravity.y);
         for object in &self.objects {
+            if !object.body.collidable {
+                continue;
+            }
             box3d.sync_body_if_needed(object);
         }
 
