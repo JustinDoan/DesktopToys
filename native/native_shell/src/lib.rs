@@ -280,7 +280,7 @@ impl GlobalInputPoller {
                 screen_position: mouse.coords,
                 local_position: Vector2::new(local_x, local_y),
                 left_down: *mouse.button_pressed.get(1).unwrap_or(&false),
-                right_down: *mouse.button_pressed.get(3).unwrap_or(&false),
+                right_down: *mouse.button_pressed.get(2).unwrap_or(&false),
                 spawn_stress_down: keys.contains(&Keycode::F9),
                 import_keys: GlobalImportKeys {
                     up: keys.contains(&Keycode::Up),
