@@ -145,6 +145,7 @@ pub enum ObjectVisualKind {
     Star,
     GamePlank,
     GameTarget,
+    FoxBuddy,
     ImportedModel,
 }
 

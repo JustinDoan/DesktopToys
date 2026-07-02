@@ -3,6 +3,7 @@ use std::{collections::HashMap, fs::File, io::BufReader, mem, path::Path};
 use anyhow::{bail, Context, Result};
 use core_types::{AppColor, ObjectState, ObjectVisualKind, RectF, Vector2};
 use font8x8::UnicodeFonts;
+use gltf::mesh::util::ReadIndices;
 
 #[derive(Clone, Debug)]
 pub struct PanelLine {
@@ -170,6 +171,7 @@ impl SceneRenderer {
                 rectangular_prism_mesh(object.body.width.max(1.0), object.body.height.max(1.0), size * 0.42, object.base_color)
             }),
             ObjectVisualKind::GameTarget => self.generated_mesh(key, || target_mesh(size, object.base_color)),
+            ObjectVisualKind::FoxBuddy => self.generated_mesh(key, || fox_buddy_mesh(size)),
             ObjectVisualKind::DvdLogo => self.generated_mesh(key, || {
                 dvd_logo_mesh(object.body.width.max(1.0), object.body.height.max(1.0), object.base_color)
             }),
@@ -222,7 +224,8 @@ impl MeshCacheKey {
                 ObjectVisualKind::Star => 9,
                 ObjectVisualKind::GamePlank => 10,
                 ObjectVisualKind::GameTarget => 11,
-                ObjectVisualKind::ImportedModel => 12,
+                ObjectVisualKind::FoxBuddy => 12,
+                ObjectVisualKind::ImportedModel => 13,
             },
             width_milli: quantize_size(object.body.width.max(1.0)),
             height_milli: quantize_size(object.body.height.max(1.0)),
@@ -544,6 +547,14 @@ fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds
         },
         ObjectVisualKind::GameTarget => {
             center_z += 12.0;
+        },
+        ObjectVisualKind::FoxBuddy => {
+            let speed = object.body.velocity.x.abs() + object.body.velocity.y.abs();
+            let stride = ((elapsed_seconds * (3.4 + speed as f64 * 0.012)) + phase).sin();
+            center_z += 18.0 + stride.abs() as f32 * 4.0;
+            rotation_y += stride * 4.0;
+            rotation_z += (object.body.velocity.x as f64 * 0.012).clamp(-10.0, 10.0);
+            scale_y *= 1.0 + stride.abs() as f32 * 0.035;
         },
         ObjectVisualKind::ImportedModel => {
             center_z += 12.0;
@@ -1321,6 +1332,123 @@ fn load_stl_mesh(path: &str) -> Result<Mesh> {
     }
 
     Ok(Mesh { triangles })
+}
+
+fn fox_buddy_mesh(target_size: f32) -> Mesh {
+    static FOX_GLB: &[u8] = include_bytes!("../../../Assets/characters/fox/Fox.glb");
+    match load_gltf_mesh_from_slice(FOX_GLB, target_size, AppColor::from_rgb(245, 126, 48)) {
+        Ok(mesh) => mesh,
+        Err(_) => ball_mesh(target_size, AppColor::from_rgb(245, 126, 48)),
+    }
+}
+
+fn load_gltf_mesh_from_slice(bytes: &[u8], target_size: f32, fallback_color: AppColor) -> Result<Mesh> {
+    let (document, buffers, _) = gltf::import_slice(bytes).context("Failed to import GLB model")?;
+    let mut mesh = Mesh {
+        triangles: Vec::new(),
+    };
+
+    for scene in document.scenes() {
+        for node in scene.nodes() {
+            append_gltf_node(&mut mesh, &node, &buffers, identity_matrix(), fallback_color)?;
+        }
+    }
+
+    if mesh.triangles.is_empty() {
+        bail!("GLB model contained no triangles.");
+    }
+
+    limit_imported_mesh(&mut mesh);
+    normalize_mesh(&mut mesh, target_size)?;
+    Ok(mesh)
+}
+
+fn append_gltf_node(
+    mesh: &mut Mesh,
+    node: &gltf::Node<'_>,
+    buffers: &[gltf::buffer::Data],
+    parent_transform: [[f32; 4]; 4],
+    fallback_color: AppColor,
+) -> Result<()> {
+    let transform = multiply_matrix(parent_transform, node.transform().matrix());
+    if let Some(node_mesh) = node.mesh() {
+        for primitive in node_mesh.primitives() {
+            let reader = primitive.reader(|buffer| buffers.get(buffer.index()).map(|data| data.0.as_slice()));
+            let Some(positions) = reader.read_positions() else {
+                continue;
+            };
+            let positions: Vec<[f32; 3]> = positions.collect();
+            let indices: Vec<u32> = match reader.read_indices() {
+                Some(ReadIndices::U8(values)) => values.map(u32::from).collect(),
+                Some(ReadIndices::U16(values)) => values.map(u32::from).collect(),
+                Some(ReadIndices::U32(values)) => values.collect(),
+                None => (0..positions.len() as u32).collect(),
+            };
+
+            let material = primitive.material();
+            let color_factor = material.pbr_metallic_roughness().base_color_factor();
+            let color = AppColor::from_argb(
+                (color_factor[3] * 255.0).round().clamp(0.0, 255.0) as u8,
+                multiply_channel(fallback_color.r, (color_factor[0] * 255.0).round().clamp(0.0, 255.0) as u8),
+                multiply_channel(fallback_color.g, (color_factor[1] * 255.0).round().clamp(0.0, 255.0) as u8),
+                multiply_channel(fallback_color.b, (color_factor[2] * 255.0).round().clamp(0.0, 255.0) as u8),
+            );
+
+            for face in indices.chunks_exact(3) {
+                let a = positions[face[0] as usize];
+                let b = positions[face[1] as usize];
+                let c = positions[face[2] as usize];
+                mesh.triangles.push(SourceTriangle {
+                    vertices: [
+                        transform_gltf_vertex(a, transform),
+                        transform_gltf_vertex(b, transform),
+                        transform_gltf_vertex(c, transform),
+                    ],
+                    color,
+                    alpha: color.a,
+                });
+            }
+        }
+    }
+
+    for child in node.children() {
+        append_gltf_node(mesh, &child, buffers, transform, fallback_color)?;
+    }
+
+    Ok(())
+}
+
+fn identity_matrix() -> [[f32; 4]; 4] {
+    [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+}
+
+fn multiply_matrix(left: [[f32; 4]; 4], right: [[f32; 4]; 4]) -> [[f32; 4]; 4] {
+    let mut result = [[0.0; 4]; 4];
+    for row in 0..4 {
+        for column in 0..4 {
+            result[row][column] = left[row][0] * right[0][column]
+                + left[row][1] * right[1][column]
+                + left[row][2] * right[2][column]
+                + left[row][3] * right[3][column];
+        }
+    }
+    result
+}
+
+fn transform_gltf_vertex(vertex: [f32; 3], transform: [[f32; 4]; 4]) -> Vec3 {
+    let x = vertex[0];
+    let y = vertex[1];
+    let z = vertex[2];
+    Vec3::new(
+        transform[0][0] * x + transform[0][1] * y + transform[0][2] * z + transform[0][3],
+        -(transform[1][0] * x + transform[1][1] * y + transform[1][2] * z + transform[1][3]),
+        transform[2][0] * x + transform[2][1] * y + transform[2][2] * z + transform[2][3],
+    )
 }
 
 fn limit_imported_mesh(mesh: &mut Mesh) {

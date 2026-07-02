@@ -149,6 +149,7 @@ struct NativeApp {
     was_right_down: bool,
     was_stress_spawn_down: bool,
     was_slingshot_toggle_down: bool,
+    was_fox_buddy_down: bool,
     force_interactive_for_debug: bool,
     is_rotation_dragging: bool,
     last_drag_attempt: String,
@@ -201,6 +202,7 @@ impl Default for NativeApp {
             was_right_down: false,
             was_stress_spawn_down: false,
             was_slingshot_toggle_down: false,
+            was_fox_buddy_down: false,
             force_interactive_for_debug: false,
             is_rotation_dragging: false,
             last_drag_attempt: "none".to_string(),
@@ -355,6 +357,7 @@ impl NativeApp {
                         right_down: self.fallback_right_down,
                         spawn_stress_down: false,
                         slingshot_toggle_down: false,
+                        fox_buddy_down: false,
                         import_keys: GlobalImportKeys::default(),
                     }
                 },
@@ -367,6 +370,7 @@ impl NativeApp {
                 right_down: self.fallback_right_down,
                 spawn_stress_down: false,
                 slingshot_toggle_down: false,
+                fox_buddy_down: false,
                 import_keys: GlobalImportKeys::default(),
             }
         };
@@ -387,6 +391,7 @@ impl NativeApp {
         self.handle_global_mouse_buttons(now, pointer.left_down, pointer.right_down);
         self.handle_global_stress_spawn(pointer.spawn_stress_down);
         self.handle_global_slingshot_toggle(pointer.slingshot_toggle_down);
+        self.handle_global_fox_buddy(pointer.fox_buddy_down);
         self.handle_global_import_keys(pointer.import_keys);
         self.update_slingshot_game();
         self.scene.step(dt, self.scene_bounds());
@@ -494,6 +499,13 @@ impl NativeApp {
         self.was_slingshot_toggle_down = is_down;
     }
 
+    fn handle_global_fox_buddy(&mut self, is_down: bool) {
+        if is_down && !self.was_fox_buddy_down {
+            self.spawn_fox_buddy();
+        }
+        self.was_fox_buddy_down = is_down;
+    }
+
     fn handle_global_import_keys(&mut self, keys: GlobalImportKeys) {
         if self.import_panel.is_none() {
             self.previous_global_import_keys = keys;
@@ -528,6 +540,18 @@ impl NativeApp {
             .spawn_small_cube_batch(self.default_spawn_position(), STRESS_SPAWN_COUNT);
         self.selected_id = id;
         self.push_status_message(format!("Spawned {STRESS_SPAWN_COUNT} stress cubes."));
+    }
+
+    fn spawn_fox_buddy(&mut self) {
+        let mut position = self.default_spawn_position();
+        position.y = (position.y + 120.0).min(self.scene_bounds().bottom() - 140.0);
+        let id = self.scene.spawn_object(
+            position,
+            Some(AppColor::from_rgb(255, 255, 255)),
+            ObjectVisualKind::FoxBuddy,
+        );
+        self.selected_id = Some(id);
+        self.push_status_message("Fox buddy joined the desktop.".to_string());
     }
 
     fn toggle_slingshot_game(&mut self) {
@@ -1010,6 +1034,10 @@ impl NativeApp {
                     text: format!("F9: +{} cubes", STRESS_SPAWN_COUNT),
                     selected: false,
                 },
+                PanelLine {
+                    text: "F11: fox buddy".to_string(),
+                    selected: false,
+                },
             ],
             footer: Vec::new(),
         });
@@ -1170,6 +1198,9 @@ impl NativeApp {
             AppAction::SpawnStressCubes => {
                 self.spawn_stress_cubes();
             },
+            AppAction::SpawnFoxBuddy => {
+                self.spawn_fox_buddy();
+            },
             AppAction::ToggleSlingshotGame => {
                 self.toggle_slingshot_game();
             },
@@ -1236,6 +1267,7 @@ impl NativeApp {
             KeyCode::F8 => self.handle_action(AppAction::SpawnDvdLogo, event_loop),
             KeyCode::F9 => self.handle_action(AppAction::SpawnStressCubes, event_loop),
             KeyCode::F10 => self.handle_action(AppAction::ToggleSlingshotGame, event_loop),
+            KeyCode::F11 => self.handle_action(AppAction::SpawnFoxBuddy, event_loop),
             KeyCode::Escape => self.handle_action(AppAction::Exit, event_loop),
             _ => {},
         }
@@ -2431,6 +2463,7 @@ enum AppAction {
     SpawnCrystal,
     SpawnDvdLogo,
     SpawnStressCubes,
+    SpawnFoxBuddy,
     ToggleSlingshotGame,
     Reset,
     ToggleSettings,
