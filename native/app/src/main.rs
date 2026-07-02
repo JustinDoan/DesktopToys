@@ -508,6 +508,7 @@ impl NativeApp {
     }
 
     fn end_drag_and_apply_spin(&mut self, now_seconds: f64) {
+        let rotated_while_held = self.is_rotation_dragging;
         let throw_sensitivity = self.scene.config().throw_sensitivity;
         let max_throw_speed = self.scene.config().max_throw_speed;
         let throw_velocity = self.drag_controller.end_drag(
@@ -529,9 +530,15 @@ impl NativeApp {
             return;
         };
 
-        object.angular_velocity_y += throw_velocity.x as f64 * 0.22;
-        object.angular_velocity_x += throw_velocity.y as f64 * 0.16;
-        object.angular_velocity_z += throw_velocity.x as f64 * 0.08;
+        if rotated_while_held {
+            object.angular_velocity_y += throw_velocity.x as f64 * 0.18;
+            object.angular_velocity_x += throw_velocity.y as f64 * 0.12;
+            object.angular_velocity_z += throw_velocity.x as f64 * 0.06;
+        } else {
+            object.angular_velocity_x = 0.0;
+            object.angular_velocity_y = 0.0;
+            object.angular_velocity_z = 0.0;
+        }
         self.is_rotation_dragging = false;
     }
 
@@ -547,6 +554,9 @@ impl NativeApp {
         };
 
         if self.drag_controller.dragged_id() != Some(selected_id) || !is_right_down {
+            object.angular_velocity_x = 0.0;
+            object.angular_velocity_y = 0.0;
+            object.angular_velocity_z = 0.0;
             self.is_rotation_dragging = false;
             return;
         }
