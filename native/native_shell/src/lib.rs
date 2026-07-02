@@ -477,7 +477,7 @@ impl TrayController {
 pub fn pick_model_file() -> Option<PathBuf> {
     FileDialog::new()
         .set_title("Import 3D Model")
-        .add_filter("3D Models", &["obj", "stl", "fbx"])
+        .add_filter("3D Models", &["obj", "stl"])
         .pick_file()
 }
 

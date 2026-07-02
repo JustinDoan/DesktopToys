@@ -73,6 +73,8 @@ struct DrawTriangle {
     alpha: u8,
 }
 
+const MAX_IMPORTED_TRIANGLES: usize = 4_000;
+
 #[derive(Clone, Copy, Debug, Default)]
 struct Vec3 {
     x: f32,
@@ -1206,6 +1208,7 @@ fn load_mesh(path: &str, target_size: f32) -> Result<Mesh> {
         _ => bail!("Unsupported model format: {extension}"),
     };
 
+    limit_imported_mesh(&mut mesh);
     normalize_mesh(&mut mesh, target_size)?;
     Ok(mesh)
 }
@@ -1265,6 +1268,20 @@ fn load_stl_mesh(path: &str) -> Result<Mesh> {
     }
 
     Ok(Mesh { triangles })
+}
+
+fn limit_imported_mesh(mesh: &mut Mesh) {
+    let triangle_count = mesh.triangles.len();
+    if triangle_count <= MAX_IMPORTED_TRIANGLES {
+        return;
+    }
+
+    let mut limited = Vec::with_capacity(MAX_IMPORTED_TRIANGLES);
+    for index in 0..MAX_IMPORTED_TRIANGLES {
+        let source_index = index * triangle_count / MAX_IMPORTED_TRIANGLES;
+        limited.push(mesh.triangles[source_index]);
+    }
+    mesh.triangles = limited;
 }
 
 fn normalize_mesh(mesh: &mut Mesh, target_size: f32) -> Result<()> {
