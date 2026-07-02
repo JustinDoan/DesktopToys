@@ -757,7 +757,7 @@ fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds
             } else {
                 object.body.velocity.x
             };
-            if facing_velocity < -1.0 {
+            if facing_velocity > 1.0 {
                 scale_x *= -1.0;
             }
         },
