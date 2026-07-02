@@ -407,6 +407,7 @@ impl NativeApp {
         self.update_slingshot_game();
         self.update_robot_buddies(dt);
         self.scene.step(dt, self.scene_bounds());
+        self.collect_robot_bin_cubes();
         self.stabilize_robot_buddies();
         self.sync_panels();
         window.request_redraw();
@@ -796,7 +797,7 @@ impl NativeApp {
             object.body.position.y + object.body.height * 0.5,
         );
         let distance_x = (target.x - start.x).abs();
-        let travel_time = (distance_x / 760.0).clamp(0.68, 1.55);
+        let travel_time = (distance_x / 520.0).clamp(1.05, 2.05);
         let gravity = self.scene.config().gravity_y.max(240.0);
         Some(Vector2::new(
             (target.x - start.x) / travel_time,
@@ -811,7 +812,7 @@ impl NativeApp {
 
     fn robot_bin_target(&self) -> Vector2 {
         let bin = self.robot_bin_rect();
-        Vector2::new(bin.x + bin.width * 0.5, bin.y + bin.height * 0.46)
+        Vector2::new(bin.x + bin.width * 0.5, bin.y + bin.height * 0.34)
     }
 
     fn ensure_robot_bin(&mut self) {
@@ -842,6 +843,40 @@ impl NativeApp {
             ObjectVisualKind::GamePlank,
         );
         self.robot_bin_ids.extend([floor_id, left_id, right_id]);
+    }
+
+    fn collect_robot_bin_cubes(&mut self) {
+        if self.robot_bin_ids.is_empty() {
+            return;
+        }
+        let bin = self.robot_bin_rect();
+        let collected: Vec<u64> = self
+            .scene
+            .objects()
+            .iter()
+            .filter(|object| object.visual_kind == ObjectVisualKind::Cube)
+            .filter(|object| !object.body.is_dragging && !object.is_dragging)
+            .filter(|object| {
+                let center = Vector2::new(
+                    object.body.position.x + object.body.width * 0.5,
+                    object.body.position.y + object.body.height * 0.5,
+                );
+                center.x > bin.x + ROBOT_BIN_WALL
+                    && center.x < bin.right() - ROBOT_BIN_WALL
+                    && center.y > bin.y
+                    && center.y < bin.bottom() - ROBOT_BIN_WALL * 0.5
+            })
+            .map(|object| object.id)
+            .collect();
+        if collected.is_empty() {
+            return;
+        }
+        for id in &collected {
+            let _ = self.scene.remove_object(*id);
+        }
+        self.robot_carries.retain(|_, carry| !collected.contains(&carry.object_id));
+        self.robot_drop_cooldowns
+            .retain(|_, cooldown| !collected.contains(&cooldown.object_id));
     }
 
     fn stabilize_robot_buddies(&mut self) {

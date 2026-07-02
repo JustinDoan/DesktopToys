@@ -102,6 +102,7 @@ unsafe extern "C" {
     fn sop_box3d_reset(world: *mut c_void, gravity_y: f32, bounds_width: f32, bounds_height: f32);
     fn sop_box3d_set_gravity(world: *mut c_void, gravity_y: f32);
     fn sop_box3d_sync_body(world: *mut c_void, def: *const SopBox3dBodyDef);
+    fn sop_box3d_remove_body(world: *mut c_void, id: u64);
     fn sop_box3d_step(world: *mut c_void, time_step: f32, sub_step_count: i32);
     fn sop_box3d_snapshot_count(world: *const c_void) -> i32;
     fn sop_box3d_get_snapshots(
@@ -223,6 +224,11 @@ impl Box3dBackend {
 
     fn step(&mut self, dt: f32) {
         unsafe { sop_box3d_step(self.raw.as_ptr(), dt, BOX3D_SUB_STEPS) };
+    }
+
+    fn remove_body(&mut self, id: u64) {
+        unsafe { sop_box3d_remove_body(self.raw.as_ptr(), id) };
+        self.synced_bodies.remove(&id);
     }
 
     fn snapshots(&mut self) -> &[SopBox3dSnapshot] {
@@ -418,6 +424,15 @@ impl PhysicsWorld {
 
     pub fn add(&mut self, state: ObjectState) {
         self.objects.push(state);
+    }
+
+    pub fn remove_object(&mut self, id: u64) -> Option<ObjectState> {
+        let index = self.objects.iter().position(|object| object.id == id)?;
+        let removed = self.objects.swap_remove(index);
+        if let Some(box3d) = &mut self.box3d {
+            box3d.remove_body(id);
+        }
+        Some(removed)
     }
 
     pub fn clear(&mut self) {

@@ -439,6 +439,10 @@ impl SceneController {
         self.physics_world.clear();
     }
 
+    pub fn remove_object(&mut self, id: u64) -> Option<ObjectState> {
+        self.physics_world.remove_object(id)
+    }
+
     fn spawn_object_with_size(
         &mut self,
         position: Vector2,

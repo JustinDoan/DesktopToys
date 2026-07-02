@@ -338,6 +338,30 @@ void sop_box3d_sync_body(SopBox3dWorld* world, const SopBox3dBodyDef* def)
     }
 }
 
+void sop_box3d_remove_body(SopBox3dWorld* world, uint64_t id)
+{
+    if (world == NULL)
+    {
+        return;
+    }
+
+    for (int i = 0; i < world->bodyCount; ++i)
+    {
+        if (world->bodies[i].id != id)
+        {
+            continue;
+        }
+
+        if (b3Body_IsValid(world->bodies[i].bodyId))
+        {
+            b3DestroyBody(world->bodies[i].bodyId);
+        }
+        world->bodies[i] = world->bodies[world->bodyCount - 1];
+        world->bodyCount -= 1;
+        return;
+    }
+}
+
 void sop_box3d_step(SopBox3dWorld* world, float timeStep, int subStepCount)
 {
     if (world == NULL)

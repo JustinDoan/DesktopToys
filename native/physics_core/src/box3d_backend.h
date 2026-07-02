@@ -51,6 +51,7 @@ void sop_box3d_reset(SopBox3dWorld* world, float gravityY, float boundsWidth, fl
 void sop_box3d_set_gravity(SopBox3dWorld* world, float gravityY);
 void sop_box3d_add_body(SopBox3dWorld* world, const SopBox3dBodyDef* def);
 void sop_box3d_sync_body(SopBox3dWorld* world, const SopBox3dBodyDef* def);
+void sop_box3d_remove_body(SopBox3dWorld* world, uint64_t id);
 void sop_box3d_step(SopBox3dWorld* world, float timeStep, int subStepCount);
 int sop_box3d_snapshot_count(const SopBox3dWorld* world);
 bool sop_box3d_get_snapshot(const SopBox3dWorld* world, int index, SopBox3dSnapshot* snapshot);
