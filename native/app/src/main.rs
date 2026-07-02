@@ -791,16 +791,17 @@ impl NativeApp {
 
     fn robot_bin_throw_velocity(&self, object_id: u64) -> Option<Vector2> {
         let object = self.scene.objects().iter().find(|object| object.id == object_id)?;
-        let target = self.robot_bin_target();
+        let mut target = self.robot_bin_target();
         let start = Vector2::new(
             object.body.position.x + object.body.width * 0.5,
             object.body.position.y + object.body.height * 0.5,
         );
+        target.x += (target.x - start.x).signum() * ROBOT_BIN_WIDTH * 0.18;
         let distance_x = (target.x - start.x).abs();
         let travel_time = (distance_x / 520.0).clamp(1.05, 2.05);
         let gravity = self.scene.config().gravity_y.max(240.0);
         Some(Vector2::new(
-            (target.x - start.x) / travel_time,
+            (target.x - start.x) / travel_time * 1.08,
             (target.y - start.y - 0.5 * gravity * travel_time * travel_time) / travel_time,
         ))
     }
