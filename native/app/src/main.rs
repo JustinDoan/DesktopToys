@@ -174,6 +174,8 @@ const FLOOR_MARGIN_PIXELS: f32 = 18.0;
 const STRESS_SPAWN_COUNT: usize = 25;
 const ROBOT_STACK_MAX_LEVELS: usize = 10;
 const ROBOT_STACK_DROP_COOLDOWN_SECONDS: f64 = 1.8;
+const ROBOT_STACK_APPROACH_GAP: f32 = 32.0;
+const ROBOT_STACK_PLACE_TOLERANCE: f32 = 26.0;
 
 impl Default for NativeApp {
     fn default() -> Self {
@@ -605,14 +607,18 @@ impl NativeApp {
                 let held_seconds = self.frame_clock.elapsed_seconds - carry.picked_up_at;
                 let near_edge = robot_center.x < 80.0 || robot_center.x > self.scene_bounds().right() - 80.0;
                 let stack_x = self.robot_stack_x(robot_id);
-                let stack_dx = stack_x - robot_center.x;
+                let approach_side = if robot_center.x <= stack_x { -1.0 } else { 1.0 };
+                let approach_x = self.robot_stack_approach_x(robot_snapshot, stack_x, approach_side);
+                let approach_dx = approach_x - robot_center.x;
+                let place_facing = -approach_side;
                 if near_edge || held_seconds > 7.0 {
                     self.drop_robot_carry(robot_id, facing * 70.0);
-                } else if stack_dx.abs() < robot_snapshot.body.width * 0.52 {
+                } else if approach_dx.abs() < ROBOT_STACK_PLACE_TOLERANCE {
+                    self.position_robot_carry(robot_snapshot, carry.object_id, place_facing);
                     self.place_robot_carry_on_stack(robot_id, carry.object_id);
                 } else {
-                    self.position_robot_carry(robot_snapshot, carry.object_id, facing);
-                    self.drive_robot(robot_id, stack_dx.clamp(-1.0, 1.0), 86.0);
+                    self.position_robot_carry(robot_snapshot, carry.object_id, place_facing);
+                    self.drive_robot(robot_id, approach_dx.clamp(-1.0, 1.0), 86.0);
                     continue;
                 }
             }
@@ -652,7 +658,7 @@ impl NativeApp {
             }
 
             let patrol = ((self.frame_clock.elapsed_seconds * 0.32 + robot_id as f64 * 0.17).sin() as f32).signum();
-            let target_x = self.robot_stack_x(robot_id) - 180.0 + patrol * 220.0;
+            let target_x = self.robot_stack_x(robot_id) - 260.0 + patrol * 150.0;
             let direction = (target_x - robot_center.x).clamp(-1.0, 1.0);
             let speed = if is_carrying { 72.0 } else { 64.0 };
             self.drive_robot(robot_id, direction, speed);
@@ -761,6 +767,10 @@ impl NativeApp {
             object.body.is_sleeping = false;
             object.body.position = slot;
             object.body.velocity = Vector2::ZERO;
+            object.body.friction = 1.4;
+            object.body.restitution = 0.02;
+            object.body.linear_damping = 0.985;
+            object.body.lock_rotation = true;
             object.rotation_x = 0.0;
             object.rotation_y = 0.0;
             object.rotation_z = 0.0;
@@ -780,6 +790,11 @@ impl NativeApp {
     fn robot_stack_x(&self, robot_id: u64) -> f32 {
         let offset = ((robot_id % 5) as f32 - 2.0) * 34.0;
         (self.scene_bounds().width * 0.72 + offset).clamp(120.0, self.scene_bounds().right() - 120.0)
+    }
+
+    fn robot_stack_approach_x(&self, robot: &ObjectState, stack_x: f32, side: f32) -> f32 {
+        let distance = robot.body.width * 0.55 + ROBOT_STACK_APPROACH_GAP;
+        (stack_x + side.signum() * distance).clamp(80.0, self.scene_bounds().right() - 80.0)
     }
 
     fn robot_stack_slot(&self, robot_id: u64, object_id: u64) -> Option<Vector2> {
