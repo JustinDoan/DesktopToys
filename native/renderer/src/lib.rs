@@ -1180,55 +1180,81 @@ fn target_mesh(size: f32, base_color: AppColor) -> Mesh {
 
 fn robot_buddy_mesh(size: f32, base_color: AppColor) -> Mesh {
     let mut triangles = Vec::new();
+    let body_color = scale_color(base_color, 0.94);
+    let head_color = scale_color(base_color, 1.16);
+    let trim_color = AppColor::from_rgb(42, 52, 60);
+    let glow_color = AppColor::from_rgb(110, 238, 255);
+    let claw_color = AppColor::from_rgb(255, 226, 92);
+
     append_mesh_offset(
         &mut triangles,
-        rectangular_prism_mesh(size * 0.9, size * 0.58, size * 0.42, base_color),
+        rectangular_prism_mesh(size * 0.78, size * 0.62, size * 0.42, body_color),
         Vec3::new(0.0, size * 0.12, 0.0),
     );
     append_mesh_offset(
         &mut triangles,
-        rectangular_prism_mesh(size * 0.62, size * 0.42, size * 0.38, scale_color(base_color, 1.12)),
-        Vec3::new(0.0, -size * 0.34, size * 0.04),
+        rectangular_prism_mesh(size * 0.46, size * 0.08, size * 0.3, trim_color),
+        Vec3::new(0.02 * size, -size * 0.22, -size * 0.02),
     );
     append_mesh_offset(
         &mut triangles,
-        rectangular_prism_mesh(size * 0.36, size * 0.1, size * 0.04, AppColor::from_rgb(40, 65, 88)),
-        Vec3::new(size * 0.2, -size * 0.36, size * 0.24),
+        rectangular_prism_mesh(size * 0.6, size * 0.42, size * 0.38, head_color),
+        Vec3::new(size * 0.02, -size * 0.35, size * 0.04),
     );
     append_mesh_offset(
         &mut triangles,
-        rectangular_prism_mesh(size * 0.12, size * 0.24, size * 0.16, scale_color(base_color, 0.76)),
-        Vec3::new(-size * 0.54, size * 0.08, 0.0),
+        rectangular_prism_mesh(size * 0.36, size * 0.1, size * 0.06, AppColor::from_rgb(30, 48, 64)),
+        Vec3::new(size * 0.19, -size * 0.36, size * 0.25),
     );
     append_mesh_offset(
         &mut triangles,
-        rectangular_prism_mesh(size * 0.3, size * 0.12, size * 0.16, scale_color(base_color, 0.82)),
-        Vec3::new(size * 0.66, -size * 0.03, size * 0.02),
+        ball_mesh(size * 0.055, glow_color),
+        Vec3::new(size * 0.48, -size * 0.36, size * 0.27),
     );
     append_mesh_offset(
         &mut triangles,
-        rectangular_prism_mesh(size * 0.1, size * 0.3, size * 0.08, AppColor::from_rgb(255, 226, 92)),
-        Vec3::new(size * 0.85, -size * 0.02, size * 0.04),
+        rectangular_prism_mesh(size * 0.12, size * 0.25, size * 0.16, scale_color(base_color, 0.72)),
+        Vec3::new(-size * 0.5, size * 0.1, 0.0),
     );
     append_mesh_offset(
         &mut triangles,
-        ball_mesh(size * 0.08, AppColor::from_rgb(110, 238, 255)),
-        Vec3::new(size * 0.53, -size * 0.36, size * 0.26),
+        rectangular_prism_mesh(size * 0.4, size * 0.12, size * 0.16, scale_color(base_color, 0.82)),
+        Vec3::new(size * 0.62, size * 0.02, size * 0.02),
     );
     append_mesh_offset(
         &mut triangles,
-        rectangular_prism_mesh(size * 0.86, size * 0.18, size * 0.26, AppColor::from_rgb(48, 55, 62)),
-        Vec3::new(0.0, size * 0.52, 0.0),
+        rectangular_prism_mesh(size * 0.08, size * 0.34, size * 0.08, claw_color),
+        Vec3::new(size * 0.86, size * 0.02, size * 0.05),
+    );
+    append_mesh_offset(
+        &mut triangles,
+        rectangular_prism_mesh(size * 0.16, size * 0.06, size * 0.08, claw_color),
+        Vec3::new(size * 0.94, -size * 0.13, size * 0.06),
+    );
+    append_mesh_offset(
+        &mut triangles,
+        rectangular_prism_mesh(size * 0.16, size * 0.06, size * 0.08, claw_color),
+        Vec3::new(size * 0.94, size * 0.17, size * 0.06),
+    );
+    append_mesh_offset(
+        &mut triangles,
+        rectangular_prism_mesh(size * 0.3, size * 0.14, size * 0.04, AppColor::from_rgb(66, 84, 92)),
+        Vec3::new(size * 0.04, size * 0.14, size * 0.24),
+    );
+    append_mesh_offset(
+        &mut triangles,
+        rectangular_prism_mesh(size * 0.9, size * 0.18, size * 0.26, trim_color),
+        Vec3::new(0.0, size * 0.54, 0.0),
     );
     append_mesh_offset(
         &mut triangles,
         ball_mesh(size * 0.18, AppColor::from_rgb(44, 48, 54)),
-        Vec3::new(-size * 0.32, size * 0.58, size * 0.02),
+        Vec3::new(-size * 0.33, size * 0.6, size * 0.02),
     );
     append_mesh_offset(
         &mut triangles,
         ball_mesh(size * 0.18, AppColor::from_rgb(44, 48, 54)),
-        Vec3::new(size * 0.32, size * 0.58, size * 0.02),
+        Vec3::new(size * 0.33, size * 0.6, size * 0.02),
     );
     Mesh { triangles }
 }

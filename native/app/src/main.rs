@@ -161,6 +161,7 @@ struct NativeApp {
     import_panel: Option<ImportPanel>,
     slingshot_game: SlingshotGame,
     robot_carries: HashMap<u64, RobotCarry>,
+    robot_drop_cooldowns: HashMap<u64, RobotDropCooldown>,
     fallback_left_down: bool,
     fallback_right_down: bool,
     previous_global_import_keys: GlobalImportKeys,
@@ -215,6 +216,7 @@ impl Default for NativeApp {
             import_panel: None,
             slingshot_game: SlingshotGame::default(),
             robot_carries: HashMap::new(),
+            robot_drop_cooldowns: HashMap::new(),
             fallback_left_down: false,
             fallback_right_down: false,
             previous_global_import_keys: GlobalImportKeys::default(),
@@ -569,6 +571,9 @@ impl NativeApp {
             .collect();
         self.robot_carries
             .retain(|robot_id, carry| robot_ids.contains(robot_id) && objects.iter().any(|object| object.id == carry.object_id));
+        self.robot_drop_cooldowns.retain(|robot_id, cooldown| {
+            robot_ids.contains(robot_id) && self.frame_clock.elapsed_seconds - cooldown.dropped_at < 1.6
+        });
 
         for robot_id in robot_ids {
             let Some(robot_snapshot) = objects.iter().find(|object| object.id == robot_id) else {
@@ -653,6 +658,10 @@ impl NativeApp {
             && object.body.width <= 120.0
             && object.body.height <= 120.0
             && !self.robot_carries.values().any(|carry| carry.object_id == object.id)
+            && !self
+                .robot_drop_cooldowns
+                .get(&robot_id)
+                .is_some_and(|cooldown| cooldown.object_id == object.id)
             && !matches!(
                 object.visual_kind,
                 ObjectVisualKind::RobotBuddy
@@ -685,9 +694,15 @@ impl NativeApp {
             object.body.is_sleeping = false;
             object.body.velocity = Vector2::ZERO;
             object.rotation_z *= 0.92;
+            let robot_center = Vector2::new(
+                robot.body.position.x + robot.body.width * 0.5,
+                robot.body.position.y + robot.body.height * 0.5,
+            );
+            let gripper_center_x = robot_center.x + facing * (robot.body.width * 0.62 + object.body.width * 0.16);
+            let gripper_center_y = robot.body.position.y + robot.body.height * 0.5;
             object.body.position = Vector2::new(
-                robot.body.position.x + robot.body.width * 0.5 - object.body.width * 0.5 + facing * robot.body.width * 0.22,
-                robot.body.position.y - object.body.height - 10.0,
+                gripper_center_x - object.body.width * 0.5,
+                gripper_center_y - object.body.height * 0.5,
             );
         }
     }
@@ -702,6 +717,13 @@ impl NativeApp {
             object.body.is_sleeping = false;
             object.body.velocity = Vector2::new(toss_x, -65.0);
         }
+        self.robot_drop_cooldowns.insert(
+            robot_id,
+            RobotDropCooldown {
+                object_id: carry.object_id,
+                dropped_at: self.frame_clock.elapsed_seconds,
+            },
+        );
     }
 
     fn toggle_slingshot_game(&mut self) {
@@ -2642,6 +2664,12 @@ struct TargetMarker {
 struct RobotCarry {
     object_id: u64,
     picked_up_at: f64,
+}
+
+#[derive(Clone, Copy)]
+struct RobotDropCooldown {
+    object_id: u64,
+    dropped_at: f64,
 }
 
 #[derive(Default)]
