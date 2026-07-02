@@ -9,6 +9,7 @@ typedef struct SopBox3dBody
 {
     uint64_t id;
     b3BodyId bodyId;
+    b3ShapeId shapeId;
     float width;
     float height;
     bool isDragging;
@@ -217,14 +218,15 @@ void sop_box3d_add_body(SopBox3dWorld* world, const SopBox3dBodyDef* def)
 
     b3ShapeDef shapeDef = b3DefaultShapeDef();
     shapeDef.density = fmaxf(def->mass, 0.01f);
-    shapeDef.baseMaterial.friction = def->gravityScale == 0.0f ? 0.0f : 0.35f;
+    shapeDef.baseMaterial.friction = fmaxf(def->friction, 0.0f);
     shapeDef.baseMaterial.restitution = fmaxf(def->restitution, 0.0f);
 
+    b3ShapeId shapeId = b3_nullShapeId;
     float scale = fmaxf(def->collisionScale, 0.05f);
     if (def->shape == 1)
     {
         b3Sphere sphere = { { 0.0f, 0.0f, 0.0f }, fmaxf(fminf(def->width, def->height) * 0.5f * scale / world->pixelsPerMeter, 0.02f) };
-        b3CreateSphereShape(bodyId, &shapeDef, &sphere);
+        shapeId = b3CreateSphereShape(bodyId, &shapeDef, &sphere);
     }
     else if (def->shape == 2)
     {
@@ -241,7 +243,7 @@ void sop_box3d_add_body(SopBox3dWorld* world, const SopBox3dBodyDef* def)
         b3HullData* diamond = b3CreateHull(points, 6, 6);
         if (diamond != NULL)
         {
-            b3CreateHullShape(bodyId, &shapeDef, diamond);
+            shapeId = b3CreateHullShape(bodyId, &shapeDef, diamond);
             b3DestroyHull(diamond);
         }
     }
@@ -251,13 +253,14 @@ void sop_box3d_add_body(SopBox3dWorld* world, const SopBox3dBodyDef* def)
         float hy = fmaxf(def->height * 0.5f * scale / world->pixelsPerMeter, 0.02f);
         float hz = fmaxf(fminf(def->width, def->height) * 0.5f * scale / world->pixelsPerMeter, 0.02f);
         b3BoxHull box = b3MakeBoxHull(hx, hy, hz);
-        b3CreateHullShape(bodyId, &shapeDef, &box.base);
+        shapeId = b3CreateHullShape(bodyId, &shapeDef, &box.base);
     }
 
     ensure_capacity(world);
     world->bodies[world->bodyCount++] = (SopBox3dBody){
         def->id,
         bodyId,
+        shapeId,
         def->width,
         def->height,
         def->isDragging,
@@ -284,6 +287,11 @@ void sop_box3d_sync_body(SopBox3dWorld* world, const SopBox3dBodyDef* def)
 
     b3Body_SetGravityScale(body->bodyId, def->gravityScale);
     b3Body_SetLinearDamping(body->bodyId, fmaxf(0.0f, (1.0f - def->linearDamping) * 8.0f));
+    if (b3Shape_IsValid(body->shapeId))
+    {
+        b3Shape_SetFriction(body->shapeId, fmaxf(def->friction, 0.0f));
+        b3Shape_SetRestitution(body->shapeId, fmaxf(def->restitution, 0.0f));
+    }
 
     if (def->isDragging)
     {

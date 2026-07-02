@@ -609,6 +609,7 @@ impl NativeApp {
             object.body.is_dragging = true;
             object.is_dragging = true;
             object.body.restitution = 0.42;
+            object.body.friction = 0.58;
             object.body.linear_damping = 0.996;
         }
         self.update_slingshot_bands();
@@ -623,49 +624,79 @@ impl NativeApp {
             let x = base_x + tower as f32 * 175.0;
             for row in 0..3 {
                 let y = floor - 62.0 - row as f32 * 86.0;
-                self.scene.spawn_custom_object(
+                self.spawn_dynamic_game_object(
                     Vector2::new(x, y),
                     Vector2::new(26.0, 62.0),
                     block,
                     ObjectVisualKind::GamePlank,
                     CollisionShape::Box,
+                    1.15,
+                    0.12,
                 );
-                self.scene.spawn_custom_object(
+                self.spawn_dynamic_game_object(
                     Vector2::new(x + 92.0, y),
                     Vector2::new(26.0, 62.0),
                     block,
                     ObjectVisualKind::GamePlank,
                     CollisionShape::Box,
+                    1.15,
+                    0.12,
                 );
-                self.scene.spawn_custom_object(
+                self.spawn_dynamic_game_object(
                     Vector2::new(x + 8.0, y - 24.0),
                     Vector2::new(102.0, 20.0),
                     glass,
                     ObjectVisualKind::GamePlank,
                     CollisionShape::Box,
+                    0.86,
+                    0.08,
                 );
             }
 
-            let target_id = self.scene.spawn_custom_object(
+            let target_id = self.spawn_dynamic_game_object(
                 Vector2::new(x + 39.0, floor - 104.0),
                 Vector2::new(42.0, 42.0),
                 target,
                 ObjectVisualKind::GameTarget,
                 CollisionShape::Circle,
+                0.92,
+                0.18,
             );
             self.slingshot_game.targets.push(TargetMarker {
                 id: target_id,
                 start_position: Vector2::new(x + 39.0, floor - 104.0),
             });
 
-            self.scene.spawn_custom_object(
+            self.spawn_dynamic_game_object(
                 Vector2::new(x + 21.0, floor - 284.0),
                 Vector2::new(78.0, 24.0),
                 AppColor::from_rgb(248, 211, 84),
                 ObjectVisualKind::GamePlank,
                 CollisionShape::Box,
+                1.05,
+                0.10,
             );
         }
+    }
+
+    fn spawn_dynamic_game_object(
+        &mut self,
+        position: Vector2,
+        size: Vector2,
+        color: AppColor,
+        visual_kind: ObjectVisualKind,
+        shape: CollisionShape,
+        friction: f32,
+        restitution: f32,
+    ) -> u64 {
+        let id = self.scene.spawn_custom_object(position, size, color, visual_kind, shape);
+        if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == id) {
+            object.body.friction = friction;
+            object.body.restitution = restitution;
+            object.body.linear_damping = 0.988;
+            object.body.mass = if shape == CollisionShape::Circle { 1.15 } else { 1.6 };
+        }
+        id
     }
 
     fn spawn_pinned_game_object(
@@ -704,6 +735,7 @@ impl NativeApp {
             object.body.gravity_scale = 0.0;
             object.body.velocity = Vector2::ZERO;
             object.body.restitution = 0.18;
+            object.body.friction = 1.35;
             object.body.linear_damping = 1.0;
         }
         id
@@ -771,6 +803,7 @@ impl NativeApp {
         object.is_dragging = false;
         object.body.velocity = Vector2::new(-pull.x * 11.5, -pull.y * 11.5);
         object.body.restitution = 0.42;
+        object.body.friction = 0.58;
         object.body.linear_damping = 0.996;
         object.angular_velocity_z = -pull.x as f64 * 0.22;
         self.slingshot_game.aiming = false;

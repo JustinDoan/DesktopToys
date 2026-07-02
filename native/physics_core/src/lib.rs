@@ -31,6 +31,7 @@ struct SopBox3dBodyDef {
     velocity_y: f32,
     mass: f32,
     restitution: f32,
+    friction: f32,
     linear_damping: f32,
     gravity_scale: f32,
     collision_scale: f32,
@@ -59,6 +60,7 @@ struct BodySyncState {
     height: f32,
     mass: f32,
     restitution: f32,
+    friction: f32,
     linear_damping: f32,
     gravity_scale: f32,
     collision_scale: f32,
@@ -72,6 +74,7 @@ impl BodySyncState {
             || self.height != next.height
             || self.mass != next.mass
             || self.restitution != next.restitution
+            || self.friction != next.friction
             || self.linear_damping != next.linear_damping
             || self.gravity_scale != next.gravity_scale
             || self.collision_scale != next.collision_scale
@@ -165,6 +168,7 @@ impl Box3dBackend {
             height: body.height.max(1.0),
             mass: body.mass,
             restitution: body.restitution,
+            friction: body.friction,
             linear_damping: body.linear_damping,
             gravity_scale: body.gravity_scale,
             collision_scale: body.collision_scale,
@@ -189,6 +193,7 @@ impl Box3dBackend {
             velocity_y: body.velocity.y,
             mass: body.mass,
             restitution: body.restitution,
+            friction: body.friction,
             linear_damping: body.linear_damping,
             gravity_scale: body.gravity_scale,
             collision_scale: body.collision_scale,

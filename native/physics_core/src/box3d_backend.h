@@ -20,6 +20,7 @@ typedef struct SopBox3dBodyDef
     float velocityY;
     float mass;
     float restitution;
+    float friction;
     float linearDamping;
     float gravityScale;
     float collisionScale;
