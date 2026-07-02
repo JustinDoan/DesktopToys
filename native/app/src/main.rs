@@ -10,7 +10,7 @@ use core_types::{AppColor, AppConfig, RectF, Vector2};
 use native_shell::{
     configure_overlay_window, overlay_window_attributes, pick_model_file, set_overlay_input_mode, show_error_dialog,
     sync_window_to_monitor,
-    GlobalInputPoller, OverlayInputMode, TrayAction, TrayController,
+    GlobalImportKeys, GlobalInputPoller, OverlayInputMode, TrayAction, TrayController,
 };
 use renderer::{GpuVertex, HudState, OverlayPanel, PanelLine, RenderScene, SceneRenderer};
 use scene_logic::{DragController, FrameClock, HitTester, SceneController};
@@ -159,6 +159,7 @@ struct NativeApp {
     import_panel: Option<ImportPanel>,
     fallback_left_down: bool,
     fallback_right_down: bool,
+    previous_global_import_keys: GlobalImportKeys,
     target_frame_duration: Duration,
     next_frame_at: Instant,
     fps_counter: FpsCounter,
@@ -208,6 +209,7 @@ impl Default for NativeApp {
             import_panel: None,
             fallback_left_down: false,
             fallback_right_down: false,
+            previous_global_import_keys: GlobalImportKeys::default(),
             target_frame_duration: Duration::ZERO,
             next_frame_at: now,
             fps_counter: FpsCounter::default(),
@@ -348,6 +350,7 @@ impl NativeApp {
                         left_down: self.fallback_left_down,
                         right_down: self.fallback_right_down,
                         spawn_stress_down: false,
+                        import_keys: GlobalImportKeys::default(),
                     }
                 },
             }
@@ -358,6 +361,7 @@ impl NativeApp {
                 left_down: self.fallback_left_down,
                 right_down: self.fallback_right_down,
                 spawn_stress_down: false,
+                import_keys: GlobalImportKeys::default(),
             }
         };
         self.debug_left_down = pointer.left_down;
@@ -376,6 +380,7 @@ impl NativeApp {
 
         self.handle_global_mouse_buttons(now, pointer.left_down, pointer.right_down);
         self.handle_global_stress_spawn(pointer.spawn_stress_down);
+        self.handle_global_import_keys(pointer.import_keys);
         self.scene.step(dt, self.scene_bounds());
         self.sync_panels();
         window.request_redraw();
@@ -463,6 +468,34 @@ impl NativeApp {
             self.spawn_stress_cubes();
         }
         self.was_stress_spawn_down = is_down;
+    }
+
+    fn handle_global_import_keys(&mut self, keys: GlobalImportKeys) {
+        if self.import_panel.is_none() {
+            self.previous_global_import_keys = keys;
+            return;
+        }
+
+        let previous = self.previous_global_import_keys;
+        if keys.up && !previous.up {
+            self.handle_import_key(KeyCode::ArrowUp);
+        }
+        if keys.down && !previous.down {
+            self.handle_import_key(KeyCode::ArrowDown);
+        }
+        if keys.left && !previous.left {
+            self.handle_import_key(KeyCode::ArrowLeft);
+        }
+        if keys.right && !previous.right {
+            self.handle_import_key(KeyCode::ArrowRight);
+        }
+        if keys.enter && !previous.enter {
+            self.handle_import_key(KeyCode::Enter);
+        }
+        if keys.escape && !previous.escape {
+            self.handle_import_key(KeyCode::Escape);
+        }
+        self.previous_global_import_keys = keys;
     }
 
     fn spawn_stress_cubes(&mut self) {
@@ -717,27 +750,8 @@ impl NativeApp {
             return;
         }
 
-        if let Some(import_panel) = &mut self.import_panel {
-            if import_panel.handle_key(key_code) {
-                return;
-            }
-            if key_code == KeyCode::Enter {
-                let default_spawn = self.default_spawn_position();
-                let panel = self.import_panel.take().unwrap();
-                let id = self.scene.spawn_imported_model(
-                    default_spawn,
-                    panel.path.clone(),
-                    panel.scale_multiplier,
-                    AppColor::from_rgb(panel.tint_r, panel.tint_g, panel.tint_b),
-                );
-                self.selected_id = Some(id);
-                self.status_message = Some(format!("Imported model: {}", panel.path));
-                return;
-            }
-            if key_code == KeyCode::Escape {
-                self.import_panel = None;
-                return;
-            }
+        if self.import_panel.is_some() && self.handle_import_key(key_code) {
+            return;
         }
 
         if self.settings_panel.visible {
@@ -763,6 +777,35 @@ impl NativeApp {
             KeyCode::F9 => self.handle_action(AppAction::SpawnStressCubes, event_loop),
             KeyCode::Escape => self.handle_action(AppAction::Exit, event_loop),
             _ => {},
+        }
+    }
+
+    fn handle_import_key(&mut self, key_code: KeyCode) -> bool {
+        if let Some(import_panel) = &mut self.import_panel {
+            if import_panel.handle_key(key_code) {
+                return true;
+            }
+        }
+
+        match key_code {
+            KeyCode::Enter => {
+                let default_spawn = self.default_spawn_position();
+                let panel = self.import_panel.take().expect("import panel should exist");
+                let id = self.scene.spawn_imported_model(
+                    default_spawn,
+                    panel.path.clone(),
+                    panel.scale_multiplier,
+                    AppColor::from_rgb(panel.tint_r, panel.tint_g, panel.tint_b),
+                );
+                self.selected_id = Some(id);
+                self.status_message = Some(format!("Imported model: {}", panel.path));
+                true
+            },
+            KeyCode::Escape => {
+                self.import_panel = None;
+                true
+            },
+            _ => false,
         }
     }
 

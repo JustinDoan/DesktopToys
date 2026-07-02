@@ -58,12 +58,23 @@ pub enum OverlayInputMode {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+pub struct GlobalImportKeys {
+    pub up: bool,
+    pub down: bool,
+    pub left: bool,
+    pub right: bool,
+    pub enter: bool,
+    pub escape: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
 pub struct GlobalPointerState {
     pub screen_position: (i32, i32),
     pub local_position: Vector2,
     pub left_down: bool,
     pub right_down: bool,
     pub spawn_stress_down: bool,
+    pub import_keys: GlobalImportKeys,
 }
 
 pub fn overlay_window_attributes(title: &str, bounds: RectF) -> WindowAttributes {
@@ -252,6 +263,7 @@ impl GlobalInputPoller {
                 left_down: Mouse::Left.is_pressed(),
                 right_down: Mouse::Right.is_pressed(),
                 spawn_stress_down: false,
+                import_keys: GlobalImportKeys::default(),
             });
         }
 
@@ -270,6 +282,14 @@ impl GlobalInputPoller {
                 left_down: *mouse.button_pressed.get(1).unwrap_or(&false),
                 right_down: *mouse.button_pressed.get(3).unwrap_or(&false),
                 spawn_stress_down: keys.contains(&Keycode::F9),
+                import_keys: GlobalImportKeys {
+                    up: keys.contains(&Keycode::Up),
+                    down: keys.contains(&Keycode::Down),
+                    left: keys.contains(&Keycode::Left),
+                    right: keys.contains(&Keycode::Right),
+                    enter: keys.contains(&Keycode::Enter),
+                    escape: keys.contains(&Keycode::Escape),
+                },
             })
         }
     }
