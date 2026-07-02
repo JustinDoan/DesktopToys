@@ -374,6 +374,7 @@ impl SceneRenderer {
             }),
             ObjectVisualKind::GameTarget => self.generated_mesh(key, || target_mesh(size, object.base_color)),
             ObjectVisualKind::FoxBuddy => self.generated_mesh(key, || fox_buddy_mesh(size)),
+            ObjectVisualKind::RobotBuddy => self.generated_mesh(key, || robot_buddy_mesh(size, object.base_color)),
             ObjectVisualKind::DvdLogo => self.generated_mesh(key, || {
                 dvd_logo_mesh(object.body.width.max(1.0), object.body.height.max(1.0), object.base_color)
             }),
@@ -427,7 +428,8 @@ impl MeshCacheKey {
                 ObjectVisualKind::GamePlank => 10,
                 ObjectVisualKind::GameTarget => 11,
                 ObjectVisualKind::FoxBuddy => 12,
-                ObjectVisualKind::ImportedModel => 13,
+                ObjectVisualKind::RobotBuddy => 13,
+                ObjectVisualKind::ImportedModel => 14,
             },
             width_milli: quantize_size(object.body.width.max(1.0)),
             height_milli: quantize_size(object.body.height.max(1.0)),
@@ -760,6 +762,18 @@ fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds
             if facing_velocity > 1.0 {
                 scale_x *= -1.0;
             }
+        },
+        ObjectVisualKind::RobotBuddy => {
+            center_z += 14.0;
+            let facing_velocity = if object.body.motor_enabled {
+                object.body.motor_velocity_x
+            } else {
+                object.body.velocity.x
+            };
+            if facing_velocity < -1.0 {
+                scale_x *= -1.0;
+            }
+            rotation_z += (object.body.velocity.x as f64 * 0.01).clamp(-4.0, 4.0);
         },
         ObjectVisualKind::ImportedModel => {
             center_z += 12.0;
@@ -1162,6 +1176,72 @@ fn target_mesh(size: f32, base_color: AppColor) -> Mesh {
         true,
     );
     mesh
+}
+
+fn robot_buddy_mesh(size: f32, base_color: AppColor) -> Mesh {
+    let mut triangles = Vec::new();
+    append_mesh_offset(
+        &mut triangles,
+        rectangular_prism_mesh(size * 0.9, size * 0.58, size * 0.42, base_color),
+        Vec3::new(0.0, size * 0.12, 0.0),
+    );
+    append_mesh_offset(
+        &mut triangles,
+        rectangular_prism_mesh(size * 0.62, size * 0.42, size * 0.38, scale_color(base_color, 1.12)),
+        Vec3::new(0.0, -size * 0.34, size * 0.04),
+    );
+    append_mesh_offset(
+        &mut triangles,
+        rectangular_prism_mesh(size * 0.36, size * 0.1, size * 0.04, AppColor::from_rgb(40, 65, 88)),
+        Vec3::new(size * 0.2, -size * 0.36, size * 0.24),
+    );
+    append_mesh_offset(
+        &mut triangles,
+        rectangular_prism_mesh(size * 0.12, size * 0.24, size * 0.16, scale_color(base_color, 0.76)),
+        Vec3::new(-size * 0.54, size * 0.08, 0.0),
+    );
+    append_mesh_offset(
+        &mut triangles,
+        rectangular_prism_mesh(size * 0.3, size * 0.12, size * 0.16, scale_color(base_color, 0.82)),
+        Vec3::new(size * 0.66, -size * 0.03, size * 0.02),
+    );
+    append_mesh_offset(
+        &mut triangles,
+        rectangular_prism_mesh(size * 0.1, size * 0.3, size * 0.08, AppColor::from_rgb(255, 226, 92)),
+        Vec3::new(size * 0.85, -size * 0.02, size * 0.04),
+    );
+    append_mesh_offset(
+        &mut triangles,
+        ball_mesh(size * 0.08, AppColor::from_rgb(110, 238, 255)),
+        Vec3::new(size * 0.53, -size * 0.36, size * 0.26),
+    );
+    append_mesh_offset(
+        &mut triangles,
+        rectangular_prism_mesh(size * 0.86, size * 0.18, size * 0.26, AppColor::from_rgb(48, 55, 62)),
+        Vec3::new(0.0, size * 0.52, 0.0),
+    );
+    append_mesh_offset(
+        &mut triangles,
+        ball_mesh(size * 0.18, AppColor::from_rgb(44, 48, 54)),
+        Vec3::new(-size * 0.32, size * 0.58, size * 0.02),
+    );
+    append_mesh_offset(
+        &mut triangles,
+        ball_mesh(size * 0.18, AppColor::from_rgb(44, 48, 54)),
+        Vec3::new(size * 0.32, size * 0.58, size * 0.02),
+    );
+    Mesh { triangles }
+}
+
+fn append_mesh_offset(triangles: &mut Vec<SourceTriangle>, mesh: Mesh, offset: Vec3) {
+    triangles.extend(mesh.triangles.into_iter().map(|mut triangle| {
+        for vertex in &mut triangle.vertices {
+            vertex.x += offset.x;
+            vertex.y += offset.y;
+            vertex.z += offset.z;
+        }
+        triangle
+    }));
 }
 
 fn sphere_point(radius: f32, theta: f32, phi: f32) -> Vec3 {

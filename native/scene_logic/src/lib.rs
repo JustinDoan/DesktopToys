@@ -20,7 +20,7 @@ const STARTUP_CUBE_SIZE: f32 = DEFAULT_OBJECT_SIZE * 0.2;
 const SPAWN_CATALOG: [SpawnSpec; 12] = [
     SpawnSpec::new(ObjectVisualKind::Cube, None),
     SpawnSpec::new(ObjectVisualKind::Ball, Some(AppColor::from_rgb(90, 205, 255))),
-    SpawnSpec::new(ObjectVisualKind::FoxBuddy, Some(AppColor::from_rgb(255, 255, 255))),
+    SpawnSpec::new(ObjectVisualKind::RobotBuddy, Some(AppColor::from_rgb(150, 220, 245))),
     SpawnSpec::new(ObjectVisualKind::Pyramid, Some(AppColor::from_rgb(255, 176, 92))),
     SpawnSpec::new(ObjectVisualKind::Barrel, Some(AppColor::from_rgb(126, 226, 168))),
     SpawnSpec::new(ObjectVisualKind::Ring, Some(AppColor::from_rgb(255, 118, 210))),
@@ -460,9 +460,9 @@ impl SceneController {
         if visual_kind == ObjectVisualKind::DvdLogo {
             state.body.width = base_size * 1.7;
             state.body.height = base_size * 0.78;
-        } else if visual_kind == ObjectVisualKind::FoxBuddy {
+        } else if visual_kind == ObjectVisualKind::RobotBuddy {
             state.body.width = base_size * 1.35;
-            state.body.height = base_size * 0.82;
+            state.body.height = base_size * 0.92;
         } else {
             state.body.width = base_size;
             state.body.height = base_size;
@@ -476,7 +476,7 @@ impl SceneController {
         };
         state.body.linear_damping = if visual_kind == ObjectVisualKind::DvdLogo {
             1.0
-        } else if visual_kind == ObjectVisualKind::FoxBuddy {
+        } else if matches!(visual_kind, ObjectVisualKind::FoxBuddy | ObjectVisualKind::RobotBuddy) {
             0.982
         } else {
             self.config.linear_damping
@@ -492,10 +492,10 @@ impl SceneController {
             _ => CollisionShape::Box,
         };
         state.body.collision_scale = 1.0;
-        if visual_kind == ObjectVisualKind::FoxBuddy {
-            state.body.mass = 1.35;
-            state.body.friction = 0.95;
-            state.body.restitution = 0.38;
+        if matches!(visual_kind, ObjectVisualKind::FoxBuddy | ObjectVisualKind::RobotBuddy) {
+            state.body.mass = 1.45;
+            state.body.friction = 1.05;
+            state.body.restitution = 0.28;
         }
         if visual_kind == ObjectVisualKind::DvdLogo {
             state.body.velocity = Vector2::new(420.0, 260.0);

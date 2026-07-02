@@ -1,12 +1,12 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-use std::{borrow::Cow, error::Error, sync::Arc, time::{Duration, Instant}};
+use std::{borrow::Cow, collections::HashMap, error::Error, sync::Arc, time::{Duration, Instant}};
 
 #[cfg(target_os = "windows")]
 use std::ffi::CString;
 
 use anyhow::{Context, Result};
-use core_types::{AppColor, AppConfig, CollisionShape, ObjectVisualKind, RectF, Vector2};
+use core_types::{AppColor, AppConfig, CollisionShape, ObjectState, ObjectVisualKind, RectF, Vector2};
 use native_shell::{
     configure_overlay_window, overlay_window_attributes, pick_model_file, set_overlay_input_mode, show_error_dialog,
     sync_window_to_monitor,
@@ -149,7 +149,7 @@ struct NativeApp {
     was_right_down: bool,
     was_stress_spawn_down: bool,
     was_slingshot_toggle_down: bool,
-    was_fox_buddy_down: bool,
+    was_robot_buddy_down: bool,
     force_interactive_for_debug: bool,
     is_rotation_dragging: bool,
     last_drag_attempt: String,
@@ -160,6 +160,7 @@ struct NativeApp {
     settings_panel: SettingsPanel,
     import_panel: Option<ImportPanel>,
     slingshot_game: SlingshotGame,
+    robot_carries: HashMap<u64, RobotCarry>,
     fallback_left_down: bool,
     fallback_right_down: bool,
     previous_global_import_keys: GlobalImportKeys,
@@ -202,7 +203,7 @@ impl Default for NativeApp {
             was_right_down: false,
             was_stress_spawn_down: false,
             was_slingshot_toggle_down: false,
-            was_fox_buddy_down: false,
+            was_robot_buddy_down: false,
             force_interactive_for_debug: false,
             is_rotation_dragging: false,
             last_drag_attempt: "none".to_string(),
@@ -213,6 +214,7 @@ impl Default for NativeApp {
             settings_panel: SettingsPanel::default(),
             import_panel: None,
             slingshot_game: SlingshotGame::default(),
+            robot_carries: HashMap::new(),
             fallback_left_down: false,
             fallback_right_down: false,
             previous_global_import_keys: GlobalImportKeys::default(),
@@ -357,7 +359,7 @@ impl NativeApp {
                         right_down: self.fallback_right_down,
                         spawn_stress_down: false,
                         slingshot_toggle_down: false,
-                        fox_buddy_down: false,
+                        robot_buddy_down: false,
                         import_keys: GlobalImportKeys::default(),
                     }
                 },
@@ -370,7 +372,7 @@ impl NativeApp {
                 right_down: self.fallback_right_down,
                 spawn_stress_down: false,
                 slingshot_toggle_down: false,
-                fox_buddy_down: false,
+                robot_buddy_down: false,
                 import_keys: GlobalImportKeys::default(),
             }
         };
@@ -391,10 +393,10 @@ impl NativeApp {
         self.handle_global_mouse_buttons(now, pointer.left_down, pointer.right_down);
         self.handle_global_stress_spawn(pointer.spawn_stress_down);
         self.handle_global_slingshot_toggle(pointer.slingshot_toggle_down);
-        self.handle_global_fox_buddy(pointer.fox_buddy_down);
+        self.handle_global_robot_buddy(pointer.robot_buddy_down);
         self.handle_global_import_keys(pointer.import_keys);
         self.update_slingshot_game();
-        self.update_fox_buddies(dt);
+        self.update_robot_buddies(dt);
         self.scene.step(dt, self.scene_bounds());
         self.sync_panels();
         window.request_redraw();
@@ -500,11 +502,11 @@ impl NativeApp {
         self.was_slingshot_toggle_down = is_down;
     }
 
-    fn handle_global_fox_buddy(&mut self, is_down: bool) {
-        if is_down && !self.was_fox_buddy_down {
-            self.spawn_fox_buddy();
+    fn handle_global_robot_buddy(&mut self, is_down: bool) {
+        if is_down && !self.was_robot_buddy_down {
+            self.spawn_robot_buddy();
         }
-        self.was_fox_buddy_down = is_down;
+        self.was_robot_buddy_down = is_down;
     }
 
     fn handle_global_import_keys(&mut self, keys: GlobalImportKeys) {
@@ -543,74 +545,162 @@ impl NativeApp {
         self.push_status_message(format!("Spawned {STRESS_SPAWN_COUNT} stress cubes."));
     }
 
-    fn spawn_fox_buddy(&mut self) {
+    fn spawn_robot_buddy(&mut self) {
         let mut position = self.default_spawn_position();
         position.y = (position.y + 120.0).min(self.scene_bounds().bottom() - 140.0);
         let id = self.scene.spawn_object(
             position,
-            Some(AppColor::from_rgb(255, 255, 255)),
-            ObjectVisualKind::FoxBuddy,
+            Some(AppColor::from_rgb(150, 220, 245)),
+            ObjectVisualKind::RobotBuddy,
         );
         self.selected_id = Some(id);
-        self.push_status_message("Fox buddy joined the desktop.".to_string());
+        self.push_status_message("Robot buddy joined the desktop.".to_string());
     }
 
-    fn update_fox_buddies(&mut self, _dt: f32) {
+    fn update_robot_buddies(&mut self, _dt: f32) {
         if self.slingshot_game.active {
             return;
         }
         let objects = self.scene.objects().to_vec();
-        let fox_ids: Vec<u64> = objects
+        let robot_ids: Vec<u64> = objects
             .iter()
-            .filter(|object| object.visual_kind == ObjectVisualKind::FoxBuddy)
+            .filter(|object| object.visual_kind == ObjectVisualKind::RobotBuddy)
             .map(|object| object.id)
             .collect();
+        self.robot_carries
+            .retain(|robot_id, carry| robot_ids.contains(robot_id) && objects.iter().any(|object| object.id == carry.object_id));
 
-        for fox_id in fox_ids {
-            let Some(fox_snapshot) = objects.iter().find(|object| object.id == fox_id) else {
+        for robot_id in robot_ids {
+            let Some(robot_snapshot) = objects.iter().find(|object| object.id == robot_id) else {
                 continue;
             };
-            if self.drag_controller.dragged_id() == Some(fox_id) || fox_snapshot.is_dragging {
-                if let Some(fox) = self.scene.objects_mut().iter_mut().find(|object| object.id == fox_id) {
-                    fox.body.motor_enabled = false;
-                    fox.body.motor_velocity_x = 0.0;
+            if self.drag_controller.dragged_id() == Some(robot_id) || robot_snapshot.is_dragging {
+                self.drop_robot_carry(robot_id, 0.0);
+                if let Some(robot) = self.scene.objects_mut().iter_mut().find(|object| object.id == robot_id) {
+                    robot.body.motor_enabled = false;
+                    robot.body.motor_velocity_x = 0.0;
                 }
                 continue;
             }
 
-            let fox_center = Vector2::new(
-                fox_snapshot.body.position.x + fox_snapshot.body.width * 0.5,
-                fox_snapshot.body.position.y + fox_snapshot.body.height * 0.5,
+            let robot_center = Vector2::new(
+                robot_snapshot.body.position.x + robot_snapshot.body.width * 0.5,
+                robot_snapshot.body.position.y + robot_snapshot.body.height * 0.5,
             );
-            let nearest = objects
-                .iter()
-                .filter(|object| object.id != fox_id && object.body.collidable && object.visual_kind != ObjectVisualKind::FoxBuddy)
-                .map(|object| {
-                    let center = Vector2::new(
-                        object.body.position.x + object.body.width * 0.5,
-                        object.body.position.y + object.body.height * 0.5,
-                    );
-                    (center, (center - fox_center).length_squared())
-                })
-                .filter(|(_, distance)| *distance < 620.0 * 620.0)
-                .min_by(|(_, left), (_, right)| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+            let facing = if robot_snapshot.body.motor_velocity_x < -1.0 || robot_snapshot.body.velocity.x < -1.0 {
+                -1.0
+            } else {
+                1.0
+            };
 
-            let patrol = ((self.frame_clock.elapsed_seconds * 0.42 + fox_id as f64 * 0.11).sin() as f32).signum();
-            let target_x = nearest.map(|(center, _)| center.x).unwrap_or(fox_center.x + patrol * 220.0);
-            let direction = (target_x - fox_center.x).clamp(-1.0, 1.0);
-            let speed = if nearest.is_some() { 118.0 } else { 76.0 };
-            let motor_velocity = if direction.abs() < 0.05 { 0.0 } else { direction.signum() * speed };
-
-            if let Some(fox) = self.scene.objects_mut().iter_mut().find(|object| object.id == fox_id) {
-                fox.body.is_dragging = false;
-                fox.is_dragging = false;
-                fox.body.is_sleeping = false;
-                fox.body.gravity_scale = 1.0;
-                fox.body.motor_enabled = motor_velocity != 0.0;
-                fox.body.motor_velocity_x = motor_velocity;
-                fox.body.velocity.x = motor_velocity;
-                fox.rotation_z = 0.0;
+            if let Some(carry) = self.robot_carries.get(&robot_id).copied() {
+                let held_seconds = self.frame_clock.elapsed_seconds - carry.picked_up_at;
+                let near_edge = robot_center.x < 80.0 || robot_center.x > self.scene_bounds().right() - 80.0;
+                if held_seconds > 2.35 || near_edge {
+                    self.drop_robot_carry(robot_id, facing * 95.0);
+                } else {
+                    self.position_robot_carry(robot_snapshot, carry.object_id, facing);
+                }
             }
+
+            let is_carrying = self.robot_carries.contains_key(&robot_id);
+            let nearest = if is_carrying {
+                None
+            } else {
+                objects
+                    .iter()
+                    .filter(|object| self.is_robot_carry_candidate(robot_id, object))
+                    .map(|object| {
+                        let center = Vector2::new(
+                            object.body.position.x + object.body.width * 0.5,
+                            object.body.position.y + object.body.height * 0.5,
+                        );
+                        (object.id, center, (center - robot_center).length_squared())
+                    })
+                    .filter(|(_, _, distance)| *distance < 540.0 * 540.0)
+                    .min_by(|(_, _, left), (_, _, right)| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal))
+            };
+
+            if let Some((object_id, object_center, distance)) = nearest {
+                if distance < 95.0 * 95.0 {
+                    self.robot_carries.insert(
+                        robot_id,
+                        RobotCarry {
+                            object_id,
+                            picked_up_at: self.frame_clock.elapsed_seconds,
+                        },
+                    );
+                    self.position_robot_carry(robot_snapshot, object_id, facing);
+                }
+                let direction = (object_center.x - robot_center.x).clamp(-1.0, 1.0);
+                self.drive_robot(robot_id, direction, 108.0);
+                continue;
+            }
+
+            let patrol = ((self.frame_clock.elapsed_seconds * 0.38 + robot_id as f64 * 0.17).sin() as f32).signum();
+            let target_x = robot_center.x + patrol * 240.0;
+            let direction = (target_x - robot_center.x).clamp(-1.0, 1.0);
+            let speed = if is_carrying { 72.0 } else { 64.0 };
+            self.drive_robot(robot_id, direction, speed);
+        }
+    }
+
+    fn is_robot_carry_candidate(&self, robot_id: u64, object: &ObjectState) -> bool {
+        object.id != robot_id
+            && object.body.collidable
+            && !object.is_dragging
+            && !object.body.is_dragging
+            && object.body.width <= 120.0
+            && object.body.height <= 120.0
+            && !self.robot_carries.values().any(|carry| carry.object_id == object.id)
+            && !matches!(
+                object.visual_kind,
+                ObjectVisualKind::RobotBuddy
+                    | ObjectVisualKind::FoxBuddy
+                    | ObjectVisualKind::DvdLogo
+                    | ObjectVisualKind::ImportedModel
+                    | ObjectVisualKind::GamePlank
+                    | ObjectVisualKind::GameTarget
+            )
+    }
+
+    fn drive_robot(&mut self, robot_id: u64, direction: f32, speed: f32) {
+        let motor_velocity = if direction.abs() < 0.08 { 0.0 } else { direction.signum() * speed };
+        if let Some(robot) = self.scene.objects_mut().iter_mut().find(|object| object.id == robot_id) {
+            robot.body.is_dragging = false;
+            robot.is_dragging = false;
+            robot.body.is_sleeping = false;
+            robot.body.gravity_scale = 1.0;
+            robot.body.motor_enabled = motor_velocity != 0.0;
+            robot.body.motor_velocity_x = motor_velocity;
+            robot.body.velocity.x = motor_velocity;
+            robot.rotation_z = 0.0;
+        }
+    }
+
+    fn position_robot_carry(&mut self, robot: &ObjectState, object_id: u64, facing: f32) {
+        if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == object_id) {
+            object.is_dragging = true;
+            object.body.is_dragging = true;
+            object.body.is_sleeping = false;
+            object.body.velocity = Vector2::ZERO;
+            object.rotation_z *= 0.92;
+            object.body.position = Vector2::new(
+                robot.body.position.x + robot.body.width * 0.5 - object.body.width * 0.5 + facing * robot.body.width * 0.22,
+                robot.body.position.y - object.body.height - 10.0,
+            );
+        }
+    }
+
+    fn drop_robot_carry(&mut self, robot_id: u64, toss_x: f32) {
+        let Some(carry) = self.robot_carries.remove(&robot_id) else {
+            return;
+        };
+        if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == carry.object_id) {
+            object.is_dragging = false;
+            object.body.is_dragging = false;
+            object.body.is_sleeping = false;
+            object.body.velocity = Vector2::new(toss_x, -65.0);
         }
     }
 
@@ -1095,7 +1185,7 @@ impl NativeApp {
                     selected: false,
                 },
                 PanelLine {
-                    text: "F11: fox buddy".to_string(),
+                    text: "F11: robot buddy".to_string(),
                     selected: false,
                 },
             ],
@@ -1258,8 +1348,8 @@ impl NativeApp {
             AppAction::SpawnStressCubes => {
                 self.spawn_stress_cubes();
             },
-            AppAction::SpawnFoxBuddy => {
-                self.spawn_fox_buddy();
+            AppAction::SpawnRobotBuddy => {
+                self.spawn_robot_buddy();
             },
             AppAction::ToggleSlingshotGame => {
                 self.toggle_slingshot_game();
@@ -1327,7 +1417,7 @@ impl NativeApp {
             KeyCode::F8 => self.handle_action(AppAction::SpawnDvdLogo, event_loop),
             KeyCode::F9 => self.handle_action(AppAction::SpawnStressCubes, event_loop),
             KeyCode::F10 => self.handle_action(AppAction::ToggleSlingshotGame, event_loop),
-            KeyCode::F11 => self.handle_action(AppAction::SpawnFoxBuddy, event_loop),
+            KeyCode::F11 => self.handle_action(AppAction::SpawnRobotBuddy, event_loop),
             KeyCode::Escape => self.handle_action(AppAction::Exit, event_loop),
             _ => {},
         }
@@ -2523,7 +2613,7 @@ enum AppAction {
     SpawnCrystal,
     SpawnDvdLogo,
     SpawnStressCubes,
-    SpawnFoxBuddy,
+    SpawnRobotBuddy,
     ToggleSlingshotGame,
     Reset,
     ToggleSettings,
@@ -2546,6 +2636,12 @@ fn clamp_vector(vector: Vector2, max_length: f32) -> Vector2 {
 struct TargetMarker {
     id: u64,
     start_position: Vector2,
+}
+
+#[derive(Clone, Copy)]
+struct RobotCarry {
+    object_id: u64,
+    picked_up_at: f64,
 }
 
 #[derive(Default)]

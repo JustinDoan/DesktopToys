@@ -146,6 +146,7 @@ pub enum ObjectVisualKind {
     GamePlank,
     GameTarget,
     FoxBuddy,
+    RobotBuddy,
     ImportedModel,
 }
 
