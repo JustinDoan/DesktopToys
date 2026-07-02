@@ -535,7 +535,7 @@ impl NativeApp {
         self.is_rotation_dragging = false;
     }
 
-    fn update_held_object_rotation(&mut self, precision_twist: bool) {
+    fn update_held_object_rotation(&mut self, is_right_down: bool) {
         let Some(selected_id) = self.selected_id else {
             self.is_rotation_dragging = false;
             return;
@@ -546,7 +546,7 @@ impl NativeApp {
             return;
         };
 
-        if self.drag_controller.dragged_id() != Some(selected_id) {
+        if self.drag_controller.dragged_id() != Some(selected_id) || !is_right_down {
             self.is_rotation_dragging = false;
             return;
         }
@@ -570,8 +570,8 @@ impl NativeApp {
         );
         let grab = self.cursor_local - center;
         let torque = ((grab.x * delta.y) - (grab.y * delta.x)) as f64 / size;
-        let tumble = if precision_twist { 1.28 } else { 0.72 };
-        let roll = if precision_twist { 0.34 } else { 0.18 };
+        let tumble = 1.18;
+        let roll = 0.32;
 
         object.rotation_y += (delta.x as f64 / size) * tumble;
         object.rotation_x += (delta.y as f64 / size) * tumble;
@@ -579,11 +579,7 @@ impl NativeApp {
         object.angular_velocity_y = (delta.x as f64 / size) * tumble * 48.0;
         object.angular_velocity_x = (delta.y as f64 / size) * tumble * 48.0;
         object.angular_velocity_z = torque * roll * 56.0;
-        self.last_drag_attempt = if precision_twist {
-            format!("twist:{:.1},{:.1}", delta.x, delta.y)
-        } else {
-            format!("tumble:{:.1},{:.1}", delta.x, delta.y)
-        };
+        self.last_drag_attempt = format!("rotate:{:.1},{:.1}", delta.x, delta.y);
     }
 
     fn sync_panels(&mut self) {
