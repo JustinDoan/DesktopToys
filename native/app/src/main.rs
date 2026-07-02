@@ -162,6 +162,7 @@ struct NativeApp {
     slingshot_game: SlingshotGame,
     robot_carries: HashMap<u64, RobotCarry>,
     robot_drop_cooldowns: HashMap<u64, RobotDropCooldown>,
+    robot_bin_ids: Vec<u64>,
     fallback_left_down: bool,
     fallback_right_down: bool,
     previous_global_import_keys: GlobalImportKeys,
@@ -172,10 +173,11 @@ struct NativeApp {
 
 const FLOOR_MARGIN_PIXELS: f32 = 18.0;
 const STRESS_SPAWN_COUNT: usize = 25;
-const ROBOT_STACK_MAX_LEVELS: usize = 10;
 const ROBOT_STACK_DROP_COOLDOWN_SECONDS: f64 = 1.8;
-const ROBOT_STACK_APPROACH_GAP: f32 = 32.0;
-const ROBOT_STACK_PLACE_TOLERANCE: f32 = 26.0;
+const ROBOT_THROW_HOLD_SECONDS: f64 = 0.55;
+const ROBOT_BIN_WIDTH: f32 = 118.0;
+const ROBOT_BIN_HEIGHT: f32 = 96.0;
+const ROBOT_BIN_WALL: f32 = 12.0;
 
 impl Default for NativeApp {
     fn default() -> Self {
@@ -221,6 +223,7 @@ impl Default for NativeApp {
             slingshot_game: SlingshotGame::default(),
             robot_carries: HashMap::new(),
             robot_drop_cooldowns: HashMap::new(),
+            robot_bin_ids: Vec::new(),
             fallback_left_down: false,
             fallback_right_down: false,
             previous_global_import_keys: GlobalImportKeys::default(),
@@ -574,6 +577,9 @@ impl NativeApp {
             .filter(|object| object.visual_kind == ObjectVisualKind::RobotBuddy)
             .map(|object| object.id)
             .collect();
+        if !robot_ids.is_empty() {
+            self.ensure_robot_bin();
+        }
         self.robot_carries
             .retain(|robot_id, carry| robot_ids.contains(robot_id) && objects.iter().any(|object| object.id == carry.object_id));
         self.robot_drop_cooldowns.retain(|robot_id, cooldown| {
@@ -606,19 +612,14 @@ impl NativeApp {
             if let Some(carry) = self.robot_carries.get(&robot_id).copied() {
                 let held_seconds = self.frame_clock.elapsed_seconds - carry.picked_up_at;
                 let near_edge = robot_center.x < 80.0 || robot_center.x > self.scene_bounds().right() - 80.0;
-                let stack_x = self.robot_stack_x(robot_id);
-                let approach_side = if robot_center.x <= stack_x { -1.0 } else { 1.0 };
-                let approach_x = self.robot_stack_approach_x(robot_snapshot, stack_x, approach_side);
-                let approach_dx = approach_x - robot_center.x;
-                let place_facing = -approach_side;
                 if near_edge || held_seconds > 7.0 {
                     self.drop_robot_carry(robot_id, facing * 70.0);
-                } else if approach_dx.abs() < ROBOT_STACK_PLACE_TOLERANCE {
-                    self.position_robot_carry(robot_snapshot, carry.object_id, place_facing);
-                    self.place_robot_carry_on_stack(robot_id, carry.object_id);
+                } else if held_seconds >= ROBOT_THROW_HOLD_SECONDS {
+                    self.position_robot_carry(robot_snapshot, carry.object_id);
+                    self.throw_robot_carry_to_bin(robot_id, carry.object_id);
                 } else {
-                    self.position_robot_carry(robot_snapshot, carry.object_id, place_facing);
-                    self.drive_robot(robot_id, approach_dx.clamp(-1.0, 1.0), 86.0);
+                    self.position_robot_carry(robot_snapshot, carry.object_id);
+                    self.drive_robot(robot_id, 0.0, 0.0);
                     continue;
                 }
             }
@@ -650,7 +651,7 @@ impl NativeApp {
                             picked_up_at: self.frame_clock.elapsed_seconds,
                         },
                     );
-                    self.position_robot_carry(robot_snapshot, object_id, facing);
+                    self.position_robot_carry(robot_snapshot, object_id);
                 }
                 let direction = (object_center.x - robot_center.x).clamp(-1.0, 1.0);
                 self.drive_robot(robot_id, direction, 108.0);
@@ -658,7 +659,7 @@ impl NativeApp {
             }
 
             let patrol = ((self.frame_clock.elapsed_seconds * 0.32 + robot_id as f64 * 0.17).sin() as f32).signum();
-            let target_x = self.robot_stack_x(robot_id) - 260.0 + patrol * 150.0;
+            let target_x = self.robot_bin_rect().right() + 210.0 + patrol * 180.0;
             let direction = (target_x - robot_center.x).clamp(-1.0, 1.0);
             let speed = if is_carrying { 72.0 } else { 64.0 };
             self.drive_robot(robot_id, direction, speed);
@@ -667,9 +668,10 @@ impl NativeApp {
 
     fn is_robot_carry_candidate(&self, robot_id: u64, object: &ObjectState) -> bool {
         let bounds = self.scene_bounds();
-        let stack_x = self.robot_stack_x(robot_id);
+        let bin_rect = self.robot_bin_rect();
         let center_x = object.body.position.x + object.body.width * 0.5;
         let bottom_y = object.body.position.y + object.body.height;
+        let in_bin_zone = center_x > bin_rect.x - object.body.width && center_x < bin_rect.right() + object.body.width;
         object.id != robot_id
             && object.body.collidable
             && !object.is_dragging
@@ -678,7 +680,7 @@ impl NativeApp {
             && object.body.width <= 120.0
             && object.body.height <= 120.0
             && bottom_y > bounds.bottom() - 210.0
-            && (center_x - stack_x).abs() > object.body.width.max(42.0) * 1.35
+            && !in_bin_zone
             && !self.robot_carries.values().any(|carry| carry.object_id == object.id)
             && !self
                 .robot_drop_cooldowns
@@ -714,7 +716,7 @@ impl NativeApp {
         }
     }
 
-    fn position_robot_carry(&mut self, robot: &ObjectState, object_id: u64, facing: f32) {
+    fn position_robot_carry(&mut self, robot: &ObjectState, object_id: u64) {
         if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == object_id) {
             object.is_dragging = true;
             object.body.is_dragging = true;
@@ -725,11 +727,11 @@ impl NativeApp {
                 robot.body.position.x + robot.body.width * 0.5,
                 robot.body.position.y + robot.body.height * 0.5,
             );
-            let gripper_center_x = robot_center.x + facing * (robot.body.width * 0.62 + object.body.width * 0.16);
-            let gripper_center_y = robot.body.position.y + robot.body.height * 0.5;
+            let cargo_center_x = robot_center.x;
+            let cargo_center_y = robot.body.position.y - object.body.height * 0.5 - 4.0;
             object.body.position = Vector2::new(
-                gripper_center_x - object.body.width * 0.5,
-                gripper_center_y - object.body.height * 0.5,
+                cargo_center_x - object.body.width * 0.5,
+                cargo_center_y - object.body.height * 0.5,
             );
         }
     }
@@ -753,11 +755,11 @@ impl NativeApp {
         );
     }
 
-    fn place_robot_carry_on_stack(&mut self, robot_id: u64, object_id: u64) {
+    fn throw_robot_carry_to_bin(&mut self, robot_id: u64, object_id: u64) {
         let Some(carry) = self.robot_carries.remove(&robot_id) else {
             return;
         };
-        let Some(slot) = self.robot_stack_slot(robot_id, object_id) else {
+        let Some(throw_velocity) = self.robot_bin_throw_velocity(object_id) else {
             self.robot_carries.insert(robot_id, carry);
             return;
         };
@@ -765,12 +767,11 @@ impl NativeApp {
             object.is_dragging = false;
             object.body.is_dragging = false;
             object.body.is_sleeping = false;
-            object.body.position = slot;
-            object.body.velocity = Vector2::ZERO;
-            object.body.friction = 1.4;
-            object.body.restitution = 0.02;
-            object.body.linear_damping = 0.985;
-            object.body.lock_rotation = true;
+            object.body.velocity = throw_velocity;
+            object.body.friction = 0.95;
+            object.body.restitution = 0.18;
+            object.body.linear_damping = 0.992;
+            object.body.lock_rotation = false;
             object.rotation_x = 0.0;
             object.rotation_y = 0.0;
             object.rotation_z = 0.0;
@@ -787,41 +788,60 @@ impl NativeApp {
         );
     }
 
-    fn robot_stack_x(&self, robot_id: u64) -> f32 {
-        let offset = ((robot_id % 5) as f32 - 2.0) * 34.0;
-        (self.scene_bounds().width * 0.72 + offset).clamp(120.0, self.scene_bounds().right() - 120.0)
-    }
-
-    fn robot_stack_approach_x(&self, robot: &ObjectState, stack_x: f32, side: f32) -> f32 {
-        let distance = robot.body.width * 0.55 + ROBOT_STACK_APPROACH_GAP;
-        (stack_x + side.signum() * distance).clamp(80.0, self.scene_bounds().right() - 80.0)
-    }
-
-    fn robot_stack_slot(&self, robot_id: u64, object_id: u64) -> Option<Vector2> {
+    fn robot_bin_throw_velocity(&self, object_id: u64) -> Option<Vector2> {
         let object = self.scene.objects().iter().find(|object| object.id == object_id)?;
-        let stack_x = self.robot_stack_x(robot_id);
-        let level = self.robot_stack_level(stack_x, object);
+        let target = self.robot_bin_target();
+        let start = Vector2::new(
+            object.body.position.x + object.body.width * 0.5,
+            object.body.position.y + object.body.height * 0.5,
+        );
+        let distance_x = (target.x - start.x).abs();
+        let travel_time = (distance_x / 760.0).clamp(0.68, 1.55);
+        let gravity = self.scene.config().gravity_y.max(240.0);
         Some(Vector2::new(
-            stack_x - object.body.width * 0.5,
-            self.scene_bounds().bottom() - object.body.height * (level as f32 + 1.0) - 2.0,
+            (target.x - start.x) / travel_time,
+            (target.y - start.y - 0.5 * gravity * travel_time * travel_time) / travel_time,
         ))
     }
 
-    fn robot_stack_level(&self, stack_x: f32, carried: &ObjectState) -> usize {
+    fn robot_bin_rect(&self) -> RectF {
         let bottom = self.scene_bounds().bottom();
-        self.scene
-            .objects()
-            .iter()
-            .filter(|object| object.id != carried.id)
-            .filter(|object| object.visual_kind == ObjectVisualKind::Cube)
-            .filter(|object| {
-                let center_x = object.body.position.x + object.body.width * 0.5;
-                let object_bottom = object.body.position.y + object.body.height;
-                (center_x - stack_x).abs() < carried.body.width.max(42.0) * 0.85
-                    && object_bottom > bottom - carried.body.height * (ROBOT_STACK_MAX_LEVELS as f32 + 1.0)
-            })
-            .count()
-            .min(ROBOT_STACK_MAX_LEVELS)
+        RectF::new(42.0, bottom - ROBOT_BIN_HEIGHT - 4.0, ROBOT_BIN_WIDTH, ROBOT_BIN_HEIGHT)
+    }
+
+    fn robot_bin_target(&self) -> Vector2 {
+        let bin = self.robot_bin_rect();
+        Vector2::new(bin.x + bin.width * 0.5, bin.y + bin.height * 0.46)
+    }
+
+    fn ensure_robot_bin(&mut self) {
+        let existing_ids: std::collections::HashSet<u64> = self.scene.objects().iter().map(|object| object.id).collect();
+        if self.robot_bin_ids.len() == 3 && self.robot_bin_ids.iter().all(|id| existing_ids.contains(id)) {
+            return;
+        }
+        self.robot_bin_ids.clear();
+        let bin = self.robot_bin_rect();
+        let color = AppColor::from_rgb(70, 96, 108);
+        let rim = AppColor::from_rgb(98, 142, 158);
+        let floor_id = self.spawn_static_game_object(
+            Vector2::new(bin.x, bin.y + bin.height - ROBOT_BIN_WALL),
+            Vector2::new(bin.width, ROBOT_BIN_WALL),
+            color,
+            ObjectVisualKind::GamePlank,
+        );
+        let left_id = self.spawn_static_game_object(
+            Vector2::new(bin.x, bin.y),
+            Vector2::new(ROBOT_BIN_WALL, bin.height),
+            rim,
+            ObjectVisualKind::GamePlank,
+        );
+        let right_id = self.spawn_static_game_object(
+            Vector2::new(bin.x + bin.width - ROBOT_BIN_WALL, bin.y),
+            Vector2::new(ROBOT_BIN_WALL, bin.height),
+            rim,
+            ObjectVisualKind::GamePlank,
+        );
+        self.robot_bin_ids.extend([floor_id, left_id, right_id]);
     }
 
     fn stabilize_robot_buddies(&mut self) {
