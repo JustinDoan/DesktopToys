@@ -751,12 +751,7 @@ fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds
             center_z += 12.0;
         },
         ObjectVisualKind::FoxBuddy => {
-            let speed = object.body.velocity.x.abs() + object.body.velocity.y.abs();
-            let stride = ((elapsed_seconds * (3.4 + speed as f64 * 0.012)) + phase).sin();
-            center_z += 18.0 + stride.abs() as f32 * 4.0;
-            rotation_y += stride * 4.0;
-            rotation_z += (object.body.velocity.x as f64 * 0.012).clamp(-10.0, 10.0);
-            scale_y *= 1.0 + stride.abs() as f32 * 0.035;
+            center_z += 18.0;
         },
         ObjectVisualKind::ImportedModel => {
             center_z += 12.0;

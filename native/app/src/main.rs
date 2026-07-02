@@ -555,11 +555,10 @@ impl NativeApp {
         self.push_status_message("Fox buddy joined the desktop.".to_string());
     }
 
-    fn update_fox_buddies(&mut self, dt: f32) {
+    fn update_fox_buddies(&mut self, _dt: f32) {
         if self.slingshot_game.active {
             return;
         }
-        let bounds = self.scene_bounds();
         let objects = self.scene.objects().to_vec();
         let fox_ids: Vec<u64> = objects
             .iter()
@@ -572,6 +571,10 @@ impl NativeApp {
                 continue;
             };
             if self.drag_controller.dragged_id() == Some(fox_id) || fox_snapshot.is_dragging {
+                if let Some(fox) = self.scene.objects_mut().iter_mut().find(|object| object.id == fox_id) {
+                    fox.body.motor_enabled = false;
+                    fox.body.motor_velocity_x = 0.0;
+                }
                 continue;
             }
 
@@ -596,18 +599,20 @@ impl NativeApp {
             let target_x = nearest.map(|(center, _)| center.x).unwrap_or(fox_center.x + patrol * 220.0);
             let direction = (target_x - fox_center.x).clamp(-1.0, 1.0);
             let speed = if nearest.is_some() { 118.0 } else { 76.0 };
-            let floor_y = bounds.bottom() - FLOOR_MARGIN_PIXELS - fox_snapshot.body.height;
+            let motor_velocity = if direction.abs() < 0.05 { 0.0 } else { direction.signum() * speed };
 
             if let Some(fox) = self.scene.objects_mut().iter_mut().find(|object| object.id == fox_id) {
-                fox.body.is_dragging = true;
+                fox.body.is_dragging = false;
                 fox.is_dragging = false;
                 fox.body.is_sleeping = false;
-                fox.body.velocity = Vector2::new(direction * speed, 0.0);
-                fox.body.position.x = (fox.body.position.x + fox.body.velocity.x * dt).clamp(12.0, bounds.right() - fox.body.width - 12.0);
-                if fox.body.position.y > floor_y - 4.0 {
-                    fox.body.position.y = floor_y;
+                fox.body.gravity_scale = 1.0;
+                fox.body.motor_enabled = motor_velocity != 0.0;
+                fox.body.motor_velocity_x = motor_velocity;
+                fox.body.velocity.x = motor_velocity;
+                if motor_velocity.abs() > 0.0 {
+                    fox.rotation_y = if motor_velocity < 0.0 { 180.0 } else { 0.0 };
                 }
-                fox.rotation_z = (direction as f64 * -4.0) + (self.frame_clock.elapsed_seconds * 5.5).sin() * 1.5;
+                fox.rotation_z = 0.0;
             }
         }
     }

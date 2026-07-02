@@ -48,6 +48,11 @@ static b3Vec3 to_world_velocity(const SopBox3dWorld* world, float x, float y)
     return (b3Vec3){ x / world->pixelsPerMeter, -y / world->pixelsPerMeter, 0.0f };
 }
 
+static float to_world_velocity_x(const SopBox3dWorld* world, float x)
+{
+    return x / world->pixelsPerMeter;
+}
+
 static void from_world_velocity(const SopBox3dWorld* world, b3Vec3 velocity, float* x, float* y)
 {
     *x = velocity.x * world->pixelsPerMeter;
@@ -313,6 +318,14 @@ void sop_box3d_sync_body(SopBox3dWorld* world, const SopBox3dBodyDef* def)
         b3Body_SetAwake(body->bodyId, true);
         body->isDragging = false;
         body->wasAwake = true;
+    }
+
+    if (def->motorEnabled)
+    {
+        b3Vec3 velocity = b3Body_GetLinearVelocity(body->bodyId);
+        velocity.x = to_world_velocity_x(world, def->motorVelocityX);
+        b3Body_SetLinearVelocity(body->bodyId, velocity);
+        b3Body_SetAwake(body->bodyId, true);
     }
 }
 

@@ -34,6 +34,8 @@ struct SopBox3dBodyDef {
     friction: f32,
     linear_damping: f32,
     gravity_scale: f32,
+    motor_enabled: bool,
+    motor_velocity_x: f32,
     collision_scale: f32,
     shape: i32,
     is_dragging: bool,
@@ -63,6 +65,8 @@ struct BodySyncState {
     friction: f32,
     linear_damping: f32,
     gravity_scale: f32,
+    motor_enabled: bool,
+    motor_velocity_x: f32,
     collision_scale: f32,
     shape: i32,
     is_dragging: bool,
@@ -77,6 +81,8 @@ impl BodySyncState {
             || self.friction != next.friction
             || self.linear_damping != next.linear_damping
             || self.gravity_scale != next.gravity_scale
+            || self.motor_enabled != next.motor_enabled
+            || self.motor_velocity_x != next.motor_velocity_x
             || self.collision_scale != next.collision_scale
             || self.shape != next.shape
     }
@@ -171,13 +177,17 @@ impl Box3dBackend {
             friction: body.friction,
             linear_damping: body.linear_damping,
             gravity_scale: body.gravity_scale,
+            motor_enabled: body.motor_enabled,
+            motor_velocity_x: body.motor_velocity_x,
             collision_scale: body.collision_scale,
             shape,
             is_dragging,
         };
         let should_sync = match self.synced_bodies.get(&object.id) {
             None => true,
-            Some(previous) => is_dragging || previous.is_dragging || previous.static_fields_changed(next_state),
+            Some(previous) => {
+                is_dragging || previous.is_dragging || next_state.motor_enabled || previous.static_fields_changed(next_state)
+            },
         };
         if !should_sync {
             return;
@@ -196,6 +206,8 @@ impl Box3dBackend {
             friction: body.friction,
             linear_damping: body.linear_damping,
             gravity_scale: body.gravity_scale,
+            motor_enabled: body.motor_enabled,
+            motor_velocity_x: body.motor_velocity_x,
             collision_scale: body.collision_scale,
             shape,
             is_dragging,
