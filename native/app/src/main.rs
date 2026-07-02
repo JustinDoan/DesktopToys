@@ -554,23 +554,48 @@ impl NativeApp {
     fn build_slingshot_level(&mut self, bounds: RectF) {
         let anchor = self.slingshot_game.anchor;
         self.spawn_pinned_game_object(
+            Vector2::new(bounds.width * 0.5 - 220.0, bounds.bottom() - 28.0),
+            Vector2::new(440.0, 28.0),
+            AppColor::from_rgb(76, 124, 64),
+            ObjectVisualKind::GamePlank,
+        );
+        self.spawn_pinned_game_object(
+            Vector2::new((bounds.width * 0.66).max(anchor.x + 340.0) - 28.0, bounds.bottom() - 34.0),
+            Vector2::new(500.0, 34.0),
+            AppColor::from_rgb(84, 130, 68),
+            ObjectVisualKind::GamePlank,
+        );
+        self.spawn_pinned_game_object(
             Vector2::new(anchor.x - 42.0, anchor.y + 16.0),
-            Vector2::new(24.0, 96.0),
+            Vector2::new(22.0, 104.0),
             AppColor::from_rgb(116, 74, 46),
-            ObjectVisualKind::Barrel,
+            ObjectVisualKind::GamePlank,
         );
         self.spawn_pinned_game_object(
             Vector2::new(anchor.x + 18.0, anchor.y + 16.0),
-            Vector2::new(24.0, 96.0),
+            Vector2::new(22.0, 104.0),
             AppColor::from_rgb(116, 74, 46),
-            ObjectVisualKind::Barrel,
+            ObjectVisualKind::GamePlank,
         );
         self.spawn_pinned_game_object(
             Vector2::new(anchor.x - 50.0, anchor.y + 104.0),
             Vector2::new(100.0, 20.0),
             AppColor::from_rgb(96, 62, 42),
-            ObjectVisualKind::Cube,
+            ObjectVisualKind::GamePlank,
         );
+        let left_band = self.spawn_pinned_game_object(
+            Vector2::new(anchor.x - 40.0, anchor.y - 4.0),
+            Vector2::new(8.0, 8.0),
+            AppColor::from_rgb(56, 35, 40),
+            ObjectVisualKind::GamePlank,
+        );
+        let right_band = self.spawn_pinned_game_object(
+            Vector2::new(anchor.x + 32.0, anchor.y - 4.0),
+            Vector2::new(8.0, 8.0),
+            AppColor::from_rgb(56, 35, 40),
+            ObjectVisualKind::GamePlank,
+        );
+        self.slingshot_game.band_ids = [Some(left_band), Some(right_band)];
         let projectile = self.scene.spawn_custom_object(
             Vector2::new(anchor.x - 19.0, anchor.y - 19.0),
             Vector2::new(38.0, 38.0),
@@ -586,6 +611,7 @@ impl NativeApp {
             object.body.restitution = 0.42;
             object.body.linear_damping = 0.996;
         }
+        self.update_slingshot_bands();
 
         let floor = bounds.bottom() - FLOOR_MARGIN_PIXELS;
         let base_x = (bounds.width * 0.66).max(anchor.x + 340.0);
@@ -599,16 +625,16 @@ impl NativeApp {
                 let y = floor - 34.0 - row as f32 * 54.0;
                 self.scene.spawn_custom_object(
                     Vector2::new(x, y),
-                    Vector2::new(28.0, 54.0),
+                    Vector2::new(26.0, 58.0),
                     block,
-                    ObjectVisualKind::Barrel,
+                    ObjectVisualKind::GamePlank,
                     CollisionShape::Box,
                 );
                 self.scene.spawn_custom_object(
                     Vector2::new(x + 92.0, y),
-                    Vector2::new(28.0, 54.0),
+                    Vector2::new(26.0, 58.0),
                     block,
-                    ObjectVisualKind::Barrel,
+                    ObjectVisualKind::GamePlank,
                     CollisionShape::Box,
                 );
                 if row % 2 == 0 {
@@ -616,7 +642,7 @@ impl NativeApp {
                         Vector2::new(x + 15.0, y - 18.0),
                         Vector2::new(90.0, 22.0),
                         glass,
-                        ObjectVisualKind::Cube,
+                        ObjectVisualKind::GamePlank,
                         CollisionShape::Box,
                     );
                 }
@@ -626,7 +652,7 @@ impl NativeApp {
                 Vector2::new(x + 39.0, floor - 78.0),
                 Vector2::new(42.0, 42.0),
                 target,
-                ObjectVisualKind::Ball,
+                ObjectVisualKind::GameTarget,
                 CollisionShape::Circle,
             );
             self.slingshot_game.targets.push(TargetMarker {
@@ -638,7 +664,7 @@ impl NativeApp {
                 Vector2::new(x + 21.0, floor - 252.0),
                 Vector2::new(78.0, 24.0),
                 AppColor::from_rgb(248, 211, 84),
-                ObjectVisualKind::Cube,
+                ObjectVisualKind::GamePlank,
                 CollisionShape::Box,
             );
         }
@@ -650,7 +676,7 @@ impl NativeApp {
         size: Vector2,
         color: AppColor,
         visual_kind: ObjectVisualKind,
-    ) {
+    ) -> u64 {
         let id = self
             .scene
             .spawn_custom_object(position, size, color, visual_kind, CollisionShape::Box);
@@ -660,6 +686,7 @@ impl NativeApp {
             object.body.gravity_scale = 0.0;
             object.body.velocity = Vector2::ZERO;
         }
+        id
     }
 
     fn handle_slingshot_mouse(&mut self, is_left_down: bool) {
@@ -712,6 +739,7 @@ impl NativeApp {
         object.angular_velocity_y = 0.0;
         object.angular_velocity_z = 0.0;
         self.slingshot_game.pull = pull;
+        self.update_slingshot_bands();
     }
 
     fn fire_slingshot_projectile(&mut self, projectile_id: u64) {
@@ -728,6 +756,7 @@ impl NativeApp {
         self.slingshot_game.aiming = false;
         self.slingshot_game.ready = false;
         self.slingshot_game.shots += 1;
+        self.update_slingshot_bands();
     }
 
     fn update_slingshot_game(&mut self) {
@@ -791,6 +820,39 @@ impl NativeApp {
         object.body.is_sleeping = false;
         self.slingshot_game.ready = true;
         self.slingshot_game.pull = Vector2::ZERO;
+        self.update_slingshot_bands();
+    }
+
+    fn update_slingshot_bands(&mut self) {
+        let anchor = self.slingshot_game.anchor;
+        let projectile_center = if self.slingshot_game.aiming || self.slingshot_game.ready {
+            self
+            .slingshot_game
+            .projectile_id
+            .and_then(|id| self.scene.objects().iter().find(|object| object.id == id))
+            .map(|object| {
+                Vector2::new(
+                    object.body.position.x + object.body.width * 0.5,
+                    object.body.position.y + object.body.height * 0.5,
+                )
+            })
+            .unwrap_or(anchor)
+        } else {
+            anchor
+        };
+        let forks = [Vector2::new(anchor.x - 31.0, anchor.y + 8.0), Vector2::new(anchor.x + 31.0, anchor.y + 8.0)];
+        for (index, band_id) in self.slingshot_game.band_ids.iter().flatten().copied().enumerate() {
+            let from = forks[index.min(1)];
+            let delta = projectile_center - from;
+            let length = delta.length_squared().sqrt().max(8.0);
+            let angle = delta.y.atan2(delta.x).to_degrees() as f64;
+            if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == band_id) {
+                object.body.position = Vector2::new(from.x + delta.x * 0.5 - length * 0.5, from.y + delta.y * 0.5 - 3.0);
+                object.body.width = length;
+                object.body.height = 6.0;
+                object.rotation_z = angle;
+            }
+        }
     }
 
     fn end_drag_and_apply_spin(&mut self, now_seconds: f64) {
@@ -2351,6 +2413,7 @@ struct SlingshotGame {
     anchor: Vector2,
     pull: Vector2,
     projectile_id: Option<u64>,
+    band_ids: [Option<u64>; 2],
     targets: Vec<TargetMarker>,
 }
 

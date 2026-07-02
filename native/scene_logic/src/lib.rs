@@ -481,7 +481,7 @@ impl SceneController {
             1.0
         };
         state.body.shape = match visual_kind {
-            ObjectVisualKind::Ball | ObjectVisualKind::Ring => CollisionShape::Circle,
+            ObjectVisualKind::Ball | ObjectVisualKind::Ring | ObjectVisualKind::GameTarget => CollisionShape::Circle,
             ObjectVisualKind::Crystal | ObjectVisualKind::Star => CollisionShape::Diamond,
             _ => CollisionShape::Box,
         };

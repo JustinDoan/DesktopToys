@@ -166,6 +166,10 @@ impl SceneRenderer {
             ObjectVisualKind::Barrel => self.generated_mesh(key, || barrel_mesh(size, object.base_color)),
             ObjectVisualKind::Ring => self.generated_mesh(key, || ring_mesh(size, object.base_color)),
             ObjectVisualKind::Star => self.generated_mesh(key, || star_mesh(size, object.base_color)),
+            ObjectVisualKind::GamePlank => self.generated_mesh(key, || {
+                rectangular_prism_mesh(object.body.width.max(1.0), object.body.height.max(1.0), size * 0.42, object.base_color)
+            }),
+            ObjectVisualKind::GameTarget => self.generated_mesh(key, || target_mesh(size, object.base_color)),
             ObjectVisualKind::DvdLogo => self.generated_mesh(key, || {
                 dvd_logo_mesh(object.body.width.max(1.0), object.body.height.max(1.0), object.base_color)
             }),
@@ -216,7 +220,9 @@ impl MeshCacheKey {
                 ObjectVisualKind::Barrel => 7,
                 ObjectVisualKind::Ring => 8,
                 ObjectVisualKind::Star => 9,
-                ObjectVisualKind::ImportedModel => 10,
+                ObjectVisualKind::GamePlank => 10,
+                ObjectVisualKind::GameTarget => 11,
+                ObjectVisualKind::ImportedModel => 12,
             },
             width_milli: quantize_size(object.body.width.max(1.0)),
             height_milli: quantize_size(object.body.height.max(1.0)),
@@ -533,6 +539,12 @@ fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds
             center_z += 12.0;
             rotation_z += ((elapsed_seconds * 1.2) + phase).sin() * 5.0;
         },
+        ObjectVisualKind::GamePlank => {
+            center_z += 4.0;
+        },
+        ObjectVisualKind::GameTarget => {
+            center_z += 12.0;
+        },
         ObjectVisualKind::ImportedModel => {
             center_z += 12.0;
         },
@@ -646,14 +658,20 @@ fn scale_channel(value: u8, factor: f32) -> u8 {
 }
 
 fn cube_mesh(size: f32, base_color: AppColor) -> Mesh {
-    let hs = size * 0.5;
+    rectangular_prism_mesh(size, size, size, base_color)
+}
+
+fn rectangular_prism_mesh(width: f32, height: f32, depth: f32, base_color: AppColor) -> Mesh {
+    let hx = width * 0.5;
+    let hy = height * 0.5;
+    let hz = depth.max(2.0) * 0.5;
     let faces = [
-        (quad(Vec3::new(-hs, -hs, hs), Vec3::new(hs, -hs, hs), Vec3::new(hs, hs, hs), Vec3::new(-hs, hs, hs)), scale_color(base_color, 1.10)),
-        (quad(Vec3::new(-hs, -hs, -hs), Vec3::new(-hs, hs, -hs), Vec3::new(hs, hs, -hs), Vec3::new(hs, -hs, -hs)), scale_color(base_color, 0.62)),
-        (quad(Vec3::new(-hs, -hs, -hs), Vec3::new(-hs, -hs, hs), Vec3::new(-hs, hs, hs), Vec3::new(-hs, hs, -hs)), scale_color(base_color, 0.78)),
-        (quad(Vec3::new(hs, -hs, -hs), Vec3::new(hs, hs, -hs), Vec3::new(hs, hs, hs), Vec3::new(hs, -hs, hs)), scale_color(base_color, 0.56)),
-        (quad(Vec3::new(-hs, -hs, -hs), Vec3::new(hs, -hs, -hs), Vec3::new(hs, -hs, hs), Vec3::new(-hs, -hs, hs)), scale_color(base_color, 0.96)),
-        (quad(Vec3::new(-hs, hs, -hs), Vec3::new(-hs, hs, hs), Vec3::new(hs, hs, hs), Vec3::new(hs, hs, -hs)), scale_color(base_color, 0.70)),
+        (quad(Vec3::new(-hx, -hy, hz), Vec3::new(hx, -hy, hz), Vec3::new(hx, hy, hz), Vec3::new(-hx, hy, hz)), scale_color(base_color, 1.10)),
+        (quad(Vec3::new(-hx, -hy, -hz), Vec3::new(-hx, hy, -hz), Vec3::new(hx, hy, -hz), Vec3::new(hx, -hy, -hz)), scale_color(base_color, 0.62)),
+        (quad(Vec3::new(-hx, -hy, -hz), Vec3::new(-hx, -hy, hz), Vec3::new(-hx, hy, hz), Vec3::new(-hx, hy, -hz)), scale_color(base_color, 0.78)),
+        (quad(Vec3::new(hx, -hy, -hz), Vec3::new(hx, hy, -hz), Vec3::new(hx, hy, hz), Vec3::new(hx, -hy, hz)), scale_color(base_color, 0.56)),
+        (quad(Vec3::new(-hx, -hy, -hz), Vec3::new(hx, -hy, -hz), Vec3::new(hx, -hy, hz), Vec3::new(-hx, -hy, hz)), scale_color(base_color, 0.96)),
+        (quad(Vec3::new(-hx, hy, -hz), Vec3::new(-hx, hy, hz), Vec3::new(hx, hy, hz), Vec3::new(hx, hy, -hz)), scale_color(base_color, 0.70)),
     ];
 
     let mut triangles = Vec::new();
@@ -893,6 +911,41 @@ fn ball_mesh(size: f32, base_color: AppColor) -> Mesh {
     }
 
     Mesh { triangles }
+}
+
+fn target_mesh(size: f32, base_color: AppColor) -> Mesh {
+    let mut mesh = ball_mesh(size, base_color);
+    let face_z = size * 0.44;
+    let eye_color = AppColor::from_rgb(32, 62, 40);
+    let cheek_color = scale_color(base_color, 1.32);
+    add_disk(
+        &mut mesh.triangles,
+        Vec3::new(-size * 0.14, -size * 0.08, face_z),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+        size * 0.045,
+        eye_color,
+        true,
+    );
+    add_disk(
+        &mut mesh.triangles,
+        Vec3::new(size * 0.14, -size * 0.08, face_z),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+        size * 0.045,
+        eye_color,
+        true,
+    );
+    add_disk(
+        &mut mesh.triangles,
+        Vec3::new(0.0, size * 0.13, face_z + size * 0.01),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+        size * 0.075,
+        cheek_color,
+        true,
+    );
+    mesh
 }
 
 fn sphere_point(radius: f32, theta: f32, phi: f32) -> Vec3 {

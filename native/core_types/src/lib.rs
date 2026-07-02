@@ -143,6 +143,8 @@ pub enum ObjectVisualKind {
     Barrel,
     Ring,
     Star,
+    GamePlank,
+    GameTarget,
     ImportedModel,
 }
 
