@@ -229,6 +229,17 @@ impl DragController {
         self.dragged_id
     }
 
+    pub fn cancel_drag(&mut self, objects: &mut [ObjectState]) {
+        if let Some(dragged_id) = self.dragged_id {
+            if let Some(object) = objects.iter_mut().find(|object| object.id == dragged_id) {
+                object.body.is_dragging = false;
+                object.is_dragging = false;
+            }
+        }
+        self.dragged_id = None;
+        self.mouse_tracker.clear();
+    }
+
     pub fn begin_drag(
         &mut self,
         objects: &mut [ObjectState],
@@ -403,6 +414,28 @@ impl SceneController {
 
     pub fn spawn_object(&mut self, position: Vector2, color: Option<AppColor>, visual_kind: ObjectVisualKind) -> u64 {
         self.spawn_object_with_size(position, color, visual_kind, DEFAULT_OBJECT_SIZE)
+    }
+
+    pub fn spawn_custom_object(
+        &mut self,
+        position: Vector2,
+        size: Vector2,
+        color: AppColor,
+        visual_kind: ObjectVisualKind,
+        shape: CollisionShape,
+    ) -> u64 {
+        let id = self.spawn_object_with_size(position, Some(color), visual_kind, size.x.min(size.y).max(1.0));
+        if let Some(object) = self.physics_world.objects_mut().iter_mut().find(|object| object.id == id) {
+            object.body.width = size.x.max(1.0);
+            object.body.height = size.y.max(1.0);
+            object.body.shape = shape;
+            object.body.collision_scale = 1.0;
+        }
+        id
+    }
+
+    pub fn clear_objects(&mut self) {
+        self.physics_world.clear();
     }
 
     fn spawn_object_with_size(

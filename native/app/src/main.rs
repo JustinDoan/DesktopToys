@@ -6,7 +6,7 @@ use std::{borrow::Cow, error::Error, sync::Arc, time::{Duration, Instant}};
 use std::ffi::CString;
 
 use anyhow::{Context, Result};
-use core_types::{AppColor, AppConfig, RectF, Vector2};
+use core_types::{AppColor, AppConfig, CollisionShape, ObjectVisualKind, RectF, Vector2};
 use native_shell::{
     configure_overlay_window, overlay_window_attributes, pick_model_file, set_overlay_input_mode, show_error_dialog,
     sync_window_to_monitor,
@@ -148,6 +148,7 @@ struct NativeApp {
     was_left_down: bool,
     was_right_down: bool,
     was_stress_spawn_down: bool,
+    was_slingshot_toggle_down: bool,
     force_interactive_for_debug: bool,
     is_rotation_dragging: bool,
     last_drag_attempt: String,
@@ -157,6 +158,7 @@ struct NativeApp {
     next_input_retry_seconds: f64,
     settings_panel: SettingsPanel,
     import_panel: Option<ImportPanel>,
+    slingshot_game: SlingshotGame,
     fallback_left_down: bool,
     fallback_right_down: bool,
     previous_global_import_keys: GlobalImportKeys,
@@ -198,6 +200,7 @@ impl Default for NativeApp {
             was_left_down: false,
             was_right_down: false,
             was_stress_spawn_down: false,
+            was_slingshot_toggle_down: false,
             force_interactive_for_debug: false,
             is_rotation_dragging: false,
             last_drag_attempt: "none".to_string(),
@@ -207,6 +210,7 @@ impl Default for NativeApp {
             next_input_retry_seconds: 0.0,
             settings_panel: SettingsPanel::default(),
             import_panel: None,
+            slingshot_game: SlingshotGame::default(),
             fallback_left_down: false,
             fallback_right_down: false,
             previous_global_import_keys: GlobalImportKeys::default(),
@@ -350,6 +354,7 @@ impl NativeApp {
                         left_down: self.fallback_left_down,
                         right_down: self.fallback_right_down,
                         spawn_stress_down: false,
+                        slingshot_toggle_down: false,
                         import_keys: GlobalImportKeys::default(),
                     }
                 },
@@ -361,6 +366,7 @@ impl NativeApp {
                 left_down: self.fallback_left_down,
                 right_down: self.fallback_right_down,
                 spawn_stress_down: false,
+                slingshot_toggle_down: false,
                 import_keys: GlobalImportKeys::default(),
             }
         };
@@ -380,7 +386,9 @@ impl NativeApp {
 
         self.handle_global_mouse_buttons(now, pointer.left_down, pointer.right_down);
         self.handle_global_stress_spawn(pointer.spawn_stress_down);
+        self.handle_global_slingshot_toggle(pointer.slingshot_toggle_down);
         self.handle_global_import_keys(pointer.import_keys);
+        self.update_slingshot_game();
         self.scene.step(dt, self.scene_bounds());
         self.sync_panels();
         window.request_redraw();
@@ -437,6 +445,14 @@ impl NativeApp {
             return;
         }
 
+        if self.slingshot_game.active {
+            self.handle_slingshot_mouse(is_left_down);
+            self.was_left_down = is_left_down;
+            self.was_right_down = is_right_down;
+            self.is_rotation_dragging = false;
+            return;
+        }
+
         if is_left_down && !self.was_left_down {
             let began = self.drag_controller.begin_drag(
                 self.scene.objects_mut(),
@@ -469,6 +485,13 @@ impl NativeApp {
             self.spawn_stress_cubes();
         }
         self.was_stress_spawn_down = is_down;
+    }
+
+    fn handle_global_slingshot_toggle(&mut self, is_down: bool) {
+        if is_down && !self.was_slingshot_toggle_down {
+            self.toggle_slingshot_game();
+        }
+        self.was_slingshot_toggle_down = is_down;
     }
 
     fn handle_global_import_keys(&mut self, keys: GlobalImportKeys) {
@@ -505,6 +528,269 @@ impl NativeApp {
             .spawn_small_cube_batch(self.default_spawn_position(), STRESS_SPAWN_COUNT);
         self.selected_id = id;
         self.push_status_message(format!("Spawned {STRESS_SPAWN_COUNT} stress cubes."));
+    }
+
+    fn toggle_slingshot_game(&mut self) {
+        if self.slingshot_game.active {
+            self.slingshot_game = SlingshotGame::default();
+            self.scene.reset(self.scene_bounds());
+            self.selected_id = self.scene.objects().last().map(|object| object.id);
+            self.push_status_message("Slingshot game off.".to_string());
+        } else {
+            self.start_slingshot_level();
+        }
+    }
+
+    fn start_slingshot_level(&mut self) {
+        let bounds = self.scene_bounds();
+        self.scene.clear_objects();
+        self.drag_controller.cancel_drag(self.scene.objects_mut());
+        self.selected_id = None;
+        self.slingshot_game = SlingshotGame::new(bounds);
+        self.build_slingshot_level(bounds);
+        self.push_status_message("Slingshot game: pull the orb back, release to fire. F3 resets, F10 exits.".to_string());
+    }
+
+    fn build_slingshot_level(&mut self, bounds: RectF) {
+        let anchor = self.slingshot_game.anchor;
+        self.spawn_pinned_game_object(
+            Vector2::new(anchor.x - 42.0, anchor.y + 16.0),
+            Vector2::new(24.0, 96.0),
+            AppColor::from_rgb(116, 74, 46),
+            ObjectVisualKind::Barrel,
+        );
+        self.spawn_pinned_game_object(
+            Vector2::new(anchor.x + 18.0, anchor.y + 16.0),
+            Vector2::new(24.0, 96.0),
+            AppColor::from_rgb(116, 74, 46),
+            ObjectVisualKind::Barrel,
+        );
+        self.spawn_pinned_game_object(
+            Vector2::new(anchor.x - 50.0, anchor.y + 104.0),
+            Vector2::new(100.0, 20.0),
+            AppColor::from_rgb(96, 62, 42),
+            ObjectVisualKind::Cube,
+        );
+        let projectile = self.scene.spawn_custom_object(
+            Vector2::new(anchor.x - 19.0, anchor.y - 19.0),
+            Vector2::new(38.0, 38.0),
+            AppColor::from_rgb(245, 72, 78),
+            ObjectVisualKind::Ball,
+            CollisionShape::Circle,
+        );
+        self.slingshot_game.projectile_id = Some(projectile);
+        self.selected_id = Some(projectile);
+        if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == projectile) {
+            object.body.is_dragging = true;
+            object.is_dragging = true;
+            object.body.restitution = 0.42;
+            object.body.linear_damping = 0.996;
+        }
+
+        let floor = bounds.bottom() - FLOOR_MARGIN_PIXELS;
+        let base_x = (bounds.width * 0.66).max(anchor.x + 340.0);
+        let block = AppColor::from_rgb(165, 116, 75);
+        let glass = AppColor::from_rgb(105, 218, 236);
+        let target = AppColor::from_rgb(115, 220, 105);
+
+        for tower in 0..2 {
+            let x = base_x + tower as f32 * 175.0;
+            for row in 0..4 {
+                let y = floor - 34.0 - row as f32 * 54.0;
+                self.scene.spawn_custom_object(
+                    Vector2::new(x, y),
+                    Vector2::new(28.0, 54.0),
+                    block,
+                    ObjectVisualKind::Barrel,
+                    CollisionShape::Box,
+                );
+                self.scene.spawn_custom_object(
+                    Vector2::new(x + 92.0, y),
+                    Vector2::new(28.0, 54.0),
+                    block,
+                    ObjectVisualKind::Barrel,
+                    CollisionShape::Box,
+                );
+                if row % 2 == 0 {
+                    self.scene.spawn_custom_object(
+                        Vector2::new(x + 15.0, y - 18.0),
+                        Vector2::new(90.0, 22.0),
+                        glass,
+                        ObjectVisualKind::Cube,
+                        CollisionShape::Box,
+                    );
+                }
+            }
+
+            let target_id = self.scene.spawn_custom_object(
+                Vector2::new(x + 39.0, floor - 78.0),
+                Vector2::new(42.0, 42.0),
+                target,
+                ObjectVisualKind::Ball,
+                CollisionShape::Circle,
+            );
+            self.slingshot_game.targets.push(TargetMarker {
+                id: target_id,
+                start_position: Vector2::new(x + 39.0, floor - 78.0),
+            });
+
+            self.scene.spawn_custom_object(
+                Vector2::new(x + 21.0, floor - 252.0),
+                Vector2::new(78.0, 24.0),
+                AppColor::from_rgb(248, 211, 84),
+                ObjectVisualKind::Cube,
+                CollisionShape::Box,
+            );
+        }
+    }
+
+    fn spawn_pinned_game_object(
+        &mut self,
+        position: Vector2,
+        size: Vector2,
+        color: AppColor,
+        visual_kind: ObjectVisualKind,
+    ) {
+        let id = self
+            .scene
+            .spawn_custom_object(position, size, color, visual_kind, CollisionShape::Box);
+        if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == id) {
+            object.body.is_dragging = true;
+            object.is_dragging = true;
+            object.body.gravity_scale = 0.0;
+            object.body.velocity = Vector2::ZERO;
+        }
+    }
+
+    fn handle_slingshot_mouse(&mut self, is_left_down: bool) {
+        let Some(projectile_id) = self.slingshot_game.projectile_id else {
+            return;
+        };
+
+        if is_left_down && !self.was_left_down {
+            if self.slingshot_game.ready && self.cursor_is_over_projectile(projectile_id) {
+                self.slingshot_game.aiming = true;
+            }
+        }
+
+        if is_left_down && self.slingshot_game.aiming {
+            self.aim_slingshot_projectile(projectile_id);
+        }
+
+        if !is_left_down && self.was_left_down && self.slingshot_game.aiming {
+            self.fire_slingshot_projectile(projectile_id);
+        }
+    }
+
+    fn cursor_is_over_projectile(&self, projectile_id: u64) -> bool {
+        self.scene
+            .objects()
+            .iter()
+            .find(|object| object.id == projectile_id)
+            .map(|object| {
+                let center = Vector2::new(
+                    object.body.position.x + object.body.width * 0.5,
+                    object.body.position.y + object.body.height * 0.5,
+                );
+                (self.cursor_local - center).length_squared() <= 72.0 * 72.0
+            })
+            .unwrap_or(false)
+    }
+
+    fn aim_slingshot_projectile(&mut self, projectile_id: u64) {
+        let anchor = self.slingshot_game.anchor;
+        let pull = clamp_vector(self.cursor_local - anchor, 142.0);
+        let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == projectile_id) else {
+            return;
+        };
+        object.body.position = anchor + pull - Vector2::new(object.body.width * 0.5, object.body.height * 0.5);
+        object.body.velocity = Vector2::ZERO;
+        object.body.is_dragging = true;
+        object.is_dragging = true;
+        object.body.is_sleeping = false;
+        object.angular_velocity_x = 0.0;
+        object.angular_velocity_y = 0.0;
+        object.angular_velocity_z = 0.0;
+        self.slingshot_game.pull = pull;
+    }
+
+    fn fire_slingshot_projectile(&mut self, projectile_id: u64) {
+        let pull = self.slingshot_game.pull;
+        let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == projectile_id) else {
+            return;
+        };
+        object.body.is_dragging = false;
+        object.is_dragging = false;
+        object.body.velocity = Vector2::new(-pull.x * 11.5, -pull.y * 11.5);
+        object.body.restitution = 0.42;
+        object.body.linear_damping = 0.996;
+        object.angular_velocity_z = -pull.x as f64 * 0.22;
+        self.slingshot_game.aiming = false;
+        self.slingshot_game.ready = false;
+        self.slingshot_game.shots += 1;
+    }
+
+    fn update_slingshot_game(&mut self) {
+        if !self.slingshot_game.active {
+            return;
+        }
+
+        self.slingshot_game.targets_remaining = self
+            .slingshot_game
+            .targets
+            .iter()
+            .filter(|target| self.target_still_standing(target))
+            .count();
+
+        if self.slingshot_game.targets_remaining == 0 {
+            self.slingshot_game.won = true;
+        }
+
+        if !self.slingshot_game.ready && !self.slingshot_game.won && self.projectile_should_reload() {
+            self.reload_slingshot_projectile();
+        }
+    }
+
+    fn target_still_standing(&self, target: &TargetMarker) -> bool {
+        self.scene
+            .objects()
+            .iter()
+            .find(|object| object.id == target.id)
+            .map(|object| {
+                let moved = (object.body.position - target.start_position).length_squared();
+                moved < 55.0 * 55.0 && object.body.position.y < self.scene_bounds().bottom() - 75.0
+            })
+            .unwrap_or(false)
+    }
+
+    fn projectile_should_reload(&self) -> bool {
+        let Some(projectile_id) = self.slingshot_game.projectile_id else {
+            return false;
+        };
+        let Some(object) = self.scene.objects().iter().find(|object| object.id == projectile_id) else {
+            return false;
+        };
+        object.body.is_sleeping
+            || object.body.position.x > self.scene_bounds().right() + 120.0
+            || object.body.position.y > self.scene_bounds().bottom() + 120.0
+            || object.body.position.x < -180.0
+    }
+
+    fn reload_slingshot_projectile(&mut self) {
+        let Some(projectile_id) = self.slingshot_game.projectile_id else {
+            return;
+        };
+        let anchor = self.slingshot_game.anchor;
+        let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == projectile_id) else {
+            return;
+        };
+        object.body.position = Vector2::new(anchor.x - object.body.width * 0.5, anchor.y - object.body.height * 0.5);
+        object.body.velocity = Vector2::ZERO;
+        object.body.is_dragging = true;
+        object.is_dragging = true;
+        object.body.is_sleeping = false;
+        self.slingshot_game.ready = true;
+        self.slingshot_game.pull = Vector2::ZERO;
     }
 
     fn end_drag_and_apply_spin(&mut self, now_seconds: f64) {
@@ -652,6 +938,33 @@ impl NativeApp {
             });
         }
 
+        if self.slingshot_game.active {
+            panels.push(OverlayPanel {
+                title: "Slingshot".to_string(),
+                lines: vec![
+                    PanelLine {
+                        text: format!("Shots: {}", self.slingshot_game.shots),
+                        selected: false,
+                    },
+                    PanelLine {
+                        text: format!("Targets: {}", self.slingshot_game.targets_remaining),
+                        selected: false,
+                    },
+                    PanelLine {
+                        text: if self.slingshot_game.won {
+                            "Cleared! F3 resets.".to_string()
+                        } else if self.slingshot_game.ready {
+                            "Pull orb back, release.".to_string()
+                        } else {
+                            "Shot in flight.".to_string()
+                        },
+                        selected: self.slingshot_game.aiming,
+                    },
+                ],
+                footer: vec!["F3 reset. F10 exit.".to_string()],
+            });
+        }
+
         if self.settings_panel.visible {
             panels.push(self.settings_panel.to_panel(self.scene.config()));
         }
@@ -742,9 +1055,16 @@ impl NativeApp {
             AppAction::SpawnStressCubes => {
                 self.spawn_stress_cubes();
             },
+            AppAction::ToggleSlingshotGame => {
+                self.toggle_slingshot_game();
+            },
             AppAction::Reset => {
-                self.scene.reset(self.scene_bounds());
-                self.selected_id = self.scene.objects().last().map(|object| object.id);
+                if self.slingshot_game.active {
+                    self.start_slingshot_level();
+                } else {
+                    self.scene.reset(self.scene_bounds());
+                    self.selected_id = self.scene.objects().last().map(|object| object.id);
+                }
             },
             AppAction::ToggleSettings => {
                 self.settings_panel.visible = !self.settings_panel.visible;
@@ -800,6 +1120,7 @@ impl NativeApp {
             KeyCode::F7 => self.handle_action(AppAction::SpawnCrystal, event_loop),
             KeyCode::F8 => self.handle_action(AppAction::SpawnDvdLogo, event_loop),
             KeyCode::F9 => self.handle_action(AppAction::SpawnStressCubes, event_loop),
+            KeyCode::F10 => self.handle_action(AppAction::ToggleSlingshotGame, event_loop),
             KeyCode::Escape => self.handle_action(AppAction::Exit, event_loop),
             _ => {},
         }
@@ -1995,11 +2316,54 @@ enum AppAction {
     SpawnCrystal,
     SpawnDvdLogo,
     SpawnStressCubes,
+    ToggleSlingshotGame,
     Reset,
     ToggleSettings,
     ToggleForceInteractive,
     RequestImport,
     Exit,
+}
+
+fn clamp_vector(vector: Vector2, max_length: f32) -> Vector2 {
+    let length_squared = vector.length_squared();
+    let max_squared = max_length * max_length;
+    if length_squared <= max_squared || length_squared <= f32::EPSILON {
+        return vector;
+    }
+    let scale = max_length / length_squared.sqrt();
+    vector * scale
+}
+
+#[derive(Clone, Copy)]
+struct TargetMarker {
+    id: u64,
+    start_position: Vector2,
+}
+
+#[derive(Default)]
+struct SlingshotGame {
+    active: bool,
+    aiming: bool,
+    ready: bool,
+    won: bool,
+    shots: u32,
+    targets_remaining: usize,
+    anchor: Vector2,
+    pull: Vector2,
+    projectile_id: Option<u64>,
+    targets: Vec<TargetMarker>,
+}
+
+impl SlingshotGame {
+    fn new(bounds: RectF) -> Self {
+        Self {
+            active: true,
+            ready: true,
+            targets_remaining: 2,
+            anchor: Vector2::new((bounds.width * 0.18).clamp(95.0, 260.0), bounds.bottom() - 140.0),
+            ..Self::default()
+        }
+    }
 }
 
 #[derive(Default)]

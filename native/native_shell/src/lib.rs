@@ -74,6 +74,7 @@ pub struct GlobalPointerState {
     pub left_down: bool,
     pub right_down: bool,
     pub spawn_stress_down: bool,
+    pub slingshot_toggle_down: bool,
     pub import_keys: GlobalImportKeys,
 }
 
@@ -263,6 +264,7 @@ impl GlobalInputPoller {
                 left_down: Mouse::Left.is_pressed(),
                 right_down: Mouse::Right.is_pressed(),
                 spawn_stress_down: false,
+                slingshot_toggle_down: false,
                 import_keys: GlobalImportKeys::default(),
             });
         }
@@ -282,6 +284,7 @@ impl GlobalInputPoller {
                 left_down: *mouse.button_pressed.get(1).unwrap_or(&false),
                 right_down: *mouse.button_pressed.get(2).unwrap_or(&false),
                 spawn_stress_down: keys.contains(&Keycode::F9),
+                slingshot_toggle_down: keys.contains(&Keycode::F10),
                 import_keys: GlobalImportKeys {
                     up: keys.contains(&Keycode::Up),
                     down: keys.contains(&Keycode::Down),
