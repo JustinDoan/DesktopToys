@@ -138,6 +138,11 @@ pub enum ObjectVisualKind {
     Crystal,
     Satellite,
     DvdLogo,
+    Ball,
+    Pyramid,
+    Barrel,
+    Ring,
+    Star,
     ImportedModel,
 }
 

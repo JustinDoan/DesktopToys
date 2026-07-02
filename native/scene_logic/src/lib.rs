@@ -17,8 +17,13 @@ const STARTUP_CUBE_COUNT: usize = 100;
 const STARTUP_CUBE_COLUMNS: usize = 10;
 const STARTUP_CUBE_SIZE: f32 = DEFAULT_OBJECT_SIZE * 0.2;
 
-const SPAWN_CATALOG: [SpawnSpec; 6] = [
+const SPAWN_CATALOG: [SpawnSpec; 11] = [
     SpawnSpec::new(ObjectVisualKind::Cube, None),
+    SpawnSpec::new(ObjectVisualKind::Ball, Some(AppColor::from_rgb(90, 205, 255))),
+    SpawnSpec::new(ObjectVisualKind::Pyramid, Some(AppColor::from_rgb(255, 176, 92))),
+    SpawnSpec::new(ObjectVisualKind::Barrel, Some(AppColor::from_rgb(126, 226, 168))),
+    SpawnSpec::new(ObjectVisualKind::Ring, Some(AppColor::from_rgb(255, 118, 210))),
+    SpawnSpec::new(ObjectVisualKind::Star, Some(AppColor::from_rgb(255, 224, 92))),
     SpawnSpec::new(ObjectVisualKind::Crystal, Some(AppColor::from_rgb(108, 241, 255))),
     SpawnSpec::new(ObjectVisualKind::Satellite, Some(AppColor::from_rgb(88, 160, 255))),
     SpawnSpec::new(ObjectVisualKind::DvdLogo, Some(AppColor::from_rgb(244, 78, 255))),
@@ -442,10 +447,10 @@ impl SceneController {
         } else {
             1.0
         };
-        state.body.shape = if visual_kind == ObjectVisualKind::Crystal {
-            CollisionShape::Diamond
-        } else {
-            CollisionShape::Box
+        state.body.shape = match visual_kind {
+            ObjectVisualKind::Ball | ObjectVisualKind::Ring => CollisionShape::Circle,
+            ObjectVisualKind::Crystal | ObjectVisualKind::Star => CollisionShape::Diamond,
+            _ => CollisionShape::Box,
         };
         state.body.collision_scale = 1.0;
         if visual_kind == ObjectVisualKind::DvdLogo {

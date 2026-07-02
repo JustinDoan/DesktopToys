@@ -139,6 +139,11 @@ impl SceneRenderer {
             ObjectVisualKind::Dice => self.generated_mesh(key, || dice_mesh(size)),
             ObjectVisualKind::Crystal => self.generated_mesh(key, || crystal_mesh(size, object.base_color)),
             ObjectVisualKind::Satellite => self.generated_mesh(key, || satellite_mesh(size, object.base_color)),
+            ObjectVisualKind::Ball => self.generated_mesh(key, || ball_mesh(size, object.base_color)),
+            ObjectVisualKind::Pyramid => self.generated_mesh(key, || pyramid_mesh(size, object.base_color)),
+            ObjectVisualKind::Barrel => self.generated_mesh(key, || barrel_mesh(size, object.base_color)),
+            ObjectVisualKind::Ring => self.generated_mesh(key, || ring_mesh(size, object.base_color)),
+            ObjectVisualKind::Star => self.generated_mesh(key, || star_mesh(size, object.base_color)),
             ObjectVisualKind::DvdLogo => self.generated_mesh(key, || {
                 dvd_logo_mesh(object.body.width.max(1.0), object.body.height.max(1.0), object.base_color)
             }),
@@ -184,7 +189,12 @@ impl MeshCacheKey {
                 ObjectVisualKind::Crystal => 2,
                 ObjectVisualKind::Satellite => 3,
                 ObjectVisualKind::DvdLogo => 4,
-                ObjectVisualKind::ImportedModel => 5,
+                ObjectVisualKind::Ball => 5,
+                ObjectVisualKind::Pyramid => 6,
+                ObjectVisualKind::Barrel => 7,
+                ObjectVisualKind::Ring => 8,
+                ObjectVisualKind::Star => 9,
+                ObjectVisualKind::ImportedModel => 10,
             },
             width_milli: quantize_size(object.body.width.max(1.0)),
             height_milli: quantize_size(object.body.height.max(1.0)),
@@ -484,6 +494,23 @@ fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds
         ObjectVisualKind::Dice => {
             center_z += 8.0;
         },
+        ObjectVisualKind::Ball => {
+            center_z += 10.0;
+        },
+        ObjectVisualKind::Pyramid => {
+            center_z += 6.0;
+        },
+        ObjectVisualKind::Barrel => {
+            center_z += 8.0;
+        },
+        ObjectVisualKind::Ring => {
+            center_z += 14.0;
+            rotation_y += ((elapsed_seconds * 0.8) + phase).sin() * 6.0;
+        },
+        ObjectVisualKind::Star => {
+            center_z += 12.0;
+            rotation_z += ((elapsed_seconds * 1.2) + phase).sin() * 5.0;
+        },
         ObjectVisualKind::ImportedModel => {
             center_z += 12.0;
         },
@@ -760,6 +787,170 @@ fn crystal_mesh(size: f32, base_color: AppColor) -> Mesh {
             color,
             alpha,
         });
+    }
+
+    Mesh { triangles }
+}
+
+fn ball_mesh(size: f32, base_color: AppColor) -> Mesh {
+    const LATITUDES: usize = 7;
+    const LONGITUDES: usize = 14;
+    let radius = size * 0.5;
+    let mut triangles = Vec::new();
+
+    for lat in 0..LATITUDES {
+        let theta0 = std::f32::consts::PI * (lat as f32 / LATITUDES as f32);
+        let theta1 = std::f32::consts::PI * ((lat + 1) as f32 / LATITUDES as f32);
+        for lon in 0..LONGITUDES {
+            let phi0 = std::f32::consts::TAU * (lon as f32 / LONGITUDES as f32);
+            let phi1 = std::f32::consts::TAU * ((lon + 1) as f32 / LONGITUDES as f32);
+            let p00 = sphere_point(radius, theta0, phi0);
+            let p01 = sphere_point(radius, theta0, phi1);
+            let p10 = sphere_point(radius, theta1, phi0);
+            let p11 = sphere_point(radius, theta1, phi1);
+            let shade = 0.64 + (lat as f32 / LATITUDES as f32 * 0.34);
+            let color = scale_color(base_color, shade);
+            if lat == 0 {
+                triangles.push(SourceTriangle {
+                    vertices: [p00, p10, p11],
+                    color,
+                    alpha: 255,
+                });
+            } else if lat + 1 == LATITUDES {
+                triangles.push(SourceTriangle {
+                    vertices: [p00, p10, p01],
+                    color,
+                    alpha: 255,
+                });
+            } else {
+                triangles.push(SourceTriangle {
+                    vertices: [p00, p10, p11],
+                    color,
+                    alpha: 255,
+                });
+                triangles.push(SourceTriangle {
+                    vertices: [p00, p11, p01],
+                    color,
+                    alpha: 255,
+                });
+            }
+        }
+    }
+
+    Mesh { triangles }
+}
+
+fn sphere_point(radius: f32, theta: f32, phi: f32) -> Vec3 {
+    let sin_theta = theta.sin();
+    Vec3::new(
+        radius * sin_theta * phi.cos(),
+        radius * theta.cos(),
+        radius * sin_theta * phi.sin(),
+    )
+}
+
+fn pyramid_mesh(size: f32, base_color: AppColor) -> Mesh {
+    let hs = size * 0.5;
+    let top = Vec3::new(0.0, -hs, 0.0);
+    let base_y = hs * 0.72;
+    let p0 = Vec3::new(-hs, base_y, -hs);
+    let p1 = Vec3::new(hs, base_y, -hs);
+    let p2 = Vec3::new(hs, base_y, hs);
+    let p3 = Vec3::new(-hs, base_y, hs);
+    Mesh {
+        triangles: vec![
+            SourceTriangle { vertices: [top, p0, p1], color: scale_color(base_color, 1.14), alpha: 255 },
+            SourceTriangle { vertices: [top, p1, p2], color: scale_color(base_color, 0.88), alpha: 255 },
+            SourceTriangle { vertices: [top, p2, p3], color: scale_color(base_color, 0.68), alpha: 255 },
+            SourceTriangle { vertices: [top, p3, p0], color: scale_color(base_color, 0.98), alpha: 255 },
+            SourceTriangle { vertices: [p0, p2, p1], color: scale_color(base_color, 0.52), alpha: 255 },
+            SourceTriangle { vertices: [p0, p3, p2], color: scale_color(base_color, 0.52), alpha: 255 },
+        ],
+    }
+}
+
+fn barrel_mesh(size: f32, base_color: AppColor) -> Mesh {
+    const SEGMENTS: usize = 18;
+    let radius = size * 0.43;
+    let half_height = size * 0.46;
+    let mut triangles = Vec::new();
+    let top = Vec3::new(0.0, -half_height, 0.0);
+    let bottom = Vec3::new(0.0, half_height, 0.0);
+
+    for i in 0..SEGMENTS {
+        let a0 = std::f32::consts::TAU * (i as f32 / SEGMENTS as f32);
+        let a1 = std::f32::consts::TAU * ((i + 1) as f32 / SEGMENTS as f32);
+        let p0 = Vec3::new(radius * a0.cos(), -half_height, radius * a0.sin());
+        let p1 = Vec3::new(radius * a1.cos(), -half_height, radius * a1.sin());
+        let p2 = Vec3::new(radius * a1.cos(), half_height, radius * a1.sin());
+        let p3 = Vec3::new(radius * a0.cos(), half_height, radius * a0.sin());
+        let shade = if i % 2 == 0 { 1.05 } else { 0.82 };
+        let side_color = scale_color(base_color, shade);
+        triangles.push(SourceTriangle { vertices: [p0, p1, p2], color: side_color, alpha: 255 });
+        triangles.push(SourceTriangle { vertices: [p0, p2, p3], color: side_color, alpha: 255 });
+        triangles.push(SourceTriangle { vertices: [top, p1, p0], color: scale_color(base_color, 1.18), alpha: 255 });
+        triangles.push(SourceTriangle { vertices: [bottom, p3, p2], color: scale_color(base_color, 0.58), alpha: 255 });
+    }
+
+    Mesh { triangles }
+}
+
+fn ring_mesh(size: f32, base_color: AppColor) -> Mesh {
+    const MAJOR_SEGMENTS: usize = 20;
+    const MINOR_SEGMENTS: usize = 8;
+    let major = size * 0.34;
+    let minor = size * 0.12;
+    let mut triangles = Vec::new();
+
+    for i in 0..MAJOR_SEGMENTS {
+        let a0 = std::f32::consts::TAU * (i as f32 / MAJOR_SEGMENTS as f32);
+        let a1 = std::f32::consts::TAU * ((i + 1) as f32 / MAJOR_SEGMENTS as f32);
+        for j in 0..MINOR_SEGMENTS {
+            let b0 = std::f32::consts::TAU * (j as f32 / MINOR_SEGMENTS as f32);
+            let b1 = std::f32::consts::TAU * ((j + 1) as f32 / MINOR_SEGMENTS as f32);
+            let p00 = torus_point(major, minor, a0, b0);
+            let p01 = torus_point(major, minor, a0, b1);
+            let p10 = torus_point(major, minor, a1, b0);
+            let p11 = torus_point(major, minor, a1, b1);
+            let shade = 0.72 + (b0.cos().max(0.0) * 0.36);
+            let color = scale_color(base_color, shade);
+            triangles.push(SourceTriangle { vertices: [p00, p10, p11], color, alpha: 255 });
+            triangles.push(SourceTriangle { vertices: [p00, p11, p01], color, alpha: 255 });
+        }
+    }
+
+    Mesh { triangles }
+}
+
+fn torus_point(major: f32, minor: f32, a: f32, b: f32) -> Vec3 {
+    let radial = major + minor * b.cos();
+    Vec3::new(radial * a.cos(), minor * b.sin(), radial * a.sin())
+}
+
+fn star_mesh(size: f32, base_color: AppColor) -> Mesh {
+    const POINTS: usize = 10;
+    let outer = size * 0.50;
+    let inner = size * 0.23;
+    let depth = size * 0.12;
+    let mut front = [Vec3::default(); POINTS];
+    let mut back = [Vec3::default(); POINTS];
+    for i in 0..POINTS {
+        let radius = if i % 2 == 0 { outer } else { inner };
+        let angle = -std::f32::consts::FRAC_PI_2 + (i as f32 / POINTS as f32) * std::f32::consts::TAU;
+        front[i] = Vec3::new(radius * angle.cos(), radius * angle.sin(), depth);
+        back[i] = Vec3::new(radius * angle.cos(), radius * angle.sin(), -depth);
+    }
+
+    let mut triangles = Vec::new();
+    let center_front = Vec3::new(0.0, 0.0, depth);
+    let center_back = Vec3::new(0.0, 0.0, -depth);
+    for i in 0..POINTS {
+        let next = (i + 1) % POINTS;
+        triangles.push(SourceTriangle { vertices: [center_front, front[i], front[next]], color: scale_color(base_color, 1.14), alpha: 255 });
+        triangles.push(SourceTriangle { vertices: [center_back, back[next], back[i]], color: scale_color(base_color, 0.58), alpha: 255 });
+        let side_color = scale_color(base_color, if i % 2 == 0 { 0.92 } else { 0.74 });
+        triangles.push(SourceTriangle { vertices: [front[i], back[i], back[next]], color: side_color, alpha: 255 });
+        triangles.push(SourceTriangle { vertices: [front[i], back[next], front[next]], color: side_color, alpha: 255 });
     }
 
     Mesh { triangles }
