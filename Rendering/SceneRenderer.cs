@@ -202,11 +202,11 @@ public sealed class SceneRenderer
         return state.VisualKind switch
         {
             ObjectVisualKind.Dice => new DiceVisual3D(Math.Min(state.Body.Width, state.Body.Height)),
-            ObjectVisualKind.Crystal => new CrystalVisual3D(Math.Min(state.Body.Width, state.Body.Height), state.BaseColor),
-            ObjectVisualKind.Satellite => new SatelliteVisual3D(Math.Min(state.Body.Width, state.Body.Height), state.BaseColor),
+            ObjectVisualKind.Crystal => new CrystalVisual3D(Math.Min(state.Body.Width, state.Body.Height), state.BaseColor.ToWpfColor()),
+            ObjectVisualKind.Satellite => new SatelliteVisual3D(Math.Min(state.Body.Width, state.Body.Height), state.BaseColor.ToWpfColor()),
             ObjectVisualKind.ImportedModel when !string.IsNullOrWhiteSpace(state.ModelSourcePath)
-                => new ImportedModelVisual3D(state.ModelSourcePath, Math.Min(state.Body.Width, state.Body.Height), state.BaseColor),
-            _ => new CubeVisual3D(Math.Min(state.Body.Width, state.Body.Height), state.BaseColor)
+                => new ImportedModelVisual3D(state.ModelSourcePath, Math.Min(state.Body.Width, state.Body.Height), state.BaseColor.ToWpfColor()),
+            _ => new CubeVisual3D(Math.Min(state.Body.Width, state.Body.Height), state.BaseColor.ToWpfColor())
         };
     }
 

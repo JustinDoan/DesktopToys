@@ -1,0 +1,9 @@
+[package]
+name = "scene_logic"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+core_types = { version = "0.1.0", path = "../core_types" }
+physics_core = { version = "0.1.0", path = "../physics_core" }
+rand = "0.10.0"
