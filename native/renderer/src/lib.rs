@@ -752,6 +752,14 @@ fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds
         },
         ObjectVisualKind::FoxBuddy => {
             center_z += 18.0;
+            let facing_velocity = if object.body.motor_enabled {
+                object.body.motor_velocity_x
+            } else {
+                object.body.velocity.x
+            };
+            if facing_velocity < -1.0 {
+                scale_x *= -1.0;
+            }
         },
         ObjectVisualKind::ImportedModel => {
             center_z += 12.0;

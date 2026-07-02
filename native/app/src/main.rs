@@ -609,9 +609,6 @@ impl NativeApp {
                 fox.body.motor_enabled = motor_velocity != 0.0;
                 fox.body.motor_velocity_x = motor_velocity;
                 fox.body.velocity.x = motor_velocity;
-                if motor_velocity.abs() > 0.0 {
-                    fox.rotation_y = if motor_velocity < 0.0 { 180.0 } else { 0.0 };
-                }
                 fox.rotation_z = 0.0;
             }
         }
