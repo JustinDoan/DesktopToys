@@ -84,6 +84,26 @@ impl Vec3 {
     const fn new(x: f32, y: f32, z: f32) -> Self {
         Self { x, y, z }
     }
+
+    fn dot(self, rhs: Self) -> f32 {
+        (self.x * rhs.x) + (self.y * rhs.y) + (self.z * rhs.z)
+    }
+
+    fn cross(self, rhs: Self) -> Self {
+        Self::new(
+            self.y * rhs.z - self.z * rhs.y,
+            self.z * rhs.x - self.x * rhs.z,
+            self.x * rhs.y - self.y * rhs.x,
+        )
+    }
+
+    fn normalized(self) -> Self {
+        let length = (self.x * self.x + self.y * self.y + self.z * self.z).sqrt();
+        if length <= f32::EPSILON {
+            return Self::new(0.0, 0.0, 1.0);
+        }
+        Self::new(self.x / length, self.y / length, self.z / length)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -549,10 +569,11 @@ fn get_phase(id: u64) -> f64 {
 fn transform_triangle(source: SourceTriangle, transform: VisualTransform, elapsed_seconds: f64) -> DrawTriangle {
     let _ = elapsed_seconds;
     let points = source.vertices.map(|vertex| project_vertex(vertex, transform));
+    let color = apply_natural_light(source.color, &points);
 
     DrawTriangle {
         points,
-        color: source.color,
+        color,
         alpha: source.alpha,
     }
 }
@@ -584,6 +605,38 @@ fn rotate_z(point: Vec3, angle_degrees: f32) -> Vec3 {
     let radians = angle_degrees.to_radians();
     let (sin, cos) = radians.sin_cos();
     Vec3::new(point.x * cos - point.y * sin, point.x * sin + point.y * cos, point.z)
+}
+
+fn apply_natural_light(color: AppColor, points: &[Vec3; 3]) -> AppColor {
+    let edge_a = Vec3::new(
+        points[1].x - points[0].x,
+        points[1].y - points[0].y,
+        points[1].z - points[0].z,
+    );
+    let edge_b = Vec3::new(
+        points[2].x - points[0].x,
+        points[2].y - points[0].y,
+        points[2].z - points[0].z,
+    );
+    let normal = edge_a.cross(edge_b).normalized();
+    let light_dir = Vec3::new(-0.36, -0.58, 0.73).normalized();
+    let fill_dir = Vec3::new(0.55, 0.28, 0.30).normalized();
+    let key = normal.dot(light_dir).max(0.0);
+    let fill = normal.dot(fill_dir).max(0.0);
+    let rim = (1.0 - normal.z.abs()).max(0.0).powf(1.6);
+    let shade = 0.46 + (key * 0.56) + (fill * 0.16) + (rim * 0.10);
+    let lit = scale_color(color, shade.clamp(0.34, 1.22));
+    let warmth = (key * 9.0).round() as i16;
+    AppColor::from_argb(
+        lit.a,
+        add_channel(lit.r, warmth),
+        add_channel(lit.g, (warmth as f32 * 0.55).round() as i16),
+        add_channel(lit.b, -(warmth / 3)),
+    )
+}
+
+fn add_channel(value: u8, delta: i16) -> u8 {
+    (value as i16 + delta).clamp(0, 255) as u8
 }
 
 fn scale_channel(value: u8, factor: f32) -> u8 {
