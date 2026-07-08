@@ -42,6 +42,7 @@ pub struct RenderScene<'a> {
     pub objects: &'a [ObjectState],
     pub sand_cells: &'a [SandRenderCell],
     pub weather_cells: &'a [SandRenderCell],
+    pub measure_cells: &'a [SandRenderCell],
     pub hud: &'a HudState,
 }
 
@@ -325,7 +326,11 @@ impl SceneRenderer {
     pub fn build_vertices(&mut self, width: u32, height: u32, scene: &RenderScene<'_>) -> Result<&[GpuVertex]> {
         let mut vertices = mem::take(&mut self.vertices);
         vertices.clear();
-        vertices.reserve(scene.objects.len() * 36 + (scene.sand_cells.len() + scene.weather_cells.len()) * 6 + 4096);
+        vertices.reserve(
+            scene.objects.len() * 36
+                + (scene.sand_cells.len() + scene.weather_cells.len() + scene.measure_cells.len()) * 6
+                + 4096,
+        );
         for object in scene.objects {
             if object.visual_kind == ObjectVisualKind::FoxBuddy {
                 let mesh = fox_buddy_animated_mesh(
@@ -355,6 +360,7 @@ impl SceneRenderer {
 
         emit_sand(&mut vertices, width, height, scene.sand_cells);
         emit_sand(&mut vertices, width, height, scene.weather_cells);
+        emit_sand(&mut vertices, width, height, scene.measure_cells);
         emit_panels(&mut vertices, width, height, scene.hud);
         self.vertices = vertices;
         Ok(&self.vertices)

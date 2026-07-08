@@ -178,6 +178,7 @@ struct NativeApp {
     basketball_confetti: Vec<(u64, f64)>,
     weather_world: WeatherWorld,
     sand_world: SandWorld,
+    measure_tool: MeasureTool,
     robot_carries: HashMap<u64, RobotCarry>,
     robot_drop_cooldowns: HashMap<u64, RobotDropCooldown>,
     robot_bin_ids: Vec<u64>,
@@ -273,6 +274,7 @@ impl Default for NativeApp {
             basketball_confetti: Vec::new(),
             weather_world: WeatherWorld::default(),
             sand_world: SandWorld::default(),
+            measure_tool: MeasureTool::default(),
             robot_carries: HashMap::new(),
             robot_drop_cooldowns: HashMap::new(),
             robot_bin_ids: Vec::new(),
@@ -542,6 +544,21 @@ impl NativeApp {
             return;
         }
 
+        if self.measure_tool.active {
+            self.measure_tool
+                .update(self.cursor_local, is_left_down, is_right_down);
+            self.drag_controller.cancel_drag(self.scene.objects_mut());
+            self.was_left_down = is_left_down;
+            self.was_right_down = is_right_down;
+            self.is_rotation_dragging = false;
+            self.last_drag_attempt = if self.measure_tool.dragging {
+                "measure:drag".to_string()
+            } else {
+                "measure".to_string()
+            };
+            return;
+        }
+
         if self.slingshot_game.active {
             self.handle_slingshot_mouse(is_left_down);
             self.was_left_down = is_left_down;
@@ -590,9 +607,13 @@ impl NativeApp {
     }
 
     fn update_cursor_icon(&mut self, window: &Window) {
-        let desired = if self.drag_controller.is_dragging() || self.slingshot_game.aiming || self.basketball_game.aiming {
+        let desired = if self.drag_controller.is_dragging()
+            || self.slingshot_game.aiming
+            || self.basketball_game.aiming
+            || self.measure_tool.dragging
+        {
             CursorIcon::Grabbing
-        } else if self.debug_hit_primary_cursor || self.cursor_is_over_active_game_object() {
+        } else if self.measure_tool.active || self.debug_hit_primary_cursor || self.cursor_is_over_active_game_object() {
             CursorIcon::Pointer
         } else {
             CursorIcon::Default
@@ -688,12 +709,24 @@ impl NativeApp {
         });
     }
 
+    fn toggle_measure_tool(&mut self) {
+        let active = self.measure_tool.toggle();
+        if active {
+            self.drag_controller.cancel_drag(self.scene.objects_mut());
+        }
+        self.push_status_message(if active {
+            "Measure tool on: drag to measure, click-through stays on.".to_string()
+        } else {
+            "Measure tool off.".to_string()
+        });
+    }
+
     fn update_sand(&mut self, is_left_down: bool, is_right_down: bool) {
         if !self.sand_world.active {
             return;
         }
         let bounds = self.scene_bounds();
-        if !self.settings_panel.visible && self.import_panel.is_none() {
+        if !self.measure_tool.active && !self.settings_panel.visible && self.import_panel.is_none() {
             if is_left_down {
                 self.sand_world.emit_at(self.cursor_local, bounds);
             }
@@ -2122,6 +2155,39 @@ impl NativeApp {
             });
         }
 
+        if self.measure_tool.active {
+            let lines = if self.measure_tool.has_measurement {
+                vec![
+                    PanelLine {
+                        text: format!("Distance: {:.1} px", self.measure_tool.distance()),
+                        selected: self.measure_tool.dragging,
+                    },
+                    PanelLine {
+                        text: format!(
+                            "Delta: {:+.1}, {:+.1}",
+                            self.measure_tool.delta().x,
+                            self.measure_tool.delta().y
+                        ),
+                        selected: false,
+                    },
+                    PanelLine {
+                        text: format!("Angle: {:.1} deg", self.measure_tool.angle_degrees()),
+                        selected: false,
+                    },
+                ]
+            } else {
+                vec![PanelLine {
+                    text: "Drag to measure.".to_string(),
+                    selected: false,
+                }]
+            };
+            panels.push(OverlayPanel {
+                title: "Measure".to_string(),
+                lines,
+                footer: vec!["Right clears. Click-through on.".to_string()],
+            });
+        }
+
         if self.settings_panel.visible {
             panels.push(self.settings_panel.to_panel(self.scene.config()));
         }
@@ -2149,6 +2215,7 @@ impl NativeApp {
             objects: self.scene.objects(),
             sand_cells: self.sand_world.render_cells(),
             weather_cells: self.weather_world.render_cells(),
+            measure_cells: self.measure_tool.render_cells(),
             hud: &self.hud,
         };
         let vertices = self.renderer.build_vertices(size.width, size.height, &scene)?;
@@ -2237,6 +2304,9 @@ impl NativeApp {
             AppAction::ToggleSand => {
                 self.toggle_sand_world();
             },
+            AppAction::ToggleMeasureTool => {
+                self.toggle_measure_tool();
+            },
             AppAction::RequestImport => {
                 if let Some(path) = pick_model_file() {
                     self.import_panel = Some(ImportPanel::new(path.display().to_string()));
@@ -2258,6 +2328,7 @@ impl NativeApp {
         self.basketball_confetti.clear();
         self.weather_world.clear();
         self.sand_world.clear();
+        self.measure_tool.clear();
         self.robot_carries.clear();
         self.robot_drop_cooldowns.clear();
         self.robot_bin_ids.clear();
@@ -2306,6 +2377,7 @@ impl NativeApp {
             KeyCode::F10 => self.handle_action(AppAction::ToggleSlingshotGame, event_loop),
             KeyCode::F11 => self.handle_action(AppAction::SpawnRobotBuddy, event_loop),
             KeyCode::F12 => self.handle_action(AppAction::ToggleBasketballGame, event_loop),
+            KeyCode::KeyM => self.handle_action(AppAction::ToggleMeasureTool, event_loop),
             KeyCode::Escape => self.handle_action(AppAction::Exit, event_loop),
             _ => {},
         }
@@ -3478,6 +3550,7 @@ impl ApplicationHandler for NativeApp {
                     TrayAction::ToggleSettings => AppAction::ToggleSettings,
                     TrayAction::ToggleWeather => AppAction::ToggleWeather,
                     TrayAction::ToggleSand => AppAction::ToggleSand,
+                    TrayAction::ToggleMeasureTool => AppAction::ToggleMeasureTool,
                     TrayAction::ImportModel => AppAction::RequestImport,
                     TrayAction::Exit => AppAction::Exit,
                 };
@@ -3513,8 +3586,167 @@ enum AppAction {
     ToggleSettings,
     ToggleWeather,
     ToggleSand,
+    ToggleMeasureTool,
     RequestImport,
     Exit,
+}
+
+#[derive(Debug)]
+struct MeasureTool {
+    active: bool,
+    dragging: bool,
+    has_measurement: bool,
+    start: Vector2,
+    end: Vector2,
+    was_left_down: bool,
+    was_right_down: bool,
+    render_cells: Vec<SandRenderCell>,
+}
+
+impl Default for MeasureTool {
+    fn default() -> Self {
+        Self {
+            active: false,
+            dragging: false,
+            has_measurement: false,
+            start: Vector2::ZERO,
+            end: Vector2::ZERO,
+            was_left_down: false,
+            was_right_down: false,
+            render_cells: Vec::with_capacity(4096),
+        }
+    }
+}
+
+impl MeasureTool {
+    fn toggle(&mut self) -> bool {
+        self.active = !self.active;
+        self.dragging = false;
+        self.was_left_down = false;
+        self.was_right_down = false;
+        if !self.active {
+            self.has_measurement = false;
+            self.render_cells.clear();
+        }
+        self.active
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    fn update(&mut self, cursor: Vector2, is_left_down: bool, is_right_down: bool) {
+        if is_right_down && !self.was_right_down {
+            self.dragging = false;
+            self.has_measurement = false;
+            self.render_cells.clear();
+        }
+
+        if is_left_down && !self.was_left_down {
+            self.dragging = true;
+            self.has_measurement = true;
+            self.start = cursor;
+            self.end = cursor;
+            self.rebuild_render_cells();
+        } else if is_left_down && self.dragging {
+            self.end = cursor;
+            self.rebuild_render_cells();
+        } else if !is_left_down && self.was_left_down && self.dragging {
+            self.dragging = false;
+            self.end = cursor;
+            self.rebuild_render_cells();
+        }
+
+        self.was_left_down = is_left_down;
+        self.was_right_down = is_right_down;
+    }
+
+    fn render_cells(&self) -> &[SandRenderCell] {
+        &self.render_cells
+    }
+
+    fn delta(&self) -> Vector2 {
+        self.end - self.start
+    }
+
+    fn distance(&self) -> f32 {
+        self.delta().length_squared().sqrt()
+    }
+
+    fn angle_degrees(&self) -> f32 {
+        let delta = self.delta();
+        delta.y.atan2(delta.x).to_degrees()
+    }
+
+    fn rebuild_render_cells(&mut self) {
+        self.render_cells.clear();
+        if !self.has_measurement {
+            return;
+        }
+
+        let corner = Vector2::new(self.end.x, self.start.y);
+        push_measure_line(
+            &mut self.render_cells,
+            self.start,
+            corner,
+            AppColor::from_argb(96, 112, 195, 255),
+            1,
+        );
+        push_measure_line(
+            &mut self.render_cells,
+            corner,
+            self.end,
+            AppColor::from_argb(96, 112, 195, 255),
+            1,
+        );
+        push_measure_line(
+            &mut self.render_cells,
+            self.start,
+            self.end,
+            AppColor::from_argb(235, 255, 226, 98),
+            2,
+        );
+        push_measure_handle(&mut self.render_cells, self.start, AppColor::from_argb(245, 118, 232, 180));
+        push_measure_handle(&mut self.render_cells, self.end, AppColor::from_argb(245, 255, 128, 96));
+    }
+}
+
+fn push_measure_line(cells: &mut Vec<SandRenderCell>, start: Vector2, end: Vector2, color: AppColor, thickness: i32) {
+    let delta = end - start;
+    let steps = delta.x.abs().max(delta.y.abs()).ceil().max(1.0) as i32;
+    let thickness = thickness.max(1);
+    let offset = thickness / 2;
+    for step in 0..=steps {
+        let t = step as f32 / steps as f32;
+        let x = (start.x + delta.x * t).round() as i32;
+        let y = (start.y + delta.y * t).round() as i32;
+        cells.push(SandRenderCell {
+            x: x - offset,
+            y: y - offset,
+            width: thickness,
+            height: thickness,
+            color,
+        });
+    }
+}
+
+fn push_measure_handle(cells: &mut Vec<SandRenderCell>, center: Vector2, color: AppColor) {
+    let x = center.x.round() as i32;
+    let y = center.y.round() as i32;
+    push_measure_line(
+        cells,
+        Vector2::new((x - 8) as f32, y as f32),
+        Vector2::new((x + 8) as f32, y as f32),
+        color,
+        2,
+    );
+    push_measure_line(
+        cells,
+        Vector2::new(x as f32, (y - 8) as f32),
+        Vector2::new(x as f32, (y + 8) as f32),
+        color,
+        2,
+    );
 }
 
 fn clamp_vector(vector: Vector2, max_length: f32) -> Vector2 {

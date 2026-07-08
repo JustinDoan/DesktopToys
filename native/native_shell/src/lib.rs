@@ -428,6 +428,7 @@ pub enum TrayAction {
     ToggleSettings,
     ToggleWeather,
     ToggleSand,
+    ToggleMeasureTool,
     ImportModel,
     Exit,
 }
@@ -443,6 +444,7 @@ pub struct TrayController {
     toggle_settings: MenuItem,
     toggle_weather: MenuItem,
     toggle_sand: MenuItem,
+    toggle_measure_tool: MenuItem,
     import_model: MenuItem,
     exit: MenuItem,
 }
@@ -459,6 +461,7 @@ impl TrayController {
         let toggle_settings = MenuItem::new("Settings (F4)", true, None);
         let toggle_weather = MenuItem::new("Toggle Rain (F5)", true, None);
         let toggle_sand = MenuItem::new("Toggle Sand (F6)", true, None);
+        let toggle_measure_tool = MenuItem::new("Measure Tool", true, None);
         let import_model = MenuItem::new("Import Model", true, None);
         let exit = MenuItem::new("Exit", true, None);
 
@@ -472,6 +475,7 @@ impl TrayController {
             &toggle_settings,
             &toggle_weather,
             &toggle_sand,
+            &toggle_measure_tool,
             &import_model,
             &PredefinedMenuItem::separator(),
             &exit,
@@ -494,6 +498,7 @@ impl TrayController {
             toggle_settings,
             toggle_weather,
             toggle_sand,
+            toggle_measure_tool,
             import_model,
             exit,
         })
@@ -522,6 +527,8 @@ impl TrayController {
             Some(TrayAction::ToggleWeather)
         } else if event.id == self.toggle_sand.id() {
             Some(TrayAction::ToggleSand)
+        } else if event.id == self.toggle_measure_tool.id() {
+            Some(TrayAction::ToggleMeasureTool)
         } else if event.id == self.import_model.id() {
             Some(TrayAction::ImportModel)
         } else if event.id == self.exit.id() {
