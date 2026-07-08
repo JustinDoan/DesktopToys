@@ -139,6 +139,7 @@ pub enum ObjectVisualKind {
     Satellite,
     DvdLogo,
     Ball,
+    SoftBall,
     Pyramid,
     Barrel,
     Ring,
@@ -147,6 +148,8 @@ pub enum ObjectVisualKind {
     GameTarget,
     FoxBuddy,
     RobotBuddy,
+    Basketball,
+    BasketballHoop,
     ImportedModel,
 }
 
@@ -218,6 +221,15 @@ pub struct ObjectState {
     pub angular_velocity_z: f64,
     pub is_hovered: bool,
     pub is_dragging: bool,
+    /// World-space depth used by the perspective renderer. 0 is the screen
+    /// plane; negative values recede "into" the screen.
+    pub depth_z: f32,
+    /// Depth velocity in pixels/second. Only integrated by the physics engine
+    /// when `depth_unlocked` is set.
+    pub depth_velocity: f32,
+    /// When true the physics engine simulates this body along the depth axis
+    /// too, instead of constraining it to the screen plane.
+    pub depth_unlocked: bool,
     pub z_index: i32,
     pub base_color: AppColor,
     pub visual_kind: ObjectVisualKind,
@@ -238,6 +250,9 @@ impl Default for ObjectState {
             angular_velocity_z: 0.0,
             is_hovered: false,
             is_dragging: false,
+            depth_z: 0.0,
+            depth_velocity: 0.0,
+            depth_unlocked: false,
             z_index: 0,
             base_color: AppColor::from_rgb(127, 202, 255),
             visual_kind: ObjectVisualKind::Cube,

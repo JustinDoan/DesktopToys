@@ -13,13 +13,12 @@ const CUBE_PALETTE: [AppColor; 5] = [
 ];
 
 const DEFAULT_OBJECT_SIZE: f32 = 132.0;
-const STARTUP_CUBE_COUNT: usize = 100;
-const STARTUP_CUBE_COLUMNS: usize = 10;
 const STARTUP_CUBE_SIZE: f32 = DEFAULT_OBJECT_SIZE * 0.2;
 
-const SPAWN_CATALOG: [SpawnSpec; 12] = [
+const SPAWN_CATALOG: [SpawnSpec; 13] = [
     SpawnSpec::new(ObjectVisualKind::Cube, None),
     SpawnSpec::new(ObjectVisualKind::Ball, Some(AppColor::from_rgb(90, 205, 255))),
+    SpawnSpec::new(ObjectVisualKind::SoftBall, Some(AppColor::from_rgb(106, 236, 188))),
     SpawnSpec::new(ObjectVisualKind::RobotBuddy, Some(AppColor::from_rgb(150, 220, 245))),
     SpawnSpec::new(ObjectVisualKind::Pyramid, Some(AppColor::from_rgb(255, 176, 92))),
     SpawnSpec::new(ObjectVisualKind::Barrel, Some(AppColor::from_rgb(126, 226, 168))),
@@ -163,6 +162,12 @@ impl HitTester {
         let mut best_z = i32::MIN;
 
         for candidate in objects {
+            // Objects pushed back in 3D space render offset by perspective, so
+            // screen-space hit testing no longer lines up with them.
+            if candidate.depth_z < -1.0 {
+                continue;
+            }
+
             if !contains_point(&candidate.body, point) {
                 continue;
             }
@@ -177,7 +182,9 @@ impl HitTester {
     }
 
     pub fn is_point_over_any_object(&self, objects: &[ObjectState], point: Vector2) -> bool {
-        objects.iter().any(|object| contains_point(&object.body, point))
+        objects
+            .iter()
+            .any(|object| object.depth_z >= -1.0 && contains_point(&object.body, point))
     }
 }
 
@@ -356,10 +363,9 @@ impl SceneController {
         self.physics_world.objects_mut()
     }
 
-    pub fn initialize(&mut self, bounds: RectF) {
+    pub fn initialize(&mut self, _bounds: RectF) {
         self.next_cube_color_index = 0;
         self.next_spawn_catalog_index = 0;
-        self.spawn_initial_objects(bounds);
     }
 
     pub fn set_gravity(&mut self, gravity_y: f32) {
@@ -439,6 +445,26 @@ impl SceneController {
         self.physics_world.clear();
     }
 
+    pub fn add_static_box_collider(
+        &mut self,
+        center: (f32, f32, f32),
+        half_extents: (f32, f32, f32),
+        friction: f32,
+        restitution: f32,
+    ) {
+        self.physics_world
+            .add_static_box_collider(center, half_extents, friction, restitution);
+    }
+
+    pub fn add_static_sphere_collider(&mut self, center: (f32, f32, f32), radius: f32, friction: f32, restitution: f32) {
+        self.physics_world
+            .add_static_sphere_collider(center, radius, friction, restitution);
+    }
+
+    pub fn clear_static_colliders(&mut self) {
+        self.physics_world.clear_static_colliders();
+    }
+
     pub fn remove_object(&mut self, id: u64) -> Option<ObjectState> {
         self.physics_world.remove_object(id)
     }
@@ -475,6 +501,8 @@ impl SceneController {
         state.body.mass = 1.0;
         state.body.restitution = if visual_kind == ObjectVisualKind::DvdLogo {
             1.0
+        } else if visual_kind == ObjectVisualKind::SoftBall {
+            0.52
         } else {
             self.config.restitution
         };
@@ -491,7 +519,11 @@ impl SceneController {
             1.0
         };
         state.body.shape = match visual_kind {
-            ObjectVisualKind::Ball | ObjectVisualKind::Ring | ObjectVisualKind::GameTarget => CollisionShape::Circle,
+            ObjectVisualKind::Ball
+            | ObjectVisualKind::SoftBall
+            | ObjectVisualKind::Ring
+            | ObjectVisualKind::GameTarget
+            | ObjectVisualKind::Basketball => CollisionShape::Circle,
             ObjectVisualKind::Crystal | ObjectVisualKind::Star => CollisionShape::Diamond,
             _ => CollisionShape::Box,
         };
@@ -500,6 +532,12 @@ impl SceneController {
             state.body.mass = 1.45;
             state.body.friction = 1.05;
             state.body.restitution = 0.28;
+        }
+        if visual_kind == ObjectVisualKind::SoftBall {
+            state.body.mass = 0.85;
+            state.body.friction = 0.92;
+            state.body.linear_damping = 0.986;
+            state.body.collision_scale = 0.94;
         }
         if visual_kind == ObjectVisualKind::RobotBuddy {
             state.body.mass = 1.65;
@@ -550,35 +588,16 @@ impl SceneController {
         id
     }
 
-    pub fn reset(&mut self, bounds: RectF) {
+    pub fn reset(&mut self, _bounds: RectF) {
         self.physics_world.clear();
         self.next_cube_color_index = 0;
         self.next_spawn_catalog_index = 0;
-        self.spawn_initial_objects(bounds);
     }
 
     pub fn apply_runtime_physics_config(&mut self) {
         for object in self.physics_world.objects_mut() {
             object.body.restitution = self.config.restitution;
             object.body.linear_damping = self.config.linear_damping;
-        }
-    }
-
-    fn spawn_initial_objects(&mut self, bounds: RectF) {
-        let spacing = STARTUP_CUBE_SIZE * 1.35;
-        let total_width = (STARTUP_CUBE_COLUMNS as f32 - 1.0) * spacing + STARTUP_CUBE_SIZE;
-        let start_x = ((bounds.width - total_width) * 0.5).max(12.0);
-        let start_y = (bounds.height * 0.10).max(12.0);
-
-        for index in 0..STARTUP_CUBE_COUNT {
-            let column = index % STARTUP_CUBE_COLUMNS;
-            let row = index / STARTUP_CUBE_COLUMNS;
-            let stagger = if row % 2 == 0 { 0.0 } else { spacing * 0.5 };
-            let position = Vector2::new(
-                start_x + (column as f32 * spacing) + stagger,
-                start_y + (row as f32 * spacing),
-            );
-            self.spawn_object_with_size(position, None, ObjectVisualKind::Cube, STARTUP_CUBE_SIZE);
         }
     }
 

@@ -73,9 +73,15 @@ pub struct GlobalPointerState {
     pub local_position: Vector2,
     pub left_down: bool,
     pub right_down: bool,
+    pub spawn_object_down: bool,
+    pub spawn_crystal_down: bool,
+    pub reset_down: bool,
+    pub weather_toggle_down: bool,
+    pub sand_toggle_down: bool,
     pub spawn_stress_down: bool,
     pub slingshot_toggle_down: bool,
     pub robot_buddy_down: bool,
+    pub basketball_toggle_down: bool,
     pub import_keys: GlobalImportKeys,
 }
 
@@ -264,9 +270,15 @@ impl GlobalInputPoller {
                 local_position: Vector2::new(cursor.2, cursor.3),
                 left_down: Mouse::Left.is_pressed(),
                 right_down: Mouse::Right.is_pressed(),
+                spawn_object_down: false,
+                spawn_crystal_down: false,
+                reset_down: false,
+                weather_toggle_down: false,
+                sand_toggle_down: false,
                 spawn_stress_down: false,
                 slingshot_toggle_down: false,
                 robot_buddy_down: false,
+                basketball_toggle_down: false,
                 import_keys: GlobalImportKeys::default(),
             });
         }
@@ -285,9 +297,15 @@ impl GlobalInputPoller {
                 local_position: Vector2::new(local_x, local_y),
                 left_down: *mouse.button_pressed.get(1).unwrap_or(&false),
                 right_down: *mouse.button_pressed.get(2).unwrap_or(&false),
+                spawn_object_down: keys.contains(&Keycode::F2),
+                spawn_crystal_down: keys.contains(&Keycode::F7),
+                reset_down: keys.contains(&Keycode::F3),
+                weather_toggle_down: keys.contains(&Keycode::F5),
+                sand_toggle_down: keys.contains(&Keycode::F6),
                 spawn_stress_down: keys.contains(&Keycode::F9),
                 slingshot_toggle_down: keys.contains(&Keycode::F10),
                 robot_buddy_down: keys.contains(&Keycode::F11),
+                basketball_toggle_down: keys.contains(&Keycode::F12),
                 import_keys: GlobalImportKeys {
                     up: keys.contains(&Keycode::Up),
                     down: keys.contains(&Keycode::Down),
@@ -408,6 +426,8 @@ pub enum TrayAction {
     SpawnStressCubes,
     Reset,
     ToggleSettings,
+    ToggleWeather,
+    ToggleSand,
     ImportModel,
     Exit,
 }
@@ -421,6 +441,8 @@ pub struct TrayController {
     spawn_stress_cubes: MenuItem,
     reset: MenuItem,
     toggle_settings: MenuItem,
+    toggle_weather: MenuItem,
+    toggle_sand: MenuItem,
     import_model: MenuItem,
     exit: MenuItem,
 }
@@ -435,7 +457,9 @@ impl TrayController {
         let spawn_stress_cubes = MenuItem::new("Spawn Stress Cubes (F9)", true, None);
         let reset = MenuItem::new("Reset (F3)", true, None);
         let toggle_settings = MenuItem::new("Settings (F4)", true, None);
-        let import_model = MenuItem::new("Import Model (F6)", true, None);
+        let toggle_weather = MenuItem::new("Toggle Rain (F5)", true, None);
+        let toggle_sand = MenuItem::new("Toggle Sand (F6)", true, None);
+        let import_model = MenuItem::new("Import Model", true, None);
         let exit = MenuItem::new("Exit", true, None);
 
         menu.append_items(&[
@@ -446,6 +470,8 @@ impl TrayController {
             &spawn_stress_cubes,
             &reset,
             &toggle_settings,
+            &toggle_weather,
+            &toggle_sand,
             &import_model,
             &PredefinedMenuItem::separator(),
             &exit,
@@ -466,6 +492,8 @@ impl TrayController {
             spawn_stress_cubes,
             reset,
             toggle_settings,
+            toggle_weather,
+            toggle_sand,
             import_model,
             exit,
         })
@@ -490,6 +518,10 @@ impl TrayController {
             Some(TrayAction::Reset)
         } else if event.id == self.toggle_settings.id() {
             Some(TrayAction::ToggleSettings)
+        } else if event.id == self.toggle_weather.id() {
+            Some(TrayAction::ToggleWeather)
+        } else if event.id == self.toggle_sand.id() {
+            Some(TrayAction::ToggleSand)
         } else if event.id == self.import_model.id() {
             Some(TrayAction::ImportModel)
         } else if event.id == self.exit.id() {

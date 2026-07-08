@@ -1,6 +1,12 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-use std::{borrow::Cow, collections::HashMap, error::Error, sync::Arc, time::{Duration, Instant}};
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    error::Error,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 #[cfg(target_os = "windows")]
 use std::ffi::CString;
@@ -12,14 +18,14 @@ use native_shell::{
     sync_window_to_monitor,
     GlobalImportKeys, GlobalInputPoller, OverlayInputMode, TrayAction, TrayController,
 };
-use renderer::{GpuVertex, HudState, OverlayPanel, PanelLine, RenderScene, SceneRenderer};
-use scene_logic::{DragController, FrameClock, HitTester, SceneController};
+use renderer::{hoop_geometry, GpuVertex, HudState, OverlayPanel, PanelLine, RenderScene, SandRenderCell, SceneRenderer};
+use scene_logic::{DragController, FrameClock, HitTester, MouseTracker, SceneController};
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    keyboard::{KeyCode, PhysicalKey},
-    window::{Window, WindowId},
+    keyboard::{KeyCode, ModifiersState, PhysicalKey},
+    window::{CursorIcon, Window, WindowId},
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::{
@@ -32,15 +38,16 @@ use windows::Win32::{
         Direct3D11::{
             D3D11CreateDevice, ID3D11BlendState, ID3D11Buffer, ID3D11DepthStencilState, ID3D11DepthStencilView,
             ID3D11Device, ID3D11DeviceContext, ID3D11InputLayout, ID3D11PixelShader, ID3D11RasterizerState,
-            ID3D11RenderTargetView, ID3D11Texture2D, ID3D11VertexShader, D3D11_BIND_CONSTANT_BUFFER,
-            D3D11_BIND_DEPTH_STENCIL, D3D11_BIND_VERTEX_BUFFER, D3D11_BLEND_DESC, D3D11_BLEND_INV_SRC_ALPHA,
-            D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_BUFFER_DESC, D3D11_CLEAR_DEPTH,
-            D3D11_COLOR_WRITE_ENABLE_ALL, D3D11_COMPARISON_LESS_EQUAL, D3D11_CPU_ACCESS_WRITE,
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_SINGLETHREADED, D3D11_CULL_NONE,
-            D3D11_DEPTH_STENCIL_DESC, D3D11_DEPTH_WRITE_MASK_ALL, D3D11_FILL_SOLID, D3D11_INPUT_ELEMENT_DESC,
-            D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAP_WRITE_DISCARD, D3D11_MAPPED_SUBRESOURCE,
-            D3D11_RASTERIZER_DESC, D3D11_RENDER_TARGET_BLEND_DESC, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
-            D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
+            ID3D11RenderTargetView, ID3D11Texture2D, ID3D11VertexShader,
+            D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_DEPTH_STENCIL, D3D11_BIND_VERTEX_BUFFER,
+            D3D11_BLEND_DESC, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD,
+            D3D11_BUFFER_DESC, D3D11_CLEAR_DEPTH, D3D11_COLOR_WRITE_ENABLE_ALL, D3D11_COMPARISON_LESS_EQUAL,
+            D3D11_CPU_ACCESS_WRITE, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_SINGLETHREADED,
+            D3D11_CULL_NONE, D3D11_DEPTH_STENCIL_DESC, D3D11_DEPTH_WRITE_MASK_ALL, D3D11_FILL_SOLID,
+            D3D11_INPUT_ELEMENT_DESC, D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAP_WRITE_DISCARD,
+            D3D11_MAPPED_SUBRESOURCE, D3D11_RASTERIZER_DESC, D3D11_RENDER_TARGET_BLEND_DESC,
+            D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC,
+            D3D11_VIEWPORT,
         },
         DirectComposition::{DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual},
         Dxgi::{
@@ -147,9 +154,15 @@ struct NativeApp {
     debug_right_down: bool,
     was_left_down: bool,
     was_right_down: bool,
+    was_spawn_object_down: bool,
+    was_spawn_crystal_down: bool,
+    was_reset_down: bool,
+    was_weather_toggle_down: bool,
+    was_sand_toggle_down: bool,
     was_stress_spawn_down: bool,
     was_slingshot_toggle_down: bool,
     was_robot_buddy_down: bool,
+    was_basketball_toggle_down: bool,
     force_interactive_for_debug: bool,
     is_rotation_dragging: bool,
     last_drag_attempt: String,
@@ -160,12 +173,19 @@ struct NativeApp {
     settings_panel: SettingsPanel,
     import_panel: Option<ImportPanel>,
     slingshot_game: SlingshotGame,
+    basketball_game: BasketballGame,
+    basketball_tracker: MouseTracker,
+    basketball_confetti: Vec<(u64, f64)>,
+    weather_world: WeatherWorld,
+    sand_world: SandWorld,
     robot_carries: HashMap<u64, RobotCarry>,
     robot_drop_cooldowns: HashMap<u64, RobotDropCooldown>,
     robot_bin_ids: Vec<u64>,
     fallback_left_down: bool,
     fallback_right_down: bool,
     previous_global_import_keys: GlobalImportKeys,
+    keyboard_modifiers: ModifiersState,
+    current_cursor_icon: CursorIcon,
     target_frame_duration: Duration,
     next_frame_at: Instant,
     fps_counter: FpsCounter,
@@ -178,6 +198,27 @@ const ROBOT_THROW_HOLD_SECONDS: f64 = 0.55;
 const ROBOT_BIN_WIDTH: f32 = 118.0;
 const ROBOT_BIN_HEIGHT: f32 = 96.0;
 const ROBOT_BIN_WALL: f32 = 12.0;
+
+const BASKETBALL_SIZE: f32 = 92.0;
+const BASKETBALL_HOOP_WIDTH: f32 = 360.0;
+const BASKETBALL_HOOP_HEIGHT: f32 = 420.0;
+/// How far behind the screen plane the hoop object sits.
+const BASKETBALL_HOOP_DEPTH: f32 = 640.0;
+/// Flicks slower than this just drop the ball instead of counting as a shot.
+const BASKETBALL_MIN_SHOT_UP_SPEED: f32 = 260.0;
+/// Caps the upward flick so the ball never slams the top of the screen.
+const BASKETBALL_MAX_UP_SPEED: f32 = 1750.0;
+const BASKETBALL_MAX_SIDE_SPEED: f32 = 1200.0;
+/// Depth speed is derived from the upward flick: faster flick = deeper shot.
+const BASKETBALL_DEPTH_BASE_SPEED: f32 = 200.0;
+const BASKETBALL_DEPTH_UP_FACTOR: f32 = 0.66;
+const BASKETBALL_RELOAD_TIMEOUT_SECONDS: f64 = 6.0;
+/// Collision sphere of the ball is slightly smaller than its rendered size.
+const BASKETBALL_COLLISION_SCALE: f32 = 0.92;
+/// Radius of the static spheres approximating the rim ring in the physics world.
+const BASKETBALL_RIM_COLLIDER_RADIUS: f32 = 9.0;
+const BASKETBALL_RIM_COLLIDER_COUNT: usize = 14;
+const BASKETBALL_CONFETTI_LIFETIME_SECONDS: f64 = 2.4;
 
 impl Default for NativeApp {
     fn default() -> Self {
@@ -208,9 +249,15 @@ impl Default for NativeApp {
             debug_right_down: false,
             was_left_down: false,
             was_right_down: false,
+            was_spawn_object_down: false,
+            was_spawn_crystal_down: false,
+            was_reset_down: false,
+            was_weather_toggle_down: false,
+            was_sand_toggle_down: false,
             was_stress_spawn_down: false,
             was_slingshot_toggle_down: false,
             was_robot_buddy_down: false,
+            was_basketball_toggle_down: false,
             force_interactive_for_debug: false,
             is_rotation_dragging: false,
             last_drag_attempt: "none".to_string(),
@@ -221,12 +268,19 @@ impl Default for NativeApp {
             settings_panel: SettingsPanel::default(),
             import_panel: None,
             slingshot_game: SlingshotGame::default(),
+            basketball_game: BasketballGame::default(),
+            basketball_tracker: MouseTracker::new(12),
+            basketball_confetti: Vec::new(),
+            weather_world: WeatherWorld::default(),
+            sand_world: SandWorld::default(),
             robot_carries: HashMap::new(),
             robot_drop_cooldowns: HashMap::new(),
             robot_bin_ids: Vec::new(),
             fallback_left_down: false,
             fallback_right_down: false,
             previous_global_import_keys: GlobalImportKeys::default(),
+            keyboard_modifiers: ModifiersState::default(),
+            current_cursor_icon: CursorIcon::Default,
             target_frame_duration: Duration::ZERO,
             next_frame_at: now,
             fps_counter: FpsCounter::default(),
@@ -366,9 +420,15 @@ impl NativeApp {
                         local_position: self.cursor_local,
                         left_down: self.fallback_left_down,
                         right_down: self.fallback_right_down,
+                        spawn_object_down: false,
+                        spawn_crystal_down: false,
+                        reset_down: false,
+                        weather_toggle_down: false,
+                        sand_toggle_down: false,
                         spawn_stress_down: false,
                         slingshot_toggle_down: false,
                         robot_buddy_down: false,
+                        basketball_toggle_down: false,
                         import_keys: GlobalImportKeys::default(),
                     }
                 },
@@ -379,9 +439,15 @@ impl NativeApp {
                 local_position: self.cursor_local,
                 left_down: self.fallback_left_down,
                 right_down: self.fallback_right_down,
+                spawn_object_down: false,
+                spawn_crystal_down: false,
+                reset_down: false,
+                weather_toggle_down: false,
+                sand_toggle_down: false,
                 spawn_stress_down: false,
                 slingshot_toggle_down: false,
                 robot_buddy_down: false,
+                basketball_toggle_down: false,
                 import_keys: GlobalImportKeys::default(),
             }
         };
@@ -392,6 +458,7 @@ impl NativeApp {
             .is_point_over_any_object(self.scene.objects(), self.cursor_local);
 
         self.update_click_through_mode(now, &window);
+        self.update_cursor_icon(&window);
 
         if self.drag_controller.is_dragging() {
             self.drag_controller
@@ -400,11 +467,20 @@ impl NativeApp {
         }
 
         self.handle_global_mouse_buttons(now, pointer.left_down, pointer.right_down);
+        self.handle_global_spawn_object(pointer.spawn_object_down);
+        self.handle_global_spawn_crystal(pointer.spawn_crystal_down);
+        self.handle_global_reset(pointer.reset_down);
+        self.handle_global_weather_toggle(pointer.weather_toggle_down);
+        self.handle_global_sand_toggle(pointer.sand_toggle_down);
+        self.update_sand(pointer.left_down, pointer.right_down);
+        self.update_weather(dt);
         self.handle_global_stress_spawn(pointer.spawn_stress_down);
         self.handle_global_slingshot_toggle(pointer.slingshot_toggle_down);
         self.handle_global_robot_buddy(pointer.robot_buddy_down);
+        self.handle_global_basketball_toggle(pointer.basketball_toggle_down);
         self.handle_global_import_keys(pointer.import_keys);
         self.update_slingshot_game();
+        self.update_basketball_game(dt);
         self.update_robot_buddies(dt);
         self.scene.step(dt, self.scene_bounds());
         self.collect_robot_bin_cubes();
@@ -418,6 +494,8 @@ impl NativeApp {
             || self.input_poller.is_none()
             || self.drag_controller.is_dragging()
             || self.debug_hit_primary_cursor
+            || self.sand_world.active
+            || self.basketball_game.aiming
             || self.settings_panel.visible
             || self.import_panel.is_some();
         let desired_mode = if should_be_interactive {
@@ -472,6 +550,14 @@ impl NativeApp {
             return;
         }
 
+        if self.basketball_game.active {
+            self.handle_basketball_mouse(is_left_down);
+            self.was_left_down = is_left_down;
+            self.was_right_down = is_right_down;
+            self.is_rotation_dragging = false;
+            return;
+        }
+
         if is_left_down && !self.was_left_down {
             let began = if self.cursor_is_over_robot_bin() {
                 None
@@ -503,11 +589,119 @@ impl NativeApp {
         self.was_right_down = is_right_down;
     }
 
+    fn update_cursor_icon(&mut self, window: &Window) {
+        let desired = if self.drag_controller.is_dragging() || self.slingshot_game.aiming || self.basketball_game.aiming {
+            CursorIcon::Grabbing
+        } else if self.debug_hit_primary_cursor || self.cursor_is_over_active_game_object() {
+            CursorIcon::Pointer
+        } else {
+            CursorIcon::Default
+        };
+
+        if desired != self.current_cursor_icon {
+            window.set_cursor(desired);
+            self.current_cursor_icon = desired;
+        }
+    }
+
+    fn cursor_is_over_active_game_object(&self) -> bool {
+        if self.slingshot_game.active && self.slingshot_game.ready {
+            if let Some(projectile_id) = self.slingshot_game.projectile_id {
+                return self.cursor_is_over_projectile(projectile_id);
+            }
+        }
+
+        if self.basketball_game.active && self.basketball_game.ready {
+            if let Some(ball_id) = self.basketball_game.ball_id {
+                return self.cursor_is_over_basketball(ball_id);
+            }
+        }
+
+        false
+    }
+
     fn handle_global_stress_spawn(&mut self, is_down: bool) {
         if is_down && !self.was_stress_spawn_down {
             self.spawn_stress_cubes();
         }
         self.was_stress_spawn_down = is_down;
+    }
+
+    fn handle_global_spawn_object(&mut self, is_down: bool) {
+        if is_down && !self.was_spawn_object_down {
+            let id = self.scene.spawn_next_object(self.default_spawn_position());
+            self.selected_id = Some(id);
+        }
+        self.was_spawn_object_down = is_down;
+    }
+
+    fn handle_global_spawn_crystal(&mut self, is_down: bool) {
+        if is_down && !self.was_spawn_crystal_down {
+            let id = self.scene.spawn_random_crystal(self.default_spawn_position());
+            self.selected_id = Some(id);
+        }
+        self.was_spawn_crystal_down = is_down;
+    }
+
+    fn handle_global_reset(&mut self, is_down: bool) {
+        if is_down && !self.was_reset_down {
+            self.reset_everything();
+        }
+        self.was_reset_down = is_down;
+    }
+
+    fn handle_global_weather_toggle(&mut self, is_down: bool) {
+        if is_down && !self.was_weather_toggle_down {
+            self.toggle_weather_world();
+        }
+        self.was_weather_toggle_down = is_down;
+    }
+
+    fn toggle_weather_world(&mut self) {
+        let active = self.weather_world.toggle(self.scene_bounds());
+        self.push_status_message(if active {
+            "Rain on. F5 toggles.".to_string()
+        } else {
+            "Rain off.".to_string()
+        });
+    }
+
+    fn update_weather(&mut self, dt: f32) {
+        if self.weather_world.active {
+            self.weather_world.step(dt, self.scene_bounds());
+        }
+    }
+
+    fn handle_global_sand_toggle(&mut self, is_down: bool) {
+        if is_down && !self.was_sand_toggle_down {
+            self.toggle_sand_world();
+        }
+        self.was_sand_toggle_down = is_down;
+    }
+
+    fn toggle_sand_world(&mut self) {
+        let active = self.sand_world.toggle(self.scene_bounds());
+        self.push_status_message(if active {
+            "Sand on: hold left mouse to pour. F6 toggles.".to_string()
+        } else {
+            "Sand off.".to_string()
+        });
+    }
+
+    fn update_sand(&mut self, is_left_down: bool, is_right_down: bool) {
+        if !self.sand_world.active {
+            return;
+        }
+        let bounds = self.scene_bounds();
+        if !self.settings_panel.visible && self.import_panel.is_none() {
+            if is_left_down {
+                self.sand_world.emit_at(self.cursor_local, bounds);
+            }
+            if is_right_down {
+                self.sand_world.erase_at(self.cursor_local, bounds);
+            }
+        }
+        self.sand_world.step(bounds);
     }
 
     fn handle_global_slingshot_toggle(&mut self, is_down: bool) {
@@ -522,6 +716,13 @@ impl NativeApp {
             self.spawn_robot_buddy();
         }
         self.was_robot_buddy_down = is_down;
+    }
+
+    fn handle_global_basketball_toggle(&mut self, is_down: bool) {
+        if is_down && !self.was_basketball_toggle_down {
+            self.toggle_basketball_game();
+        }
+        self.was_basketball_toggle_down = is_down;
     }
 
     fn handle_global_import_keys(&mut self, keys: GlobalImportKeys) {
@@ -573,7 +774,7 @@ impl NativeApp {
     }
 
     fn update_robot_buddies(&mut self, _dt: f32) {
-        if self.slingshot_game.active {
+        if self.slingshot_game.active || self.basketball_game.active {
             return;
         }
         let objects = self.scene.objects().to_vec();
@@ -930,8 +1131,11 @@ impl NativeApp {
 
     fn start_slingshot_level(&mut self) {
         let bounds = self.scene_bounds();
+        self.scene.clear_static_colliders();
         self.scene.clear_objects();
         self.drag_controller.cancel_drag(self.scene.objects_mut());
+        self.basketball_game = BasketballGame::default();
+        self.basketball_confetti.clear();
         self.selected_id = None;
         self.slingshot_game = SlingshotGame::new(bounds);
         self.build_slingshot_level(bounds);
@@ -1295,6 +1499,387 @@ impl NativeApp {
         }
     }
 
+    fn toggle_basketball_game(&mut self) {
+        if self.basketball_game.active {
+            self.basketball_game = BasketballGame::default();
+            self.basketball_confetti.clear();
+            self.scene.clear_static_colliders();
+            self.scene.reset(self.scene_bounds());
+            self.selected_id = self.scene.objects().last().map(|object| object.id);
+            self.push_status_message("Basketball game off.".to_string());
+        } else {
+            self.start_basketball_court();
+        }
+    }
+
+    fn start_basketball_court(&mut self) {
+        let bounds = self.scene_bounds();
+        self.scene.clear_static_colliders();
+        self.scene.clear_objects();
+        self.basketball_confetti.clear();
+        self.drag_controller.cancel_drag(self.scene.objects_mut());
+        self.slingshot_game = SlingshotGame::default();
+        self.selected_id = None;
+        self.basketball_game = BasketballGame::new(bounds);
+        self.build_basketball_court();
+        self.push_status_message(
+            "Basketball: grab the ball and flick it up toward the hoop. F3 resets, F12 exits.".to_string(),
+        );
+    }
+
+    fn build_basketball_colliders(&mut self) {
+        let bounds = self.scene_bounds();
+        let geometry = hoop_geometry(BASKETBALL_HOOP_WIDTH, BASKETBALL_HOOP_HEIGHT);
+        let hoop_center = self.basketball_game.hoop_center;
+        let rim_center_y = hoop_center.y + geometry.rim_center_y;
+        let rim_z = -BASKETBALL_HOOP_DEPTH + geometry.rim_center_z;
+
+        // Backboard: a real slab the ball can bank off.
+        self.scene.add_static_box_collider(
+            (
+                hoop_center.x,
+                hoop_center.y + geometry.backboard_center_y,
+                -BASKETBALL_HOOP_DEPTH + geometry.backboard_front_z - 8.0,
+            ),
+            (geometry.backboard_width * 0.5, geometry.backboard_height * 0.5, 8.0),
+            0.3,
+            0.62,
+        );
+
+        // Rim: a ring of static spheres approximating the torus, open in the middle.
+        for index in 0..BASKETBALL_RIM_COLLIDER_COUNT {
+            let angle = std::f32::consts::TAU * (index as f32 / BASKETBALL_RIM_COLLIDER_COUNT as f32);
+            self.scene.add_static_sphere_collider(
+                (
+                    hoop_center.x + geometry.rim_radius * angle.cos(),
+                    rim_center_y,
+                    rim_z + geometry.rim_radius * angle.sin(),
+                ),
+                BASKETBALL_RIM_COLLIDER_RADIUS,
+                0.5,
+                0.45,
+            );
+        }
+
+        // Invisible walls keeping rebounds inside the play space: one deep
+        // behind the hoop, one just in front of the screen plane.
+        self.scene.add_static_box_collider(
+            (bounds.width * 0.5, bounds.height * 0.5, -BASKETBALL_HOOP_DEPTH - 360.0),
+            (bounds.width, bounds.height, 24.0),
+            0.4,
+            0.5,
+        );
+        self.scene.add_static_box_collider(
+            (bounds.width * 0.5, bounds.height * 0.5, 150.0),
+            (bounds.width, bounds.height, 24.0),
+            0.4,
+            0.35,
+        );
+    }
+
+    fn build_basketball_court(&mut self) {
+        self.build_basketball_colliders();
+        let hoop_center = self.basketball_game.hoop_center;
+        let hoop_id = self.scene.spawn_custom_object(
+            Vector2::new(
+                hoop_center.x - BASKETBALL_HOOP_WIDTH * 0.5,
+                hoop_center.y - BASKETBALL_HOOP_HEIGHT * 0.5,
+            ),
+            Vector2::new(BASKETBALL_HOOP_WIDTH, BASKETBALL_HOOP_HEIGHT),
+            AppColor::from_rgb(252, 88, 38),
+            ObjectVisualKind::BasketballHoop,
+            CollisionShape::Box,
+        );
+        if let Some(hoop) = self.scene.objects_mut().iter_mut().find(|object| object.id == hoop_id) {
+            hoop.body.is_dragging = true;
+            hoop.is_dragging = true;
+            hoop.body.gravity_scale = 0.0;
+            hoop.body.velocity = Vector2::ZERO;
+            hoop.body.collidable = false;
+            hoop.depth_z = -BASKETBALL_HOOP_DEPTH;
+        }
+        self.basketball_game.hoop_id = Some(hoop_id);
+
+        let tee = self.basketball_game.tee;
+        let ball_id = self.scene.spawn_custom_object(
+            Vector2::new(tee.x - BASKETBALL_SIZE * 0.5, tee.y - BASKETBALL_SIZE * 0.5),
+            Vector2::new(BASKETBALL_SIZE, BASKETBALL_SIZE),
+            AppColor::from_rgb(235, 122, 48),
+            ObjectVisualKind::Basketball,
+            CollisionShape::Circle,
+        );
+        if let Some(ball) = self.scene.objects_mut().iter_mut().find(|object| object.id == ball_id) {
+            ball.body.is_dragging = true;
+            ball.is_dragging = true;
+            ball.body.restitution = 0.7;
+            ball.body.friction = 0.6;
+            ball.body.linear_damping = 0.996;
+            ball.body.collision_scale = BASKETBALL_COLLISION_SCALE;
+            ball.depth_unlocked = true;
+        }
+        self.basketball_game.ball_id = Some(ball_id);
+        self.selected_id = Some(ball_id);
+    }
+
+    fn handle_basketball_mouse(&mut self, is_left_down: bool) {
+        let Some(ball_id) = self.basketball_game.ball_id else {
+            return;
+        };
+
+        if is_left_down && !self.was_left_down && self.basketball_game.ready && self.cursor_is_over_basketball(ball_id) {
+            self.basketball_game.aiming = true;
+            self.basketball_game.grab_offset = self
+                .scene
+                .objects()
+                .iter()
+                .find(|object| object.id == ball_id)
+                .map(|ball| {
+                    let center = Vector2::new(
+                        ball.body.position.x + ball.body.width * 0.5,
+                        ball.body.position.y + ball.body.height * 0.5,
+                    );
+                    self.cursor_local - center
+                })
+                .unwrap_or(Vector2::ZERO);
+            self.basketball_tracker.clear();
+            self.basketball_tracker
+                .add_sample(self.cursor_local, self.frame_clock.elapsed_seconds);
+        }
+
+        if is_left_down && self.basketball_game.aiming {
+            self.aim_basketball(ball_id);
+        }
+
+        if !is_left_down && self.was_left_down && self.basketball_game.aiming {
+            self.launch_basketball(ball_id);
+        }
+    }
+
+    fn cursor_is_over_basketball(&self, ball_id: u64) -> bool {
+        self.scene
+            .objects()
+            .iter()
+            .find(|object| object.id == ball_id)
+            .map(|object| {
+                let center = Vector2::new(
+                    object.body.position.x + object.body.width * 0.5,
+                    object.body.position.y + object.body.height * 0.5,
+                );
+                (self.cursor_local - center).length_squared() <= 80.0 * 80.0
+            })
+            .unwrap_or(false)
+    }
+
+    fn aim_basketball(&mut self, ball_id: u64) {
+        let target_center = self.cursor_local - self.basketball_game.grab_offset;
+        self.basketball_tracker
+            .add_sample(self.cursor_local, self.frame_clock.elapsed_seconds);
+        let Some(ball) = self.scene.objects_mut().iter_mut().find(|object| object.id == ball_id) else {
+            return;
+        };
+        ball.body.position = target_center - Vector2::new(ball.body.width * 0.5, ball.body.height * 0.5);
+        ball.body.velocity = Vector2::ZERO;
+        ball.body.is_dragging = true;
+        ball.is_dragging = true;
+        ball.body.is_sleeping = false;
+        ball.depth_z = 0.0;
+        ball.depth_velocity = 0.0;
+        ball.angular_velocity_x = 0.0;
+        ball.angular_velocity_y = 0.0;
+        ball.angular_velocity_z = 0.0;
+    }
+
+    fn launch_basketball(&mut self, ball_id: u64) {
+        self.basketball_tracker
+            .add_sample(self.cursor_local, self.frame_clock.elapsed_seconds);
+        let flick = self.basketball_tracker.estimate_velocity(0.085, 1.0, 3200.0);
+        self.basketball_tracker.clear();
+        self.basketball_game.aiming = false;
+
+        let up_speed = (-flick.y).clamp(0.0, BASKETBALL_MAX_UP_SPEED);
+        let is_shot = up_speed >= BASKETBALL_MIN_SHOT_UP_SPEED;
+
+        let Some(ball) = self.scene.objects_mut().iter_mut().find(|object| object.id == ball_id) else {
+            return;
+        };
+        ball.body.is_dragging = false;
+        ball.is_dragging = false;
+        ball.body.is_sleeping = false;
+
+        if is_shot {
+            // Throw: the flick's upward speed sets the arc, and also drives the
+            // ball backwards into the scene toward the hoop.
+            ball.body.velocity = Vector2::new(
+                flick.x.clamp(-BASKETBALL_MAX_SIDE_SPEED, BASKETBALL_MAX_SIDE_SPEED),
+                -up_speed,
+            );
+            ball.depth_velocity = -(BASKETBALL_DEPTH_BASE_SPEED + up_speed * BASKETBALL_DEPTH_UP_FACTOR);
+            self.basketball_game.shots += 1;
+        } else {
+            // Too gentle to count as a shot: just let the ball drop at the front.
+            ball.body.velocity = Vector2::new(flick.x.clamp(-600.0, 600.0), flick.y.max(0.0));
+            ball.depth_velocity = 0.0;
+        }
+
+        self.basketball_game.last_ball_y = ball.body.position.y + ball.body.height * 0.5;
+        self.basketball_game.min_depth_this_shot = 0.0;
+        self.basketball_game.ready = false;
+        self.basketball_game.scored_this_shot = false;
+        self.basketball_game.launched_at = self.frame_clock.elapsed_seconds;
+    }
+
+    fn update_basketball_game(&mut self, _dt: f32) {
+        self.expire_basketball_confetti();
+
+        if !self.basketball_game.active {
+            return;
+        }
+        let Some(ball_id) = self.basketball_game.ball_id else {
+            return;
+        };
+        if self.basketball_game.ready || self.basketball_game.aiming {
+            return;
+        }
+
+        // Box3D simulates the flight and the rim/backboard contacts; here we
+        // only detect the ball dropping through the rim circle.
+        let geometry = hoop_geometry(BASKETBALL_HOOP_WIDTH, BASKETBALL_HOOP_HEIGHT);
+        let hoop_center = self.basketball_game.hoop_center;
+        let rim_center_y = hoop_center.y + geometry.rim_center_y;
+        let rim_z = -BASKETBALL_HOOP_DEPTH + geometry.rim_center_z;
+
+        let Some(ball) = self.scene.objects().iter().find(|object| object.id == ball_id) else {
+            return;
+        };
+        let ball_center = Vector2::new(
+            ball.body.position.x + ball.body.width * 0.5,
+            ball.body.position.y + ball.body.height * 0.5,
+        );
+        let ball_depth = ball.depth_z;
+        let ball_radius = ball.body.width * 0.5 * BASKETBALL_COLLISION_SCALE;
+        let falling = ball.body.velocity.y > 0.0;
+        let previous_y = self.basketball_game.last_ball_y;
+        self.basketball_game.last_ball_y = ball_center.y;
+        self.basketball_game.min_depth_this_shot = self.basketball_game.min_depth_this_shot.min(ball_depth);
+
+        let crossed_rim_height = previous_y <= rim_center_y && ball_center.y > rim_center_y;
+        if crossed_rim_height && falling && !self.basketball_game.scored_this_shot {
+            let delta_x = ball_center.x - hoop_center.x;
+            let delta_z = ball_depth - rim_z;
+            let planar_distance = ((delta_x * delta_x) + (delta_z * delta_z)).sqrt();
+            if planar_distance <= (geometry.rim_radius - ball_radius).max(8.0) + 12.0 {
+                self.score_basketball(Vector2::new(hoop_center.x, rim_center_y), rim_z, geometry.backboard_front_z);
+            }
+        }
+
+        if self.basketball_shot_is_over(ball_id) {
+            self.reload_basketball(ball_id);
+        }
+    }
+
+    fn score_basketball(&mut self, rim_center: Vector2, rim_z: f32, backboard_front_z: f32) {
+        let now = self.frame_clock.elapsed_seconds;
+        self.basketball_game.scored_this_shot = true;
+        self.basketball_game.score += 1;
+        self.basketball_game.last_score_at = now;
+
+        let board_plane = -BASKETBALL_HOOP_DEPTH + backboard_front_z;
+        let swish = self.basketball_game.min_depth_this_shot > board_plane + 50.0;
+        self.push_status_message(if swish {
+            "Swish! +1".to_string()
+        } else {
+            "Off the glass! +1".to_string()
+        });
+        self.spawn_basketball_confetti(rim_center, rim_z);
+    }
+
+    fn spawn_basketball_confetti(&mut self, origin: Vector2, depth: f32) {
+        const CONFETTI_COUNT: usize = 14;
+        const CONFETTI_PALETTE: [AppColor; 5] = [
+            AppColor::from_rgb(255, 214, 82),
+            AppColor::from_rgb(255, 120, 96),
+            AppColor::from_rgb(120, 226, 160),
+            AppColor::from_rgb(120, 190, 255),
+            AppColor::from_rgb(226, 140, 255),
+        ];
+        let now = self.frame_clock.elapsed_seconds;
+        for index in 0..CONFETTI_COUNT {
+            let angle = std::f32::consts::TAU * (index as f32 / CONFETTI_COUNT as f32);
+            let size = 13.0 + ((index % 3) as f32 * 4.0);
+            let id = self.scene.spawn_custom_object(
+                Vector2::new(
+                    origin.x + angle.cos() * 26.0 - size * 0.5,
+                    origin.y - 10.0 - size * 0.5,
+                ),
+                Vector2::new(size, size),
+                CONFETTI_PALETTE[index % CONFETTI_PALETTE.len()],
+                ObjectVisualKind::Cube,
+                CollisionShape::Box,
+            );
+            if let Some(piece) = self.scene.objects_mut().iter_mut().find(|object| object.id == id) {
+                piece.depth_unlocked = true;
+                piece.depth_z = depth;
+                piece.depth_velocity = angle.sin() * 190.0;
+                piece.body.velocity = Vector2::new(angle.cos() * 300.0, -260.0 - ((index % 4) as f32 * 110.0));
+                piece.body.restitution = 0.55;
+                piece.body.friction = 0.5;
+                piece.body.mass = 0.25;
+            }
+            self.basketball_confetti.push((id, now));
+        }
+    }
+
+    fn expire_basketball_confetti(&mut self) {
+        if self.basketball_confetti.is_empty() {
+            return;
+        }
+        let now = self.frame_clock.elapsed_seconds;
+        let expired: Vec<u64> = self
+            .basketball_confetti
+            .iter()
+            .filter(|(_, spawned_at)| now - spawned_at > BASKETBALL_CONFETTI_LIFETIME_SECONDS)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in expired {
+            let _ = self.scene.remove_object(id);
+        }
+        self.basketball_confetti
+            .retain(|(_, spawned_at)| now - spawned_at <= BASKETBALL_CONFETTI_LIFETIME_SECONDS);
+    }
+
+    fn basketball_shot_is_over(&self, ball_id: u64) -> bool {
+        let Some(ball) = self.scene.objects().iter().find(|object| object.id == ball_id) else {
+            return false;
+        };
+        let bounds = self.scene_bounds();
+        let elapsed = self.frame_clock.elapsed_seconds - self.basketball_game.launched_at;
+        elapsed > BASKETBALL_RELOAD_TIMEOUT_SECONDS
+            || ball.body.is_sleeping
+            || ball.body.position.x > bounds.right() + 160.0
+            || ball.body.position.x < -160.0 - ball.body.width
+    }
+
+    fn reload_basketball(&mut self, ball_id: u64) {
+        let tee = self.basketball_game.tee;
+        let Some(ball) = self.scene.objects_mut().iter_mut().find(|object| object.id == ball_id) else {
+            return;
+        };
+        ball.body.position = Vector2::new(tee.x - ball.body.width * 0.5, tee.y - ball.body.height * 0.5);
+        ball.body.velocity = Vector2::ZERO;
+        ball.body.is_dragging = true;
+        ball.is_dragging = true;
+        ball.body.is_sleeping = false;
+        ball.depth_z = 0.0;
+        ball.depth_velocity = 0.0;
+        ball.rotation_x = 0.0;
+        ball.rotation_y = 0.0;
+        ball.rotation_z = 0.0;
+        ball.angular_velocity_x = 0.0;
+        ball.angular_velocity_y = 0.0;
+        ball.angular_velocity_z = 0.0;
+        self.basketball_game.ready = true;
+    }
+
     fn end_drag_and_apply_spin(&mut self, now_seconds: f64) {
         let rotated_while_held = self.is_rotation_dragging;
         let throw_sensitivity = self.scene.config().throw_sensitivity;
@@ -1382,33 +1967,38 @@ impl NativeApp {
 
     fn sync_panels(&mut self) {
         let mut panels = Vec::new();
-        panels.push(OverlayPanel {
-            title: "Perf".to_string(),
-            lines: vec![
-                PanelLine {
-                    text: format!("FPS: {:.0}", self.fps_counter.fps()),
-                    selected: false,
-                },
-                PanelLine {
-                    text: format!("Objects: {}", self.scene.objects().len()),
-                    selected: false,
-                },
-                PanelLine {
-                    text: format!("F9: +{} cubes", STRESS_SPAWN_COUNT),
-                    selected: false,
-                },
-                PanelLine {
-                    text: "F11: robot buddy".to_string(),
-                    selected: false,
-                },
-            ],
-            footer: Vec::new(),
-        });
 
         if self.debug_visible {
+            panels.push(OverlayPanel {
+                title: "Perf".to_string(),
+                lines: vec![
+                    PanelLine {
+                        text: format!("FPS: {:.0}", self.fps_counter.fps()),
+                        selected: false,
+                    },
+                    PanelLine {
+                        text: format!("Objects: {}", self.scene.objects().len()),
+                        selected: false,
+                    },
+                    PanelLine {
+                        text: format!("F9: +{} cubes", STRESS_SPAWN_COUNT),
+                        selected: false,
+                    },
+                    PanelLine {
+                        text: "F11: robot buddy".to_string(),
+                        selected: false,
+                    },
+                    PanelLine {
+                        text: "F12: basketball".to_string(),
+                        selected: false,
+                    },
+                ],
+                footer: Vec::new(),
+            });
+
             let lines = vec![
                 PanelLine {
-                    text: format!("ForceInteractive(F5): {}", if self.force_interactive_for_debug { "ON" } else { "off" }),
+                    text: format!("ForceInteractive: {}", if self.force_interactive_for_debug { "ON" } else { "off" }),
                     selected: false,
                 },
                 PanelLine {
@@ -1471,6 +2061,67 @@ impl NativeApp {
             });
         }
 
+        if self.basketball_game.active {
+            let just_scored = self.basketball_game.score > 0
+                && self.frame_clock.elapsed_seconds - self.basketball_game.last_score_at < 1.6;
+            panels.push(OverlayPanel {
+                title: "Basketball".to_string(),
+                lines: vec![
+                    PanelLine {
+                        text: if just_scored {
+                            format!("Score: {}  BUCKET!", self.basketball_game.score)
+                        } else {
+                            format!("Score: {}", self.basketball_game.score)
+                        },
+                        selected: just_scored,
+                    },
+                    PanelLine {
+                        text: format!("Shots: {}", self.basketball_game.shots),
+                        selected: false,
+                    },
+                    PanelLine {
+                        text: if self.basketball_game.aiming {
+                            "Flick up to shoot!".to_string()
+                        } else if self.basketball_game.ready {
+                            "Grab the ball, flick it up.".to_string()
+                        } else {
+                            "Ball in flight.".to_string()
+                        },
+                        selected: self.basketball_game.aiming,
+                    },
+                ],
+                footer: vec!["F3 reset. F12 exit.".to_string()],
+            });
+        }
+
+        if self.sand_world.active {
+            panels.push(OverlayPanel {
+                title: "Sand".to_string(),
+                lines: vec![
+                    PanelLine {
+                        text: format!("Cells: {}", self.sand_world.occupied_count()),
+                        selected: false,
+                    },
+                    PanelLine {
+                        text: "Left pours. Right erases.".to_string(),
+                        selected: false,
+                    },
+                ],
+                footer: vec!["F6 toggle. F3 clear.".to_string()],
+            });
+        }
+
+        if self.weather_world.active {
+            panels.push(OverlayPanel {
+                title: "Rain".to_string(),
+                lines: vec![PanelLine {
+                    text: format!("Drops: {}", self.weather_world.drop_count()),
+                    selected: false,
+                }],
+                footer: vec!["F5 toggle.".to_string()],
+            });
+        }
+
         if self.settings_panel.visible {
             panels.push(self.settings_panel.to_panel(self.scene.config()));
         }
@@ -1496,7 +2147,8 @@ impl NativeApp {
             bounds: scene_bounds,
             elapsed_seconds: self.frame_clock.elapsed_seconds,
             objects: self.scene.objects(),
-            cursor: self.cursor_local,
+            sand_cells: self.sand_world.render_cells(),
+            weather_cells: self.weather_world.render_cells(),
             hud: &self.hud,
         };
         let vertices = self.renderer.build_vertices(size.width, size.height, &scene)?;
@@ -1567,13 +2219,11 @@ impl NativeApp {
             AppAction::ToggleSlingshotGame => {
                 self.toggle_slingshot_game();
             },
+            AppAction::ToggleBasketballGame => {
+                self.toggle_basketball_game();
+            },
             AppAction::Reset => {
-                if self.slingshot_game.active {
-                    self.start_slingshot_level();
-                } else {
-                    self.scene.reset(self.scene_bounds());
-                    self.selected_id = self.scene.objects().last().map(|object| object.id);
-                }
+                self.reset_everything();
             },
             AppAction::ToggleSettings => {
                 self.settings_panel.visible = !self.settings_panel.visible;
@@ -1581,13 +2231,11 @@ impl NativeApp {
                     self.import_panel = None;
                 }
             },
-            AppAction::ToggleForceInteractive => {
-                self.force_interactive_for_debug = !self.force_interactive_for_debug;
-                self.last_drag_attempt = if self.force_interactive_for_debug {
-                    "force-input:on".to_string()
-                } else {
-                    "force-input:off".to_string()
-                };
+            AppAction::ToggleWeather => {
+                self.toggle_weather_world();
+            },
+            AppAction::ToggleSand => {
+                self.toggle_sand_world();
             },
             AppAction::RequestImport => {
                 if let Some(path) = pick_model_file() {
@@ -1599,8 +2247,34 @@ impl NativeApp {
         }
     }
 
+    fn reset_everything(&mut self) {
+        self.drag_controller.cancel_drag(self.scene.objects_mut());
+        self.scene.clear_static_colliders();
+        self.scene.reset(self.scene_bounds());
+        self.selected_id = None;
+        self.slingshot_game = SlingshotGame::default();
+        self.basketball_game = BasketballGame::default();
+        self.basketball_tracker.clear();
+        self.basketball_confetti.clear();
+        self.weather_world.clear();
+        self.sand_world.clear();
+        self.robot_carries.clear();
+        self.robot_drop_cooldowns.clear();
+        self.robot_bin_ids.clear();
+        self.import_panel = None;
+        self.settings_panel.visible = false;
+        self.is_rotation_dragging = false;
+        self.last_rotation_cursor = Vector2::ZERO;
+        self.push_status_message("Reset everything.".to_string());
+    }
+
     fn handle_keyboard(&mut self, key_code: KeyCode, state: ElementState, event_loop: &ActiveEventLoop) {
         if state != ElementState::Pressed {
+            return;
+        }
+
+        if self.keyboard_modifiers.control_key() && matches!(key_code, KeyCode::KeyC | KeyCode::KeyQ) {
+            self.handle_action(AppAction::Exit, event_loop);
             return;
         }
 
@@ -1624,13 +2298,14 @@ impl NativeApp {
             KeyCode::F2 => self.handle_action(AppAction::SpawnObject, event_loop),
             KeyCode::F3 => self.handle_action(AppAction::Reset, event_loop),
             KeyCode::F4 => self.handle_action(AppAction::ToggleSettings, event_loop),
-            KeyCode::F5 => self.handle_action(AppAction::ToggleForceInteractive, event_loop),
-            KeyCode::F6 => self.handle_action(AppAction::RequestImport, event_loop),
+            KeyCode::F5 => self.handle_action(AppAction::ToggleWeather, event_loop),
+            KeyCode::F6 => self.handle_action(AppAction::ToggleSand, event_loop),
             KeyCode::F7 => self.handle_action(AppAction::SpawnCrystal, event_loop),
             KeyCode::F8 => self.handle_action(AppAction::SpawnDvdLogo, event_loop),
             KeyCode::F9 => self.handle_action(AppAction::SpawnStressCubes, event_loop),
             KeyCode::F10 => self.handle_action(AppAction::ToggleSlingshotGame, event_loop),
             KeyCode::F11 => self.handle_action(AppAction::SpawnRobotBuddy, event_loop),
+            KeyCode::F12 => self.handle_action(AppAction::ToggleBasketballGame, event_loop),
             KeyCode::Escape => self.handle_action(AppAction::Exit, event_loop),
             _ => {},
         }
@@ -2754,6 +3429,9 @@ impl ApplicationHandler for NativeApp {
                     self.handle_keyboard(code, event.state, event_loop);
                 }
             },
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.keyboard_modifiers = modifiers.state();
+            },
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_local = Vector2::new(position.x as f32, position.y as f32);
             },
@@ -2798,6 +3476,8 @@ impl ApplicationHandler for NativeApp {
                     TrayAction::SpawnStressCubes => AppAction::SpawnStressCubes,
                     TrayAction::Reset => AppAction::Reset,
                     TrayAction::ToggleSettings => AppAction::ToggleSettings,
+                    TrayAction::ToggleWeather => AppAction::ToggleWeather,
+                    TrayAction::ToggleSand => AppAction::ToggleSand,
                     TrayAction::ImportModel => AppAction::RequestImport,
                     TrayAction::Exit => AppAction::Exit,
                 };
@@ -2828,9 +3508,11 @@ enum AppAction {
     SpawnStressCubes,
     SpawnRobotBuddy,
     ToggleSlingshotGame,
+    ToggleBasketballGame,
     Reset,
     ToggleSettings,
-    ToggleForceInteractive,
+    ToggleWeather,
+    ToggleSand,
     RequestImport,
     Exit,
 }
@@ -2887,6 +3569,535 @@ impl SlingshotGame {
             anchor: Vector2::new((bounds.width * 0.18).clamp(95.0, 260.0), bounds.bottom() - 140.0),
             ..Self::default()
         }
+    }
+}
+
+#[derive(Default)]
+struct BasketballGame {
+    active: bool,
+    aiming: bool,
+    ready: bool,
+    score: u32,
+    shots: u32,
+    ball_id: Option<u64>,
+    hoop_id: Option<u64>,
+    tee: Vector2,
+    hoop_center: Vector2,
+    grab_offset: Vector2,
+    launched_at: f64,
+    scored_this_shot: bool,
+    /// Ball center y from the previous frame, used to detect the ball dropping
+    /// through the rim plane.
+    last_ball_y: f32,
+    /// Deepest depth reached during the current shot; distinguishes swishes
+    /// from bank shots.
+    min_depth_this_shot: f32,
+    last_score_at: f64,
+}
+
+impl BasketballGame {
+    fn new(bounds: RectF) -> Self {
+        let geometry = hoop_geometry(BASKETBALL_HOOP_WIDTH, BASKETBALL_HOOP_HEIGHT);
+        let rim_target_y = bounds.height * 0.40;
+        Self {
+            active: true,
+            ready: true,
+            tee: Vector2::new(bounds.width * 0.5, bounds.bottom() - 170.0),
+            hoop_center: Vector2::new(bounds.width * 0.5, rim_target_y - geometry.rim_center_y),
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RainDrop {
+    x: f32,
+    y: f32,
+    speed: f32,
+    length: i32,
+    shade: u8,
+}
+
+#[derive(Debug)]
+struct WeatherWorld {
+    active: bool,
+    rng_state: u64,
+    spawn_credit: f32,
+    drops: Vec<RainDrop>,
+    render_cells: Vec<SandRenderCell>,
+}
+
+impl Default for WeatherWorld {
+    fn default() -> Self {
+        Self {
+            active: false,
+            rng_state: 0xC0FFEE5EED1234AB,
+            spawn_credit: 0.0,
+            drops: Vec::with_capacity(900),
+            render_cells: Vec::with_capacity(900),
+        }
+    }
+}
+
+impl WeatherWorld {
+    const MAX_DROPS: usize = 900;
+    const SPAWN_RATE_PER_SECOND: f32 = 360.0;
+    const WIND_PIXELS_PER_SECOND: f32 = -86.0;
+
+    fn toggle(&mut self, bounds: RectF) -> bool {
+        self.active = !self.active;
+        if self.active && self.drops.is_empty() {
+            for _ in 0..180 {
+                self.spawn_drop(bounds, true);
+            }
+            self.rebuild_render_cells(bounds);
+        } else if !self.active {
+            self.render_cells.clear();
+        }
+        self.active
+    }
+
+    fn clear(&mut self) {
+        self.active = false;
+        self.spawn_credit = 0.0;
+        self.drops.clear();
+        self.render_cells.clear();
+    }
+
+    fn drop_count(&self) -> usize {
+        self.drops.len()
+    }
+
+    fn render_cells(&self) -> &[SandRenderCell] {
+        &self.render_cells
+    }
+
+    fn step(&mut self, dt: f32, bounds: RectF) {
+        let dt = dt.clamp(0.0, 1.0 / 20.0);
+        self.spawn_credit += Self::SPAWN_RATE_PER_SECOND * dt;
+        while self.spawn_credit >= 1.0 && self.drops.len() < Self::MAX_DROPS {
+            self.spawn_credit -= 1.0;
+            self.spawn_drop(bounds, false);
+        }
+
+        let floor = bounds.height + 28.0;
+        let left_edge = -32.0;
+        let mut index = 0;
+        while index < self.drops.len() {
+            let drop = &mut self.drops[index];
+            drop.x += Self::WIND_PIXELS_PER_SECOND * dt;
+            drop.y += drop.speed * dt;
+            if drop.y > floor || drop.x < left_edge {
+                self.drops.swap_remove(index);
+            } else {
+                index += 1;
+            }
+        }
+
+        self.rebuild_render_cells(bounds);
+    }
+
+    fn spawn_drop(&mut self, bounds: RectF, scatter_y: bool) {
+        let width = bounds.width.max(1.0);
+        let x = self.random_range(0.0, width + 80.0);
+        let y = if scatter_y {
+            self.random_range(-bounds.height.max(1.0), 0.0)
+        } else {
+            self.random_range(-80.0, -4.0)
+        };
+        let speed = self.random_range(640.0, 1120.0);
+        let length = self.random_range(9.0, 22.0).round() as i32;
+        let shade = self.next_u32() as u8;
+        self.drops.push(RainDrop {
+            x,
+            y,
+            speed,
+            length,
+            shade,
+        });
+    }
+
+    fn rebuild_render_cells(&mut self, _bounds: RectF) {
+        self.render_cells.clear();
+        self.render_cells.reserve(self.drops.len());
+        for drop in &self.drops {
+            let color = match drop.shade & 3 {
+                0 => AppColor::from_argb(118, 94, 180, 255),
+                1 => AppColor::from_argb(104, 120, 210, 255),
+                2 => AppColor::from_argb(96, 160, 226, 255),
+                _ => AppColor::from_argb(112, 178, 232, 255),
+            };
+            self.render_cells.push(SandRenderCell {
+                x: drop.x.round() as i32,
+                y: drop.y.round() as i32,
+                width: 1,
+                height: drop.length,
+                color,
+            });
+        }
+    }
+
+    fn random_range(&mut self, min: f32, max: f32) -> f32 {
+        min + (max - min) * self.next_unit()
+    }
+
+    fn next_unit(&mut self) -> f32 {
+        let value = self.next_u32();
+        value as f32 / u32::MAX as f32
+    }
+
+    fn next_u32(&mut self) -> u32 {
+        self.rng_state = self
+            .rng_state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.rng_state >> 32) as u32
+    }
+}
+
+#[derive(Debug)]
+struct SandWorld {
+    active: bool,
+    cell_size: i32,
+    width: usize,
+    height: usize,
+    frame: u64,
+    occupied_count: usize,
+    settled_frames: u8,
+    render_dirty: bool,
+    min_x: usize,
+    max_x: usize,
+    min_y: usize,
+    max_y: usize,
+    cells: Vec<u8>,
+    render_cells: Vec<SandRenderCell>,
+}
+
+impl Default for SandWorld {
+    fn default() -> Self {
+        Self {
+            active: false,
+            cell_size: 1,
+            width: 0,
+            height: 0,
+            frame: 0,
+            occupied_count: 0,
+            settled_frames: 0,
+            render_dirty: false,
+            min_x: 0,
+            max_x: 0,
+            min_y: 0,
+            max_y: 0,
+            cells: Vec::new(),
+            render_cells: Vec::new(),
+        }
+    }
+}
+
+impl SandWorld {
+    fn toggle(&mut self, bounds: RectF) -> bool {
+        self.active = !self.active;
+        self.ensure_grid(bounds);
+        if !self.active {
+            self.render_cells.clear();
+        } else {
+            self.render_dirty = true;
+            self.settled_frames = 0;
+        }
+        self.active
+    }
+
+    fn clear(&mut self) {
+        self.cells.fill(0);
+        self.render_cells.clear();
+        self.frame = 0;
+        self.occupied_count = 0;
+        self.settled_frames = 0;
+        self.render_dirty = false;
+        self.reset_bounds();
+        self.active = false;
+    }
+
+    fn occupied_count(&self) -> usize {
+        self.occupied_count
+    }
+
+    fn render_cells(&self) -> &[SandRenderCell] {
+        &self.render_cells
+    }
+
+    fn emit_at(&mut self, cursor: Vector2, bounds: RectF) {
+        self.ensure_grid(bounds);
+        if self.width == 0 || self.height == 0 {
+            return;
+        }
+        let (center_x, center_y) = self.cursor_cell(cursor);
+        let radius = 10;
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx * dx + dy * dy > radius * radius {
+                    continue;
+                }
+                let x = center_x + dx;
+                let y = center_y + dy;
+                if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+                    continue;
+                }
+                let idx = self.index(x as usize, y as usize);
+                if self.cells[idx] == 0 {
+                    self.cells[idx] = 1 + (((x * 17 + y * 31 + self.frame as i32) & 3) as u8);
+                    self.occupied_count += 1;
+                    self.include_cell(x as usize, y as usize);
+                    self.render_dirty = true;
+                    self.settled_frames = 0;
+                }
+            }
+        }
+    }
+
+    fn erase_at(&mut self, cursor: Vector2, bounds: RectF) {
+        self.ensure_grid(bounds);
+        if self.width == 0 || self.height == 0 {
+            return;
+        }
+        let (center_x, center_y) = self.cursor_cell(cursor);
+        let radius = 18;
+        for dy in -radius..=radius {
+            for dx in -radius..=radius {
+                if dx * dx + dy * dy > radius * radius {
+                    continue;
+                }
+                let x = center_x + dx;
+                let y = center_y + dy;
+                if x < 0 || y < 0 || x >= self.width as i32 || y >= self.height as i32 {
+                    continue;
+                }
+                let idx = self.index(x as usize, y as usize);
+                if self.cells[idx] != 0 {
+                    self.cells[idx] = 0;
+                    self.occupied_count = self.occupied_count.saturating_sub(1);
+                    self.render_dirty = true;
+                    self.settled_frames = 0;
+                }
+            }
+        }
+    }
+
+    fn cursor_cell(&self, cursor: Vector2) -> (i32, i32) {
+        (
+            (cursor.x / self.cell_size as f32).round() as i32,
+            (cursor.y / self.cell_size as f32).round() as i32,
+        )
+    }
+
+    fn step(&mut self, bounds: RectF) {
+        self.ensure_grid(bounds);
+        if self.width == 0 || self.height == 0 {
+            return;
+        }
+        if self.occupied_count == 0 {
+            self.render_cells.clear();
+            self.render_dirty = false;
+            self.settled_frames = 0;
+            self.reset_bounds();
+            return;
+        }
+        if self.settled_frames > 8 && !self.render_dirty {
+            return;
+        }
+
+        let mut moved = false;
+        for _ in 0..2 {
+            self.frame = self.frame.wrapping_add(1);
+            let scan_min_x = self.min_x.saturating_sub(1);
+            let scan_max_x = (self.max_x + 1).min(self.width - 1);
+            let scan_min_y = self.min_y.saturating_sub(1);
+            let scan_max_y = (self.max_y + 2).min(self.height.saturating_sub(2));
+            if scan_min_y > scan_max_y || scan_min_x > scan_max_x {
+                continue;
+            }
+
+            for y in (scan_min_y..=scan_max_y).rev() {
+                let left_to_right = ((y as u64 + self.frame) & 1) == 0;
+                let scan_width = scan_max_x - scan_min_x + 1;
+                for offset in 0..scan_width {
+                    let x = if left_to_right {
+                        scan_min_x + offset
+                    } else {
+                        scan_max_x - offset
+                    };
+                    let idx = self.index(x, y);
+                    let grain = self.cells[idx];
+                    if grain == 0 {
+                        continue;
+                    }
+                    let below = self.index(x, y + 1);
+                    if self.cells[below] == 0 {
+                        self.cells[below] = grain;
+                        self.cells[idx] = 0;
+                        self.include_cell(x, y + 1);
+                        moved = true;
+                        continue;
+                    }
+
+                    let prefer_left = ((x as u64 * 13 + y as u64 * 7 + self.frame) & 1) == 0;
+                    let first = if prefer_left { -1 } else { 1 };
+                    let second = -first;
+                    if self.try_slide(idx, x, y, first, grain) || self.try_slide(idx, x, y, second, grain) {
+                        moved = true;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        if moved {
+            self.settled_frames = 0;
+            self.render_dirty = true;
+        } else {
+            self.settled_frames = self.settled_frames.saturating_add(1);
+        }
+
+        if self.render_dirty {
+            self.rebuild_render_cells();
+        }
+    }
+
+    fn try_slide(&mut self, from: usize, x: usize, y: usize, dx: i32, grain: u8) -> bool {
+        let next_x = x as i32 + dx;
+        if next_x < 0 || next_x >= self.width as i32 {
+            return false;
+        }
+        let to = self.index(next_x as usize, y + 1);
+        if self.cells[to] != 0 {
+            return false;
+        }
+        self.cells[to] = grain;
+        self.cells[from] = 0;
+        self.include_cell(next_x as usize, y + 1);
+        true
+    }
+
+    fn ensure_grid(&mut self, bounds: RectF) {
+        let width = ((bounds.width.max(1.0) / self.cell_size as f32).ceil() as usize).max(1);
+        let height = ((bounds.height.max(1.0) / self.cell_size as f32).ceil() as usize).max(1);
+        if width == self.width && height == self.height {
+            return;
+        }
+        self.width = width;
+        self.height = height;
+        self.cells = vec![0; width * height];
+        self.render_cells.clear();
+        self.occupied_count = 0;
+        self.settled_frames = 0;
+        self.render_dirty = false;
+        self.reset_bounds();
+    }
+
+    fn rebuild_render_cells(&mut self) {
+        self.render_cells.clear();
+        if self.occupied_count == 0 {
+            self.render_dirty = false;
+            self.reset_bounds();
+            return;
+        }
+
+        let mut found_count = 0usize;
+        let mut found_any = false;
+        let mut next_min_x = usize::MAX;
+        let mut next_min_y = usize::MAX;
+        let mut next_max_x = 0usize;
+        let mut next_max_y = 0usize;
+        let scan_min_x = self.min_x.min(self.width - 1);
+        let scan_max_x = self.max_x.min(self.width - 1);
+        let scan_min_y = self.min_y.min(self.height - 1);
+        let scan_max_y = self.max_y.min(self.height - 1);
+        self.render_cells
+            .reserve((scan_max_y.saturating_sub(scan_min_y) + 1).max(64));
+
+        for y in scan_min_y..=scan_max_y {
+            let mut x = scan_min_x;
+            while x <= scan_max_x {
+                let grain = self.cells[self.index(x, y)];
+                if grain == 0 {
+                    x += 1;
+                    continue;
+                }
+
+                let start_x = x;
+                let mut run_len = 0usize;
+                while x <= scan_max_x && self.cells[self.index(x, y)] != 0 {
+                    run_len += 1;
+                    x += 1;
+                }
+                let end_x = x - 1;
+                found_count += run_len;
+                found_any = true;
+                next_min_x = next_min_x.min(start_x);
+                next_max_x = next_max_x.max(end_x);
+                next_min_y = next_min_y.min(y);
+                next_max_y = next_max_y.max(y);
+
+                self.render_cells.push(SandRenderCell {
+                    x: start_x as i32 * self.cell_size,
+                    y: y as i32 * self.cell_size,
+                    width: run_len as i32 * self.cell_size,
+                    height: self.cell_size,
+                    color: sand_span_color(start_x, y, run_len, grain),
+                });
+            }
+        }
+
+        if found_any {
+            self.min_x = next_min_x;
+            self.max_x = next_max_x;
+            self.min_y = next_min_y;
+            self.max_y = next_max_y;
+            self.occupied_count = found_count;
+        } else {
+            self.occupied_count = 0;
+            self.reset_bounds();
+        }
+        self.render_dirty = false;
+    }
+
+    fn index(&self, x: usize, y: usize) -> usize {
+        y * self.width + x
+    }
+
+    fn include_cell(&mut self, x: usize, y: usize) {
+        if self.occupied_count <= 1 && self.render_cells.is_empty() {
+            self.min_x = x;
+            self.max_x = x;
+            self.min_y = y;
+            self.max_y = y;
+            return;
+        }
+        self.min_x = self.min_x.min(x);
+        self.max_x = self.max_x.max(x);
+        self.min_y = self.min_y.min(y);
+        self.max_y = self.max_y.max(y);
+    }
+
+    fn reset_bounds(&mut self) {
+        self.min_x = 0;
+        self.max_x = 0;
+        self.min_y = 0;
+        self.max_y = 0;
+    }
+}
+
+fn sand_span_color(start_x: usize, y: usize, len: usize, grain: u8) -> AppColor {
+    let shade = 1 + (((start_x as u64 * 17 + y as u64 * 31 + len as u64 * 7 + grain as u64) & 3) as u8);
+    sand_color(shade)
+}
+
+fn sand_color(grain: u8) -> AppColor {
+    match grain {
+        1 => AppColor::from_rgb(236, 197, 98),
+        2 => AppColor::from_rgb(224, 176, 76),
+        3 => AppColor::from_rgb(247, 215, 126),
+        _ => AppColor::from_rgb(201, 150, 64),
     }
 }
 

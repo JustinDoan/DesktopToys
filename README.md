@@ -1,66 +1,41 @@
-# ScreenOverlayPhysics
+# ScreenOverlayPhysics Native
 
-Transparent WPF desktop overlay with 2D rigid-body-style motion and 3D-rendered objects.
+Transparent native Rust desktop overlay with physics-driven screen toys, Direct3D/DirectComposition on Windows, and a WGPU fallback on other platforms.
 
 ## Requirements
 
 - Windows
-- .NET 9 SDK
+- Rust toolchain
 
 ## Run
 
 ```powershell
-dotnet run --project .\ScreenOverlayPhysics.csproj
+cd native
+cargo run -p app
 ```
 
 ## Controls
 
 - `F1`: toggle debug overlay
-- `F2`: spawn another cube
+- `F2`: spawn the next catalog object
 - `F3`: reset scene
 - `F4`: open runtime settings
 - `F5`: force interactive overlay mode
+- `F6`: import a 3D model
+- `F7`: spawn a crystal
+- `F8`: spawn a DVD logo
+- `F9`: spawn a batch of boxes
+- `F10`: toggle slingshot game
+- `F11`: spawn robot buddy
+- `F12`: toggle basketball
 - `Esc`: quit
 
 ## Project map
 
-- `MainWindow.xaml.cs`: overlay/input loop, hotkeys, settings/tray integration
-- `Scene/SceneController.cs`: scene bootstrap, object spawning, reset flow, runtime physics config sync
-- `Rendering/SceneRenderer.cs`: camera, visual creation, per-frame visual updates, 3D hit testing
-- `Rendering/CubeVisual3D.cs`: colored cube visual
-- `Rendering/DiceVisual3D.cs`: dice visual with pip-marked faces
-- `Physics/PhysicsWorld.cs`: frame integration pipeline
-- `Physics/CollisionSolver.cs`: screen-bound and object-object collision resolution
-- `Models/ObjectState.cs`: per-object render/physics metadata
-
-## Common modifications
-
-### Add or remove startup objects
-
-Edit `InitialScene` in `Scene/SceneController.cs`.
-
-- `ObjectVisualKind.Cube` creates a standard colored cube
-- `ObjectVisualKind.Dice` creates the dice visual
-- `Color` is optional for cubes and explicit for special cases like the dice
-
-### Change spawn behavior
-
-Edit:
-
-- `SpawnObject()` in `Scene/SceneController.cs` for default size/mass/restitution/damping
-- `CubePalette` in `Scene/SceneController.cs` for the `F2` spawn color cycle
-
-### Add a new visual type
-
-1. Add a new `ObjectVisualKind` value in `Models/ObjectState.cs`
-2. Implement `ISceneObjectVisual3D` or derive from `SceneObjectVisual3DBase` in `Rendering/`
-3. Register the visual in `CreateVisual()` in `Rendering/SceneRenderer.cs`
-4. Seed or spawn it from `Scene/SceneController.cs`
-
-### Change collision behavior
-
-Edit:
-
-- `PhysicsWorld.Step()` to change solver order or integration flow
-- `CollisionSolver.ResolveObjectPair()` to change cube-cube response
-- `CollisionSolver.SolveScreenBounds()` to change wall/floor behavior
+- `native/app/src/main.rs`: native app shell, hotkeys, tray actions, HUD/game state
+- `native/scene_logic/src/lib.rs`: object spawning, drag logic, scene reset flow
+- `native/physics_core/src/lib.rs`: physics world integration and Box3D bridge
+- `native/renderer/src/lib.rs`: mesh generation and overlay rendering
+- `native/native_shell/src/lib.rs`: platform window/input/tray helpers
+- `native/core_types/src/lib.rs`: shared object, body, color, and config types
+- `Assets/`: runtime and compile-time visual assets used by the native crates

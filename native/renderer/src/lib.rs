@@ -27,11 +27,21 @@ pub struct HudState {
     pub panels: Vec<OverlayPanel>,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct SandRenderCell {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+    pub color: AppColor,
+}
+
 pub struct RenderScene<'a> {
     pub bounds: RectF,
     pub elapsed_seconds: f64,
     pub objects: &'a [ObjectState],
-    pub cursor: Vector2,
+    pub sand_cells: &'a [SandRenderCell],
+    pub weather_cells: &'a [SandRenderCell],
     pub hud: &'a HudState,
 }
 
@@ -315,7 +325,7 @@ impl SceneRenderer {
     pub fn build_vertices(&mut self, width: u32, height: u32, scene: &RenderScene<'_>) -> Result<&[GpuVertex]> {
         let mut vertices = mem::take(&mut self.vertices);
         vertices.clear();
-        vertices.reserve(scene.objects.len() * 36 + 4096);
+        vertices.reserve(scene.objects.len() * 36 + (scene.sand_cells.len() + scene.weather_cells.len()) * 6 + 4096);
         for object in scene.objects {
             if object.visual_kind == ObjectVisualKind::FoxBuddy {
                 let mesh = fox_buddy_animated_mesh(
@@ -343,7 +353,8 @@ impl SceneRenderer {
             }
         }
 
-        emit_cursor(&mut vertices, width, height, scene.cursor);
+        emit_sand(&mut vertices, width, height, scene.sand_cells);
+        emit_sand(&mut vertices, width, height, scene.weather_cells);
         emit_panels(&mut vertices, width, height, scene.hud);
         self.vertices = vertices;
         Ok(&self.vertices)
@@ -365,6 +376,7 @@ impl SceneRenderer {
             ObjectVisualKind::Crystal => self.generated_mesh(key, || crystal_mesh(size, object.base_color)),
             ObjectVisualKind::Satellite => self.generated_mesh(key, || satellite_mesh(size, object.base_color)),
             ObjectVisualKind::Ball => self.generated_mesh(key, || ball_mesh(size, object.base_color)),
+            ObjectVisualKind::SoftBall => self.generated_mesh(key, || soft_ball_mesh(size, object.base_color)),
             ObjectVisualKind::Pyramid => self.generated_mesh(key, || pyramid_mesh(size, object.base_color)),
             ObjectVisualKind::Barrel => self.generated_mesh(key, || barrel_mesh(size, object.base_color)),
             ObjectVisualKind::Ring => self.generated_mesh(key, || ring_mesh(size, object.base_color)),
@@ -375,6 +387,10 @@ impl SceneRenderer {
             ObjectVisualKind::GameTarget => self.generated_mesh(key, || target_mesh(size, object.base_color)),
             ObjectVisualKind::FoxBuddy => self.generated_mesh(key, || fox_buddy_mesh(size)),
             ObjectVisualKind::RobotBuddy => self.generated_mesh(key, || robot_buddy_mesh(size, object.base_color)),
+            ObjectVisualKind::Basketball => self.generated_mesh(key, || basketball_mesh(size)),
+            ObjectVisualKind::BasketballHoop => self.generated_mesh(key, || {
+                basketball_hoop_mesh(object.body.width.max(1.0), object.body.height.max(1.0))
+            }),
             ObjectVisualKind::DvdLogo => self.generated_mesh(key, || {
                 dvd_logo_mesh(object.body.width.max(1.0), object.body.height.max(1.0), object.base_color)
             }),
@@ -421,15 +437,18 @@ impl MeshCacheKey {
                 ObjectVisualKind::Satellite => 3,
                 ObjectVisualKind::DvdLogo => 4,
                 ObjectVisualKind::Ball => 5,
-                ObjectVisualKind::Pyramid => 6,
-                ObjectVisualKind::Barrel => 7,
-                ObjectVisualKind::Ring => 8,
-                ObjectVisualKind::Star => 9,
-                ObjectVisualKind::GamePlank => 10,
-                ObjectVisualKind::GameTarget => 11,
-                ObjectVisualKind::FoxBuddy => 12,
-                ObjectVisualKind::RobotBuddy => 13,
-                ObjectVisualKind::ImportedModel => 14,
+                ObjectVisualKind::SoftBall => 6,
+                ObjectVisualKind::Pyramid => 7,
+                ObjectVisualKind::Barrel => 8,
+                ObjectVisualKind::Ring => 9,
+                ObjectVisualKind::Star => 10,
+                ObjectVisualKind::GamePlank => 11,
+                ObjectVisualKind::GameTarget => 12,
+                ObjectVisualKind::FoxBuddy => 13,
+                ObjectVisualKind::RobotBuddy => 14,
+                ObjectVisualKind::ImportedModel => 15,
+                ObjectVisualKind::Basketball => 16,
+                ObjectVisualKind::BasketballHoop => 17,
             },
             width_milli: quantize_size(object.body.width.max(1.0)),
             height_milli: quantize_size(object.body.height.max(1.0)),
@@ -457,6 +476,12 @@ fn emit_panels(vertices: &mut Vec<GpuVertex>, width: u32, height: u32, hud: &Hud
     for panel in &hud.panels {
         emit_panel(vertices, width, height, 12, top, &panel.title, &panel.lines, &panel.footer);
         top += ((panel.lines.len() + panel.footer.len() + 2) as i32 * 12).max(72) + 10;
+    }
+}
+
+fn emit_sand(vertices: &mut Vec<GpuVertex>, width: u32, height: u32, cells: &[SandRenderCell]) {
+    for cell in cells {
+        emit_rect(vertices, width, height, cell.x, cell.y, cell.width, cell.height, cell.color, 0.028);
     }
 }
 
@@ -558,33 +583,6 @@ fn emit_panel(
     }
 }
 
-fn emit_cursor(vertices: &mut Vec<GpuVertex>, width: u32, height: u32, cursor: Vector2) {
-    let x = cursor.x.round() as i32;
-    let y = cursor.y.round() as i32;
-    emit_rect(
-        vertices,
-        width,
-        height,
-        x - 1,
-        y - 10,
-        3,
-        21,
-        AppColor::from_argb(220, 255, 255, 255),
-        0.01,
-    );
-    emit_rect(
-        vertices,
-        width,
-        height,
-        x - 10,
-        y - 1,
-        21,
-        3,
-        AppColor::from_argb(220, 255, 255, 255),
-        0.01,
-    );
-}
-
 fn emit_draw_triangle(vertices: &mut Vec<GpuVertex>, triangle: DrawTriangle) {
     let color = color_to_f32(triangle.color, triangle.alpha);
     for point in triangle.points {
@@ -611,25 +609,33 @@ fn emit_rect(
     let right = (x + w) as f32;
     let bottom = (y + h) as f32;
     let z = screen_overlay_z(depth);
-    let p0 = Vec3::new(left, top, z);
-    let p1 = Vec3::new(right, top, z);
-    let p2 = Vec3::new(right, bottom, z);
-    let p3 = Vec3::new(left, bottom, z);
-    let alpha = color.a;
-    let draw = DrawTriangle {
-        points: [p0, p1, p2],
-        color,
-        alpha,
-    };
-    emit_draw_triangle(vertices, draw);
-    emit_draw_triangle(
-        vertices,
-        DrawTriangle {
-            points: [p0, p2, p3],
+    let color = color_to_f32(color, color.a);
+    vertices.extend_from_slice(&[
+        GpuVertex {
+            position: [left, top, z],
             color,
-            alpha,
         },
-    );
+        GpuVertex {
+            position: [right, top, z],
+            color,
+        },
+        GpuVertex {
+            position: [right, bottom, z],
+            color,
+        },
+        GpuVertex {
+            position: [left, top, z],
+            color,
+        },
+        GpuVertex {
+            position: [right, bottom, z],
+            color,
+        },
+        GpuVertex {
+            position: [left, bottom, z],
+            color,
+        },
+    ]);
 }
 
 fn emit_rect_outline(
@@ -732,6 +738,16 @@ fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds
         ObjectVisualKind::Ball => {
             center_z += 10.0;
         },
+        ObjectVisualKind::SoftBall => {
+            let speed = object.body.velocity.length_squared().sqrt();
+            let wobble = ((elapsed_seconds * 10.5) + phase).sin() as f32;
+            let impact = soft_impact_amount(object, bounds);
+            let stretch = (speed / 1900.0).min(1.0);
+            center_z += 9.0 + wobble * (1.0 + stretch * 3.0);
+            scale_x *= 1.0 + stretch * 0.13 + impact * 0.18 + wobble * 0.025;
+            scale_y *= 1.0 - stretch * 0.05 - impact * 0.22 - wobble * 0.018;
+            rotation_z += (object.body.velocity.x as f64 * 0.012).clamp(-8.0, 8.0);
+        },
         ObjectVisualKind::Pyramid => {
             center_z += 6.0;
         },
@@ -778,9 +794,15 @@ fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds
         ObjectVisualKind::ImportedModel => {
             center_z += 12.0;
         },
+        ObjectVisualKind::Basketball => {
+            center_z += 10.0;
+        },
+        ObjectVisualKind::BasketballHoop => {},
         ObjectVisualKind::DvdLogo => {},
         ObjectVisualKind::Cube => {},
     }
+
+    center_z += object.depth_z;
 
     VisualTransform {
         center_x,
@@ -799,6 +821,14 @@ fn compute_impact_scale(object: &ObjectState, bounds: RectF) -> f32 {
         0.96
     } else {
         1.0
+    }
+}
+
+fn soft_impact_amount(object: &ObjectState, bounds: RectF) -> f32 {
+    if object.body.position.y + object.body.height >= bounds.bottom() - 2.0 {
+        (object.body.velocity.y.abs() / 1500.0).min(1.0)
+    } else {
+        0.0
     }
 }
 
@@ -1143,6 +1173,32 @@ fn ball_mesh(size: f32, base_color: AppColor) -> Mesh {
     Mesh { triangles }
 }
 
+fn soft_ball_mesh(size: f32, base_color: AppColor) -> Mesh {
+    let mut mesh = ball_mesh(size, base_color);
+    let face_z = size * 0.43;
+    let glow = scale_color(base_color, 1.24);
+    let shade = scale_color(base_color, 0.58);
+    add_disk(
+        &mut mesh.triangles,
+        Vec3::new(-size * 0.16, -size * 0.18, face_z + 1.2),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+        size * 0.16,
+        glow,
+        false,
+    );
+    add_disk(
+        &mut mesh.triangles,
+        Vec3::new(size * 0.18, size * 0.20, face_z + 0.7),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+        size * 0.12,
+        shade,
+        false,
+    );
+    mesh
+}
+
 fn target_mesh(size: f32, base_color: AppColor) -> Mesh {
     let mut mesh = ball_mesh(size, base_color);
     let face_z = size * 0.44;
@@ -1176,6 +1232,245 @@ fn target_mesh(size: f32, base_color: AppColor) -> Mesh {
         true,
     );
     mesh
+}
+
+/// Geometry of the basketball hoop mesh, in object-local units. The app uses
+/// this for scoring so gameplay stays in sync with the rendered model.
+/// Local axes match the mesh space: +y is down the screen, +z is toward the
+/// viewer.
+#[derive(Clone, Copy, Debug)]
+pub struct HoopGeometry {
+    pub backboard_width: f32,
+    pub backboard_height: f32,
+    pub backboard_center_y: f32,
+    pub backboard_front_z: f32,
+    pub rim_radius: f32,
+    pub rim_center_y: f32,
+    pub rim_center_z: f32,
+}
+
+pub fn hoop_geometry(width: f32, height: f32) -> HoopGeometry {
+    let backboard_width = width * 0.92;
+    let backboard_height = height * 0.52;
+    let backboard_center_y = -height * 0.20;
+    let backboard_front_z = -18.0;
+    let rim_radius = width * 0.21;
+    HoopGeometry {
+        backboard_width,
+        backboard_height,
+        backboard_center_y,
+        backboard_front_z,
+        rim_radius,
+        rim_center_y: backboard_center_y + (backboard_height * 0.5) - 4.0,
+        rim_center_z: backboard_front_z + rim_radius + 8.0,
+    }
+}
+
+fn basketball_mesh(size: f32) -> Mesh {
+    let base_color = AppColor::from_rgb(235, 122, 48);
+    let seam_color = AppColor::from_rgb(96, 48, 26);
+    let mut mesh = ball_mesh(size, base_color);
+    let seam_radius = size * 0.5 * 1.015;
+    let seam_half_width = (size * 0.024).max(1.2);
+
+    // Equator seam plus two vertical seams through the poles.
+    let seams = [
+        (Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 1.0, 0.0)),
+        (Vec3::new(0.0, 1.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)),
+        (Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 0.0, 0.0)),
+    ];
+    for (axis_u, axis_v, normal) in seams {
+        add_seam_band(
+            &mut mesh.triangles,
+            seam_radius,
+            seam_half_width,
+            axis_u,
+            axis_v,
+            normal,
+            seam_color,
+        );
+    }
+
+    mesh
+}
+
+fn add_seam_band(
+    triangles: &mut Vec<SourceTriangle>,
+    radius: f32,
+    half_width: f32,
+    axis_u: Vec3,
+    axis_v: Vec3,
+    normal: Vec3,
+    color: AppColor,
+) {
+    const SEGMENTS: usize = 26;
+    let circle_point = |angle: f32, side: f32| {
+        let (sin, cos) = angle.sin_cos();
+        Vec3::new(
+            radius * (axis_u.x * cos + axis_v.x * sin) + normal.x * half_width * side,
+            radius * (axis_u.y * cos + axis_v.y * sin) + normal.y * half_width * side,
+            radius * (axis_u.z * cos + axis_v.z * sin) + normal.z * half_width * side,
+        )
+    };
+
+    for i in 0..SEGMENTS {
+        let a0 = std::f32::consts::TAU * (i as f32 / SEGMENTS as f32);
+        let a1 = std::f32::consts::TAU * ((i + 1) as f32 / SEGMENTS as f32);
+        let p00 = circle_point(a0, -1.0);
+        let p01 = circle_point(a0, 1.0);
+        let p10 = circle_point(a1, -1.0);
+        let p11 = circle_point(a1, 1.0);
+        triangles.push(SourceTriangle { vertices: [p00, p10, p11], color, alpha: 255 });
+        triangles.push(SourceTriangle { vertices: [p00, p11, p01], color, alpha: 255 });
+    }
+}
+
+fn basketball_hoop_mesh(width: f32, height: f32) -> Mesh {
+    let geometry = hoop_geometry(width, height);
+    let mut triangles = Vec::new();
+
+    let board_color = AppColor::from_rgb(222, 229, 238);
+    let frame_color = AppColor::from_rgb(112, 124, 138);
+    let square_color = AppColor::from_rgb(255, 118, 44);
+    let rim_color = AppColor::from_rgb(252, 88, 38);
+    let net_color = AppColor::from_rgb(242, 246, 252);
+
+    let board_thickness = 16.0;
+    append_mesh_offset(
+        &mut triangles,
+        rectangular_prism_mesh(
+            geometry.backboard_width,
+            geometry.backboard_height,
+            board_thickness,
+            board_color,
+        ),
+        Vec3::new(0.0, geometry.backboard_center_y, geometry.backboard_front_z - board_thickness * 0.5),
+    );
+
+    // Outer frame and shooter square painted as thin slabs on the front face.
+    let face_z = geometry.backboard_front_z + 2.5;
+    let frame_thickness = (width * 0.028).max(6.0);
+    add_rect_outline_slabs(
+        &mut triangles,
+        geometry.backboard_width,
+        geometry.backboard_height,
+        Vec3::new(0.0, geometry.backboard_center_y, face_z),
+        frame_thickness,
+        frame_color,
+    );
+    let square_width = geometry.rim_radius * 2.15;
+    let square_height = geometry.rim_radius * 1.5;
+    add_rect_outline_slabs(
+        &mut triangles,
+        square_width,
+        square_height,
+        Vec3::new(0.0, geometry.rim_center_y - square_height * 0.62, face_z + 1.5),
+        frame_thickness * 0.8,
+        square_color,
+    );
+
+    // Rim: horizontal torus protruding from the board toward the viewer.
+    const RIM_MAJOR_SEGMENTS: usize = 24;
+    const RIM_MINOR_SEGMENTS: usize = 8;
+    let rim_tube_radius = (width * 0.024).max(4.0);
+    for i in 0..RIM_MAJOR_SEGMENTS {
+        let a0 = std::f32::consts::TAU * (i as f32 / RIM_MAJOR_SEGMENTS as f32);
+        let a1 = std::f32::consts::TAU * ((i + 1) as f32 / RIM_MAJOR_SEGMENTS as f32);
+        for j in 0..RIM_MINOR_SEGMENTS {
+            let b0 = std::f32::consts::TAU * (j as f32 / RIM_MINOR_SEGMENTS as f32);
+            let b1 = std::f32::consts::TAU * ((j + 1) as f32 / RIM_MINOR_SEGMENTS as f32);
+            let offset = Vec3::new(0.0, geometry.rim_center_y, geometry.rim_center_z);
+            let point = |a: f32, b: f32| {
+                let p = torus_point(geometry.rim_radius, rim_tube_radius, a, b);
+                Vec3::new(p.x + offset.x, p.y + offset.y, p.z + offset.z)
+            };
+            let shade = 0.78 + (b0.cos().max(0.0) * 0.32);
+            let color = scale_color(rim_color, shade);
+            triangles.push(SourceTriangle {
+                vertices: [point(a0, b0), point(a1, b0), point(a1, b1)],
+                color,
+                alpha: 255,
+            });
+            triangles.push(SourceTriangle {
+                vertices: [point(a0, b0), point(a1, b1), point(a0, b1)],
+                color,
+                alpha: 255,
+            });
+        }
+    }
+
+    // Mount bracket connecting rim to the board.
+    append_mesh_offset(
+        &mut triangles,
+        rectangular_prism_mesh(geometry.rim_radius * 0.5, 8.0, geometry.rim_center_z - geometry.backboard_front_z, rim_color),
+        Vec3::new(
+            0.0,
+            geometry.rim_center_y,
+            geometry.backboard_front_z + (geometry.rim_center_z - geometry.backboard_front_z) * 0.5,
+        ),
+    );
+
+    // Net: criss-crossing translucent strands tapering below the rim.
+    const NET_STRANDS: usize = 12;
+    let net_top_radius = geometry.rim_radius * 0.94;
+    let net_bottom_radius = geometry.rim_radius * 0.52;
+    let net_top_y = geometry.rim_center_y + 3.0;
+    let net_bottom_y = geometry.rim_center_y + height * 0.20;
+    let strand_arc = 0.085f32;
+    let net_point = |angle: f32, radius: f32, y: f32| {
+        Vec3::new(radius * angle.cos(), y, geometry.rim_center_z + radius * angle.sin())
+    };
+    for k in 0..NET_STRANDS {
+        let top_angle = std::f32::consts::TAU * (k as f32 / NET_STRANDS as f32);
+        for direction in [1.0f32, -1.0f32] {
+            let bottom_angle = top_angle + direction * std::f32::consts::TAU / NET_STRANDS as f32;
+            let t0 = net_point(top_angle, net_top_radius, net_top_y);
+            let t1 = net_point(top_angle + strand_arc, net_top_radius, net_top_y);
+            let b0 = net_point(bottom_angle, net_bottom_radius, net_bottom_y);
+            let b1 = net_point(bottom_angle + strand_arc, net_bottom_radius, net_bottom_y);
+            triangles.push(SourceTriangle { vertices: [t0, b0, b1], color: net_color, alpha: 176 });
+            triangles.push(SourceTriangle { vertices: [t0, b1, t1], color: net_color, alpha: 176 });
+        }
+    }
+    // Bottom loop of the net.
+    for k in 0..NET_STRANDS {
+        let a0 = std::f32::consts::TAU * (k as f32 / NET_STRANDS as f32);
+        let a1 = std::f32::consts::TAU * ((k + 1) as f32 / NET_STRANDS as f32);
+        let p0 = net_point(a0, net_bottom_radius, net_bottom_y);
+        let p1 = net_point(a1, net_bottom_radius, net_bottom_y);
+        let p2 = net_point(a1, net_bottom_radius * 0.98, net_bottom_y + 5.0);
+        let p3 = net_point(a0, net_bottom_radius * 0.98, net_bottom_y + 5.0);
+        triangles.push(SourceTriangle { vertices: [p0, p1, p2], color: net_color, alpha: 190 });
+        triangles.push(SourceTriangle { vertices: [p0, p2, p3], color: net_color, alpha: 190 });
+    }
+
+    Mesh { triangles }
+}
+
+fn add_rect_outline_slabs(
+    triangles: &mut Vec<SourceTriangle>,
+    width: f32,
+    height: f32,
+    center: Vec3,
+    thickness: f32,
+    color: AppColor,
+) {
+    let slab_depth = 3.0;
+    let horizontal = [
+        (0.0, -(height - thickness) * 0.5, width, thickness),
+        (0.0, (height - thickness) * 0.5, width, thickness),
+    ];
+    let vertical = [
+        (-(width - thickness) * 0.5, 0.0, thickness, height - thickness * 2.0),
+        ((width - thickness) * 0.5, 0.0, thickness, height - thickness * 2.0),
+    ];
+    for (dx, dy, w, h) in horizontal.into_iter().chain(vertical) {
+        append_mesh_offset(
+            triangles,
+            rectangular_prism_mesh(w, h, slab_depth, color),
+            Vec3::new(center.x + dx, center.y + dy, center.z),
+        );
+    }
 }
 
 fn robot_buddy_mesh(size: f32, base_color: AppColor) -> Mesh {

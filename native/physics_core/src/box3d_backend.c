@@ -1,9 +1,17 @@
 #include "box3d_backend.h"
 
 #include <box3d/box3d.h>
+#include <box3d/math_functions.h>
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+
+#if defined( _WIN32 )
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#elif defined( __unix__ ) || defined( __APPLE__ )
+#include <unistd.h>
+#endif
 
 typedef struct SopBox3dBody
 {
@@ -28,24 +36,25 @@ struct SopBox3dWorld
     float gravityY;
 };
 
-static b3Vec3 to_world_center(const SopBox3dWorld* world, float x, float y, float width, float height)
+static b3Vec3 to_world_center(const SopBox3dWorld* world, float x, float y, float width, float height, float z)
 {
     return (b3Vec3){
         (x + width * 0.5f) / world->pixelsPerMeter,
         (world->boundsHeight - (y + height * 0.5f)) / world->pixelsPerMeter,
-        0.0f
+        z / world->pixelsPerMeter
     };
 }
 
-static void from_world_center(const SopBox3dWorld* world, b3Vec3 center, float width, float height, float* x, float* y)
+static void from_world_center(const SopBox3dWorld* world, b3Vec3 center, float width, float height, float* x, float* y, float* z)
 {
     *x = center.x * world->pixelsPerMeter - width * 0.5f;
     *y = world->boundsHeight - center.y * world->pixelsPerMeter - height * 0.5f;
+    *z = center.z * world->pixelsPerMeter;
 }
 
-static b3Vec3 to_world_velocity(const SopBox3dWorld* world, float x, float y)
+static b3Vec3 to_world_velocity(const SopBox3dWorld* world, float x, float y, float z)
 {
-    return (b3Vec3){ x / world->pixelsPerMeter, -y / world->pixelsPerMeter, 0.0f };
+    return (b3Vec3){ x / world->pixelsPerMeter, -y / world->pixelsPerMeter, z / world->pixelsPerMeter };
 }
 
 static float to_world_velocity_x(const SopBox3dWorld* world, float x)
@@ -53,10 +62,11 @@ static float to_world_velocity_x(const SopBox3dWorld* world, float x)
     return x / world->pixelsPerMeter;
 }
 
-static void from_world_velocity(const SopBox3dWorld* world, b3Vec3 velocity, float* x, float* y)
+static void from_world_velocity(const SopBox3dWorld* world, b3Vec3 velocity, float* x, float* y, float* z)
 {
     *x = velocity.x * world->pixelsPerMeter;
     *y = -velocity.y * world->pixelsPerMeter;
+    *z = velocity.z * world->pixelsPerMeter;
 }
 
 static b3Vec3 to_world_gravity(const SopBox3dWorld* world, float gravityY)
@@ -105,28 +115,51 @@ static void ensure_capacity(SopBox3dWorld* world)
     world->bodyCapacity = nextCapacity;
 }
 
+static int hardware_thread_count(void)
+{
+#if defined( _WIN32 )
+    SYSTEM_INFO info;
+    GetSystemInfo( &info );
+    return (int)info.dwNumberOfProcessors;
+#elif defined( __unix__ ) || defined( __APPLE__ )
+    long count = sysconf( _SC_NPROCESSORS_ONLN );
+    return count > 0 ? (int)count : 1;
+#else
+    return 1;
+#endif
+}
+
+static int default_worker_count(void)
+{
+    int cores = hardware_thread_count();
+    return b3ClampInt( cores / 2, 1, 8 );
+}
+
 static void create_bounds(SopBox3dWorld* world)
 {
     float widthMeters = fmaxf(world->boundsWidth / world->pixelsPerMeter, 0.1f);
     float heightMeters = fmaxf(world->boundsHeight / world->pixelsPerMeter, 0.1f);
     float thickness = 0.5f;
+    // Bounds extend far along z so depth-unlocked bodies (basketball) still
+    // rest on the floor and stay inside the side walls deep in the scene.
+    float halfDepth = 12.0f;
 
     b3ShapeDef shapeDef = b3DefaultShapeDef();
     shapeDef.baseMaterial.friction = 0.35f;
     shapeDef.baseMaterial.restitution = 0.2f;
 
     b3BodyDef bodyDef = b3DefaultBodyDef();
-    b3BoxHull floorBox = b3MakeBoxHull(widthMeters * 0.5f, thickness * 0.5f, 1.0f);
+    b3BoxHull floorBox = b3MakeBoxHull(widthMeters * 0.5f, thickness * 0.5f, halfDepth);
     bodyDef.position = (b3Vec3){ widthMeters * 0.5f, -thickness * 0.5f, 0.0f };
     b3BodyId floorId = b3CreateBody(world->worldId, &bodyDef);
     b3CreateHullShape(floorId, &shapeDef, &floorBox.base);
 
-    b3BoxHull ceilingBox = b3MakeBoxHull(widthMeters * 0.5f, thickness * 0.5f, 1.0f);
+    b3BoxHull ceilingBox = b3MakeBoxHull(widthMeters * 0.5f, thickness * 0.5f, halfDepth);
     bodyDef.position = (b3Vec3){ widthMeters * 0.5f, heightMeters + thickness * 0.5f, 0.0f };
     b3BodyId ceilingId = b3CreateBody(world->worldId, &bodyDef);
     b3CreateHullShape(ceilingId, &shapeDef, &ceilingBox.base);
 
-    b3BoxHull sideBox = b3MakeBoxHull(thickness * 0.5f, heightMeters * 0.5f, 1.0f);
+    b3BoxHull sideBox = b3MakeBoxHull(thickness * 0.5f, heightMeters * 0.5f, halfDepth);
     bodyDef.position = (b3Vec3){ -thickness * 0.5f, heightMeters * 0.5f, 0.0f };
     b3BodyId leftId = b3CreateBody(world->worldId, &bodyDef);
     b3CreateHullShape(leftId, &shapeDef, &sideBox.base);
@@ -142,6 +175,7 @@ static void create_world(SopBox3dWorld* world)
     worldDef.gravity = to_world_gravity(world, world->gravityY);
     worldDef.enableSleep = true;
     worldDef.enableContinuous = true;
+    worldDef.workerCount = (uint32_t)default_worker_count();
     world->worldId = b3CreateWorld(&worldDef);
     create_bounds(world);
 }
@@ -209,13 +243,13 @@ void sop_box3d_add_body(SopBox3dWorld* world, const SopBox3dBodyDef* def)
 
     b3BodyDef bodyDef = b3DefaultBodyDef();
     bodyDef.type = def->isDragging ? b3_kinematicBody : b3_dynamicBody;
-    bodyDef.position = to_world_center(world, def->x, def->y, def->width, def->height);
-    bodyDef.linearVelocity = to_world_velocity(world, def->velocityX, def->velocityY);
+    bodyDef.position = to_world_center(world, def->x, def->y, def->width, def->height, def->z);
+    bodyDef.linearVelocity = to_world_velocity(world, def->velocityX, def->velocityY, def->velocityZ);
     bodyDef.linearDamping = fmaxf(0.0f, (1.0f - def->linearDamping) * 8.0f);
     bodyDef.angularDamping = 0.18f;
     bodyDef.gravityScale = def->gravityScale;
     bodyDef.sleepThreshold = 0.08f;
-    bodyDef.motionLocks.linearZ = true;
+    bodyDef.motionLocks.linearZ = !def->depthUnlocked;
     bodyDef.motionLocks.angularX = def->lockRotation;
     bodyDef.motionLocks.angularY = def->lockRotation;
     bodyDef.motionLocks.angularZ = def->lockRotation;
@@ -296,7 +330,7 @@ void sop_box3d_sync_body(SopBox3dWorld* world, const SopBox3dBodyDef* def)
     b3Body_SetGravityScale(body->bodyId, def->gravityScale);
     b3Body_SetLinearDamping(body->bodyId, fmaxf(0.0f, (1.0f - def->linearDamping) * 8.0f));
     b3MotionLocks locks = b3Body_GetMotionLocks(body->bodyId);
-    locks.linearZ = true;
+    locks.linearZ = !def->depthUnlocked;
     locks.angularX = def->lockRotation;
     locks.angularY = def->lockRotation;
     locks.angularZ = def->lockRotation;
@@ -310,8 +344,8 @@ void sop_box3d_sync_body(SopBox3dWorld* world, const SopBox3dBodyDef* def)
     if (def->isDragging)
     {
         b3Body_SetType(body->bodyId, b3_kinematicBody);
-        b3Body_SetTransform(body->bodyId, to_world_center(world, def->x, def->y, def->width, def->height), b3Body_GetRotation(body->bodyId));
-        b3Body_SetLinearVelocity(body->bodyId, to_world_velocity(world, def->velocityX, def->velocityY));
+        b3Body_SetTransform(body->bodyId, to_world_center(world, def->x, def->y, def->width, def->height, def->z), b3Body_GetRotation(body->bodyId));
+        b3Body_SetLinearVelocity(body->bodyId, to_world_velocity(world, def->velocityX, def->velocityY, def->velocityZ));
         b3Body_SetAngularVelocity(body->bodyId, b3Vec3_zero);
         b3Body_SetAwake(body->bodyId, true);
         body->isDragging = true;
@@ -322,8 +356,8 @@ void sop_box3d_sync_body(SopBox3dWorld* world, const SopBox3dBodyDef* def)
     if (body->isDragging)
     {
         b3Body_SetType(body->bodyId, b3_dynamicBody);
-        b3Body_SetTransform(body->bodyId, to_world_center(world, def->x, def->y, def->width, def->height), b3Body_GetRotation(body->bodyId));
-        b3Body_SetLinearVelocity(body->bodyId, to_world_velocity(world, def->velocityX, def->velocityY));
+        b3Body_SetTransform(body->bodyId, to_world_center(world, def->x, def->y, def->width, def->height, def->z), b3Body_GetRotation(body->bodyId));
+        b3Body_SetLinearVelocity(body->bodyId, to_world_velocity(world, def->velocityX, def->velocityY, def->velocityZ));
         b3Body_SetAwake(body->bodyId, true);
         body->isDragging = false;
         body->wasAwake = true;
@@ -336,6 +370,58 @@ void sop_box3d_sync_body(SopBox3dWorld* world, const SopBox3dBodyDef* def)
         b3Body_SetLinearVelocity(body->bodyId, velocity);
         b3Body_SetAwake(body->bodyId, true);
     }
+}
+
+static b3Vec3 static_center_to_world(const SopBox3dWorld* world, float centerX, float centerY, float centerZ)
+{
+    return (b3Vec3){
+        centerX / world->pixelsPerMeter,
+        (world->boundsHeight - centerY) / world->pixelsPerMeter,
+        centerZ / world->pixelsPerMeter
+    };
+}
+
+void sop_box3d_add_static_box(SopBox3dWorld* world, float centerX, float centerY, float centerZ,
+                              float halfWidth, float halfHeight, float halfDepth,
+                              float friction, float restitution)
+{
+    if (world == NULL)
+    {
+        return;
+    }
+
+    b3BodyDef bodyDef = b3DefaultBodyDef();
+    bodyDef.position = static_center_to_world(world, centerX, centerY, centerZ);
+    b3BodyId bodyId = b3CreateBody(world->worldId, &bodyDef);
+
+    b3ShapeDef shapeDef = b3DefaultShapeDef();
+    shapeDef.baseMaterial.friction = fmaxf(friction, 0.0f);
+    shapeDef.baseMaterial.restitution = fmaxf(restitution, 0.0f);
+    float ppm = world->pixelsPerMeter;
+    b3BoxHull box = b3MakeBoxHull(
+        fmaxf(halfWidth / ppm, 0.02f),
+        fmaxf(halfHeight / ppm, 0.02f),
+        fmaxf(halfDepth / ppm, 0.02f));
+    b3CreateHullShape(bodyId, &shapeDef, &box.base);
+}
+
+void sop_box3d_add_static_sphere(SopBox3dWorld* world, float centerX, float centerY, float centerZ,
+                                 float radius, float friction, float restitution)
+{
+    if (world == NULL)
+    {
+        return;
+    }
+
+    b3BodyDef bodyDef = b3DefaultBodyDef();
+    bodyDef.position = static_center_to_world(world, centerX, centerY, centerZ);
+    b3BodyId bodyId = b3CreateBody(world->worldId, &bodyDef);
+
+    b3ShapeDef shapeDef = b3DefaultShapeDef();
+    shapeDef.baseMaterial.friction = fmaxf(friction, 0.0f);
+    shapeDef.baseMaterial.restitution = fmaxf(restitution, 0.0f);
+    b3Sphere sphere = { { 0.0f, 0.0f, 0.0f }, fmaxf(radius / world->pixelsPerMeter, 0.02f) };
+    b3CreateSphereShape(bodyId, &shapeDef, &sphere);
 }
 
 void sop_box3d_remove_body(SopBox3dWorld* world, uint64_t id)
@@ -396,8 +482,8 @@ bool sop_box3d_get_snapshot(const SopBox3dWorld* world, int index, SopBox3dSnaps
 
     memset(snapshot, 0, sizeof(*snapshot));
     snapshot->id = body->id;
-    from_world_center(world, position, body->width, body->height, &snapshot->x, &snapshot->y);
-    from_world_velocity(world, velocity, &snapshot->velocityX, &snapshot->velocityY);
+    from_world_center(world, position, body->width, body->height, &snapshot->x, &snapshot->y, &snapshot->z);
+    from_world_velocity(world, velocity, &snapshot->velocityX, &snapshot->velocityY, &snapshot->velocityZ);
     snapshot->rotationX = rotation.v.x;
     snapshot->rotationY = rotation.v.y;
     snapshot->rotationZ = rotation.v.z;
@@ -430,8 +516,8 @@ int sop_box3d_get_snapshots(SopBox3dWorld* world, SopBox3dSnapshot* snapshots, i
         SopBox3dSnapshot* snapshot = &snapshots[written++];
         memset(snapshot, 0, sizeof(*snapshot));
         snapshot->id = body->id;
-        from_world_center(world, position, body->width, body->height, &snapshot->x, &snapshot->y);
-        from_world_velocity(world, velocity, &snapshot->velocityX, &snapshot->velocityY);
+        from_world_center(world, position, body->width, body->height, &snapshot->x, &snapshot->y, &snapshot->z);
+        from_world_velocity(world, velocity, &snapshot->velocityX, &snapshot->velocityY, &snapshot->velocityZ);
         snapshot->rotationX = rotation.v.x;
         snapshot->rotationY = rotation.v.y;
         snapshot->rotationZ = rotation.v.z;

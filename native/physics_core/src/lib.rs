@@ -40,6 +40,9 @@ struct SopBox3dBodyDef {
     collision_scale: f32,
     shape: i32,
     is_dragging: bool,
+    z: f32,
+    velocity_z: f32,
+    depth_unlocked: bool,
 }
 
 #[repr(C)]
@@ -55,6 +58,8 @@ struct SopBox3dSnapshot {
     rotation_z: f32,
     rotation_w: f32,
     is_awake: bool,
+    z: f32,
+    velocity_z: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -72,6 +77,7 @@ struct BodySyncState {
     collision_scale: f32,
     shape: i32,
     is_dragging: bool,
+    depth_unlocked: bool,
 }
 
 impl BodySyncState {
@@ -88,6 +94,7 @@ impl BodySyncState {
             || self.lock_rotation != next.lock_rotation
             || self.collision_scale != next.collision_scale
             || self.shape != next.shape
+            || self.depth_unlocked != next.depth_unlocked
     }
 }
 
@@ -103,6 +110,26 @@ unsafe extern "C" {
     fn sop_box3d_set_gravity(world: *mut c_void, gravity_y: f32);
     fn sop_box3d_sync_body(world: *mut c_void, def: *const SopBox3dBodyDef);
     fn sop_box3d_remove_body(world: *mut c_void, id: u64);
+    fn sop_box3d_add_static_box(
+        world: *mut c_void,
+        center_x: f32,
+        center_y: f32,
+        center_z: f32,
+        half_width: f32,
+        half_height: f32,
+        half_depth: f32,
+        friction: f32,
+        restitution: f32,
+    );
+    fn sop_box3d_add_static_sphere(
+        world: *mut c_void,
+        center_x: f32,
+        center_y: f32,
+        center_z: f32,
+        radius: f32,
+        friction: f32,
+        restitution: f32,
+    );
     fn sop_box3d_step(world: *mut c_void, time_step: f32, sub_step_count: i32);
     fn sop_box3d_snapshot_count(world: *const c_void) -> i32;
     fn sop_box3d_get_snapshots(
@@ -187,6 +214,7 @@ impl Box3dBackend {
             collision_scale: body.collision_scale,
             shape,
             is_dragging,
+            depth_unlocked: object.depth_unlocked,
         };
         let should_sync = match self.synced_bodies.get(&object.id) {
             None => true,
@@ -217,9 +245,34 @@ impl Box3dBackend {
             collision_scale: body.collision_scale,
             shape,
             is_dragging,
+            z: object.depth_z,
+            velocity_z: object.depth_velocity,
+            depth_unlocked: object.depth_unlocked,
         };
         unsafe { sop_box3d_sync_body(self.raw.as_ptr(), &def) };
         self.synced_bodies.insert(object.id, next_state);
+    }
+
+    fn add_static_box(&mut self, center: (f32, f32, f32), half_extents: (f32, f32, f32), friction: f32, restitution: f32) {
+        unsafe {
+            sop_box3d_add_static_box(
+                self.raw.as_ptr(),
+                center.0,
+                center.1,
+                center.2,
+                half_extents.0,
+                half_extents.1,
+                half_extents.2,
+                friction,
+                restitution,
+            )
+        };
+    }
+
+    fn add_static_sphere(&mut self, center: (f32, f32, f32), radius: f32, friction: f32, restitution: f32) {
+        unsafe {
+            sop_box3d_add_static_sphere(self.raw.as_ptr(), center.0, center.1, center.2, radius, friction, restitution)
+        };
     }
 
     fn step(&mut self, dt: f32) {
@@ -249,6 +302,8 @@ impl Box3dBackend {
                 rotation_z: 0.0,
                 rotation_w: 1.0,
                 is_awake: false,
+                z: 0.0,
+                velocity_z: 0.0,
         };
         self.snapshot_buffer.resize(count as usize, empty_snapshot);
         let filled =
@@ -390,6 +445,20 @@ impl BroadphaseGrid {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum StaticColliderShape {
+    Box { half_extents: (f32, f32, f32) },
+    Sphere { radius: f32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StaticCollider {
+    center: (f32, f32, f32),
+    shape: StaticColliderShape,
+    friction: f32,
+    restitution: f32,
+}
+
 #[derive(Debug)]
 pub struct PhysicsWorld {
     objects: Vec<ObjectState>,
@@ -397,6 +466,8 @@ pub struct PhysicsWorld {
     box3d: Option<Box3dBackend>,
     box3d_bounds: Option<(u32, u32)>,
     object_indices: HashMap<u64, usize>,
+    static_colliders: Vec<StaticCollider>,
+    static_colliders_synced: bool,
 }
 
 impl PhysicsWorld {
@@ -407,7 +478,52 @@ impl PhysicsWorld {
             box3d: None,
             box3d_bounds: None,
             object_indices: HashMap::new(),
+            static_colliders: Vec::new(),
+            static_colliders_synced: true,
         }
+    }
+
+    /// Registers a static (immovable) box collider, e.g. a backboard. It is
+    /// re-created automatically whenever the physics backend resets.
+    pub fn add_static_box_collider(
+        &mut self,
+        center: (f32, f32, f32),
+        half_extents: (f32, f32, f32),
+        friction: f32,
+        restitution: f32,
+    ) {
+        self.static_colliders.push(StaticCollider {
+            center,
+            shape: StaticColliderShape::Box { half_extents },
+            friction,
+            restitution,
+        });
+        self.static_colliders_synced = false;
+    }
+
+    /// Registers a static sphere collider, e.g. one segment of a hoop rim.
+    pub fn add_static_sphere_collider(&mut self, center: (f32, f32, f32), radius: f32, friction: f32, restitution: f32) {
+        self.static_colliders.push(StaticCollider {
+            center,
+            shape: StaticColliderShape::Sphere { radius },
+            friction,
+            restitution,
+        });
+        self.static_colliders_synced = false;
+    }
+
+    pub fn clear_static_colliders(&mut self) {
+        if self.static_colliders.is_empty() {
+            return;
+        }
+        self.static_colliders.clear();
+        // Static bodies have no handles we can remove individually, so rebuild
+        // the backend world; dynamic bodies re-sync from Rust-side state.
+        if let (Some(box3d), Some((width, height))) = (&mut self.box3d, self.box3d_bounds) {
+            let bounds = RectF::new(0.0, 0.0, width as f32, height as f32);
+            box3d.reset(self.gravity.y, bounds);
+        }
+        self.static_colliders_synced = true;
     }
 
     pub fn objects(&self) -> &[ObjectState] {
@@ -440,6 +556,7 @@ impl PhysicsWorld {
         if let (Some(box3d), Some((width, height))) = (&mut self.box3d, self.box3d_bounds) {
             let bounds = RectF::new(0.0, 0.0, width as f32, height as f32);
             box3d.reset(self.gravity.y, bounds);
+            self.static_colliders_synced = self.static_colliders.is_empty();
         }
     }
 
@@ -452,6 +569,19 @@ impl PhysicsWorld {
         };
 
         box3d.set_gravity(self.gravity.y);
+        if !self.static_colliders_synced {
+            for collider in &self.static_colliders {
+                match collider.shape {
+                    StaticColliderShape::Box { half_extents } => {
+                        box3d.add_static_box(collider.center, half_extents, collider.friction, collider.restitution);
+                    },
+                    StaticColliderShape::Sphere { radius } => {
+                        box3d.add_static_sphere(collider.center, radius, collider.friction, collider.restitution);
+                    },
+                }
+            }
+            self.static_colliders_synced = true;
+        }
         for object in &self.objects {
             if !object.body.collidable {
                 continue;
@@ -478,6 +608,10 @@ impl PhysicsWorld {
 
             object.body.position = Vector2::new(snapshot.x, snapshot.y);
             object.body.velocity = Vector2::new(snapshot.velocity_x, snapshot.velocity_y);
+            if object.depth_unlocked {
+                object.depth_z = snapshot.z;
+                object.depth_velocity = snapshot.velocity_z;
+            }
             object.body.is_sleeping = !snapshot.is_awake;
             object.body.sleep_timer_seconds = if snapshot.is_awake {
                 0.0
@@ -515,6 +649,7 @@ impl PhysicsWorld {
 
         if let Some(box3d) = &mut self.box3d {
             box3d.reset(self.gravity.y, bounds);
+            self.static_colliders_synced = self.static_colliders.is_empty();
         }
         self.box3d_bounds = Some(key);
     }
