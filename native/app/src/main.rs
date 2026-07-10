@@ -167,6 +167,24 @@ struct CheerDropEffect {
     anonymous: bool,
 }
 
+#[derive(Clone, Debug)]
+struct PendingCheerDrop {
+    donor: String,
+    bits: u32,
+    center: Vector2,
+    color: AppColor,
+    count: usize,
+    emitted: usize,
+    size: f32,
+    tier: u32,
+    excitement: f32,
+    mass_per_crystal: f32,
+    base_value: u32,
+    remainder: u32,
+    started_at: f64,
+    emission_seconds: f64,
+}
+
 struct NativeApp {
     window: Option<Arc<Window>>,
     window_id: Option<WindowId>,
@@ -193,6 +211,7 @@ struct NativeApp {
     window_capture_candidate: Option<DesktopWindowTarget>,
     window_captures: HashMap<u64, WindowCapture>,
     cheer_drop_effects: Vec<CheerDropEffect>,
+    pending_cheer_drops: Vec<PendingCheerDrop>,
     cheer_portals: Vec<CheerPortalVisual>,
     cheer_labels: Vec<ScreenLabel>,
     debug_visible: bool,
@@ -326,6 +345,7 @@ impl Default for NativeApp {
             window_capture_candidate: None,
             window_captures: HashMap::new(),
             cheer_drop_effects: Vec::new(),
+            pending_cheer_drops: Vec::new(),
             cheer_portals: Vec::new(),
             cheer_labels: Vec::new(),
             debug_visible: false,
@@ -1018,6 +1038,10 @@ impl NativeApp {
         self.basketball_game = BasketballGame::default();
         self.basketball_tracker.clear();
         self.basketball_confetti.clear();
+        self.pending_cheer_drops.clear();
+        self.cheer_drop_effects.clear();
+        self.cheer_portals.clear();
+        self.cheer_labels.clear();
         self.weather_world.clear();
         self.sand_world.clear();
         self.measure_tool.clear();
@@ -3031,49 +3055,50 @@ impl NativeApp {
         let base_value = bits / count as u32;
         let remainder = bits % count as u32;
 
-        for index in 0..count {
-            let phase = index as f32 * 2.399_963_1 + bits as f32 * 0.017;
-            let horizontal = phase.sin() * (42.0 + (index % 24) as f32 * 8.0);
-            let position = Vector2::new(center.x + horizontal - size * 0.5, center.y + 10.0 + phase.cos().abs() * 18.0);
-            let id = self.scene.spawn_custom_object(
-                position,
-                Vector2::new(size * 0.72, size),
-                color,
-                ObjectVisualKind::BitCrystal,
-                CollisionShape::Diamond,
-            );
-            if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == id) {
-                object.body.mass = mass_per_crystal;
-                object.body.restitution = (0.48 + tier as f32 * 0.055).clamp(0.48, 0.82);
-                object.body.friction = 0.58;
-                object.body.velocity = Vector2::new(
-                    phase.sin() * (150.0 + excitement * 28.0),
-                    120.0 + phase.cos().abs() * 145.0 + excitement * 20.0,
-                );
-                object.rotation_y = phase as f64 * 35.0;
-                object.angular_velocity_x = phase.cos() as f64 * 180.0;
-                object.angular_velocity_y = phase.sin() as f64 * 240.0;
-                object.angular_velocity_z = (index as f64 - count as f64 * 0.5) * 22.0;
-                object.source_owner = Some(donor.clone());
-                object.source_value = Some(base_value + u32::from((index as u32) < remainder));
-            }
-            self.selected_id = Some(id);
-        }
-
         let now = self.frame_clock.elapsed_seconds;
+        self.pending_cheer_drops.push(PendingCheerDrop {
+            donor: donor.clone(),
+            bits,
+            center,
+            color,
+            count,
+            emitted: 0,
+            size,
+            tier,
+            excitement,
+            mass_per_crystal,
+            base_value,
+            remainder,
+            started_at: now,
+            emission_seconds: 4.0,
+        });
         self.cheer_drop_effects.push(CheerDropEffect {
             donor: donor.clone(),
             bits,
             center,
             color,
             started_at: now,
-            ends_at: now + 3.4,
+            ends_at: now + 4.8,
             anonymous,
         });
         self.push_status_message(format!("{donor} cheered {bits} simulated Bits."));
     }
 
     fn update_cheer_drop_effects(&mut self, now: f64) {
+        let mut emissions = Vec::new();
+        for drop in &mut self.pending_cheer_drops {
+            let progress = ((now - drop.started_at) / drop.emission_seconds).clamp(0.0, 1.0);
+            let target = ((drop.count as f64 * progress).floor() as usize).max(usize::from(drop.emitted == 0));
+            while drop.emitted < target.min(drop.count) {
+                emissions.push((drop.clone(), drop.emitted));
+                drop.emitted += 1;
+            }
+        }
+        self.pending_cheer_drops.retain(|drop| drop.emitted < drop.count);
+        for (drop, index) in emissions {
+            self.emit_cheer_crystal(&drop, index);
+        }
+
         self.cheer_drop_effects.retain(|effect| now < effect.ends_at);
         self.cheer_portals.clear();
         self.cheer_labels.clear();
@@ -3104,6 +3129,42 @@ impl NativeApp {
                 });
             }
         }
+    }
+
+    fn emit_cheer_crystal(&mut self, drop: &PendingCheerDrop, index: usize) {
+        let phase = index as f32 * 2.399_963_1 + drop.bits as f32 * 0.017;
+        let fan = if drop.count > 1 {
+            index as f32 / (drop.count - 1) as f32 * 2.0 - 1.0
+        } else {
+            0.0
+        };
+        let position = Vector2::new(
+            drop.center.x + phase.sin() * 34.0 - drop.size * 0.36,
+            drop.center.y + 10.0 + phase.cos().abs() * 16.0,
+        );
+        let id = self.scene.spawn_custom_object(
+            position,
+            Vector2::new(drop.size * 0.72, drop.size),
+            drop.color,
+            ObjectVisualKind::BitCrystal,
+            CollisionShape::Diamond,
+        );
+        if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == id) {
+            object.body.mass = drop.mass_per_crystal;
+            object.body.restitution = (0.48 + drop.tier as f32 * 0.055).clamp(0.48, 0.82);
+            object.body.friction = 0.58;
+            object.body.velocity = Vector2::new(
+                fan * (360.0 + drop.excitement * 34.0) + phase.sin() * 170.0,
+                170.0 + phase.cos().abs() * 190.0 + drop.excitement * 24.0,
+            );
+            object.rotation_y = phase as f64 * 35.0;
+            object.angular_velocity_x = phase.cos() as f64 * 180.0;
+            object.angular_velocity_y = phase.sin() as f64 * 240.0;
+            object.angular_velocity_z = fan as f64 * 280.0;
+            object.source_owner = Some(drop.donor.clone());
+            object.source_value = Some(drop.base_value + u32::from((index as u32) < drop.remainder));
+        }
+        self.selected_id = Some(id);
     }
 
     fn finish_window_capture(&mut self, object_id: u64) {
