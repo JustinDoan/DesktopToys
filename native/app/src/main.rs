@@ -3938,57 +3938,33 @@ impl NativeApp {
             },
             ResetWipeKind::BlackHole => {
                 let strength = 900.0 + progress * 2600.0;
-                let consume_radius = 28.0 + progress * 62.0;
-                let mut consumed = Vec::new();
                 for object in self.scene.objects_mut() {
                     let p = Vector2::new(object.body.position.x + object.body.width * 0.5, object.body.position.y + object.body.height * 0.5);
                     let delta = center - p;
                     let distance = delta.length_squared().sqrt().max(32.0);
                     let tangent = Vector2::new(-delta.y, delta.x) * (1.0 / distance);
-                    let pull = strength * (1.0 + 260.0 / distance) * dt;
-                    object.body.velocity += delta * (pull / distance) + tangent * (760.0 * dt);
+                    object.body.velocity += delta * (strength * dt / distance) + tangent * (520.0 * dt);
                     object.body.is_sleeping = false;
-                    if distance <= consume_radius + object.body.width.min(object.body.height) * 0.2 {
-                        consumed.push(object.id);
-                    }
-                }
-                for id in consumed {
-                    let _ = self.scene.remove_object(id);
                 }
                 self.cheer_portals.push(CheerPortalVisual { center, radius: 54.0 + progress * 150.0, color: accent, intensity: 1.0 });
             },
             ResetWipeKind::GravityFlush => {
-                let shock_y = bounds.height + 120.0 - progress * (bounds.height + 300.0);
-                let previous_progress = ((elapsed - dt as f64) / wipe.duration).clamp(0.0, 1.0) as f32;
-                let previous_shock_y = bounds.height + 120.0 - previous_progress * (bounds.height + 300.0);
                 for object in self.scene.objects_mut() {
-                    let top = object.body.position.y;
-                    let bottom = top + object.body.height;
-                    if top <= previous_shock_y + 20.0 && bottom >= shock_y - 20.0 {
-                        object.body.position.y = object.body.position.y.min(shock_y - object.body.height - 4.0);
-                        object.body.velocity.y = object.body.velocity.y.min(-1450.0 - progress * 850.0);
-                        object.body.velocity.x += ((object.id % 9) as f32 - 4.0) * 54.0;
-                        object.body.is_sleeping = false;
-                    }
+                    object.body.velocity.y -= (1900.0 + progress * 1700.0) * dt;
+                    object.body.velocity.x += ((object.id % 7) as f32 - 3.0) * 18.0 * dt;
+                    object.body.is_sleeping = false;
                 }
-                self.cheer_labels.push(ScreenLabel { position: Vector2::new(center.x, shock_y - 54.0), text: "GRAVITY FLUSH  ^^^".to_string(), color: accent, scale: 3 });
+                self.cheer_labels.push(ScreenLabel { position: Vector2::new(center.x, bounds.height - 90.0 - progress * bounds.height * 0.55), text: "GRAVITY FLUSH  ^^^".to_string(), color: accent, scale: 3 });
             },
             ResetWipeKind::GiantBroom => {
                 let sweep_x = -120.0 + (bounds.width + 240.0) * progress;
                 let sweep_y = bounds.height * (0.22 + progress * 0.58);
-                let previous_progress = ((elapsed - dt as f64) / wipe.duration).clamp(0.0, 1.0) as f32;
-                let previous_x = -120.0 + (bounds.width + 240.0) * previous_progress;
-                let broom_speed = (bounds.width + 240.0) / wipe.duration as f32;
                 for object in self.scene.objects_mut() {
                     let x = object.body.position.x + object.body.width * 0.5;
                     let y = object.body.position.y + object.body.height * 0.5;
-                    let crossed_bristles = x >= previous_x - 112.0 && x <= sweep_x + 112.0;
-                    let inside_bristles = y >= sweep_y - 30.0 && y <= sweep_y + 118.0;
-                    if crossed_bristles && inside_bristles {
-                        object.body.position.x = object.body.position.x.max(sweep_x + 116.0);
-                        object.body.position.y = object.body.position.y.max(sweep_y + 34.0);
-                        object.body.velocity.x = object.body.velocity.x.max(broom_speed * 1.12);
-                        object.body.velocity.y = object.body.velocity.y.max(520.0 + (object.id % 4) as f32 * 80.0);
+                    if x < sweep_x + 120.0 && y < sweep_y + 180.0 {
+                        object.body.velocity.x = object.body.velocity.x.max(820.0);
+                        object.body.velocity.y = object.body.velocity.y.max(620.0);
                         object.body.is_sleeping = false;
                     }
                 }
@@ -3996,21 +3972,13 @@ impl NativeApp {
             },
             ResetWipeKind::Airlock => {
                 let airlock = Vector2::new(bounds.width - 58.0, center.y);
-                let mut consumed = Vec::new();
                 for object in self.scene.objects_mut() {
                     let p = Vector2::new(object.body.position.x + object.body.width * 0.5, object.body.position.y + object.body.height * 0.5);
                     let delta = airlock - p;
                     let distance = delta.length_squared().sqrt().max(36.0);
-                    let suction = (900.0 + progress * 2200.0) * (1.0 + 380.0 / distance) * dt;
-                    object.body.velocity += delta * (suction / distance);
-                    object.body.velocity.x += (260.0 + progress * 460.0) * dt;
+                    object.body.velocity += delta * ((1050.0 + progress * 1900.0) * dt / distance);
+                    object.body.velocity.x += 420.0 * dt;
                     object.body.is_sleeping = false;
-                    if distance <= 58.0 + object.body.width.min(object.body.height) * 0.25 {
-                        consumed.push(object.id);
-                    }
-                }
-                for id in consumed {
-                    let _ = self.scene.remove_object(id);
                 }
                 self.cheer_portals.push(CheerPortalVisual { center: airlock, radius: 78.0 + progress * 46.0, color: accent, intensity: 1.0 });
                 self.cheer_labels.push(ScreenLabel { position: Vector2::new(bounds.width - 250.0, center.y - 110.0), text: "AIRLOCK OPEN  >>>".to_string(), color: accent, scale: 2 });
