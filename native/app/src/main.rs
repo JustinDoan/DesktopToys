@@ -422,6 +422,16 @@ impl NativeApp {
 
         let initial_bounds = desktop_bounds(event_loop).unwrap_or(self.bounds);
         self.bounds = initial_bounds;
+        self.spawn_monitor_bounds = event_loop.primary_monitor().map(|monitor| {
+            let position = monitor.position();
+            let size = monitor.size();
+            RectF::new(
+                position.x as f32 - initial_bounds.x,
+                position.y as f32 - initial_bounds.y,
+                size.width as f32,
+                size.height as f32,
+            )
+        });
 
         let window = Arc::new(
             event_loop
@@ -2974,6 +2984,9 @@ impl NativeApp {
     }
 
     fn simulate_twitch_cheer(&mut self, payload: Option<&serde_json::Value>) {
+        if payload.and_then(|value| value.get("width")).is_some() {
+            self.set_spawn_monitor(payload);
+        }
         let bits = payload
             .and_then(|value| value.get("bits"))
             .and_then(serde_json::Value::as_u64)

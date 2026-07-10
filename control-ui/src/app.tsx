@@ -290,11 +290,13 @@ export function App() {
   }
 
   function dropCheer() {
+    const display = displays.find((candidate) => candidate.id === spawnDisplayId);
     return send("simulate_twitch_cheer", {
       bits: Math.round(Math.max(1, Math.min(100000, cheerDraft.bits))),
       donor: cheerDraft.donor.trim() || "GoblinFan42",
       message: cheerDraft.message,
       anonymous: cheerDraft.anonymous,
+      ...(display ? displayPayload(display) : {}),
     });
   }
 
