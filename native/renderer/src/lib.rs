@@ -1755,7 +1755,7 @@ fn emit_wipe_visual(vertices: &mut Vec<GpuVertex>, width: u32, height: u32, visu
             emit_rect(vertices, width, height, (center.x - 54.0 - p * 45.0) as i32, (center.y - 18.0 - p * 15.0) as i32, (108.0 + p * 90.0) as i32, (36.0 + p * 30.0) as i32, AppColor::from_argb(245, 5, 2, 14), 0.001);
         },
         WipeVisualKind::GravityFlush => {
-            let ring_y = (h - 74.0 - p * h * 0.48).max(60.0);
+            let ring_y = h + 120.0 - p * (h + 300.0);
             emit_cheer_portal(vertices, width, height, CheerPortalVisual { center: Vector2::new(w * 0.5, ring_y), radius: 120.0 + p * 260.0, color: AppColor::from_rgb(255, 194, 55), intensity: 1.0 - p * 0.35 });
             for index in 0..18 {
                 let x = ((index as f32 + 0.5) / 18.0 * w) as i32;
