@@ -3025,7 +3025,7 @@ impl NativeApp {
         let crystal_value = bits.div_ceil(count as u32);
         let tier = crystal_value.ilog10().min(4);
         let color = cheer_tier_color(tier, anonymous);
-        let size = (34.0 + tier as f32 * 7.0).clamp(34.0, 62.0);
+        let size = (68.0 + tier as f32 * 8.0).clamp(68.0, 100.0);
         let excitement = message.chars().filter(|character| matches!(character, '!' | '?')).count().min(8) as f32;
         let mass_per_crystal = ((bits as f32 / 100.0) / count as f32).clamp(0.35, 10.0);
         let base_value = bits / count as u32;
