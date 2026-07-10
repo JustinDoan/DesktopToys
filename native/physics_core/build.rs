@@ -18,7 +18,6 @@ fn main() {
         .std("c17")
         .include(&include_dir)
         .include(&src_dir)
-        .define("BOX3D_DISABLE_SIMD", None)
         .define("_CRT_SECURE_NO_WARNINGS", None)
         .file("src/box3d_backend.c");
 

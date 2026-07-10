@@ -1,13 +1,41 @@
 #include "box3d_spike_shim.h"
 
 #include <box3d/box3d.h>
+#include <box3d/math_functions.h>
 #include <stdlib.h>
+
+#if defined( _WIN32 )
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#elif defined( __unix__ ) || defined( __APPLE__ )
+#include <unistd.h>
+#endif
 
 struct B3SpikeWorld
 {
     b3WorldId worldId;
     b3BodyId cubeId;
 };
+
+static int hardware_thread_count(void)
+{
+#if defined( _WIN32 )
+    SYSTEM_INFO info;
+    GetSystemInfo( &info );
+    return (int)info.dwNumberOfProcessors;
+#elif defined( __unix__ ) || defined( __APPLE__ )
+    long count = sysconf( _SC_NPROCESSORS_ONLN );
+    return count > 0 ? (int)count : 1;
+#else
+    return 1;
+#endif
+}
+
+static int default_worker_count(void)
+{
+    int cores = hardware_thread_count();
+    return b3ClampInt( cores / 2, 1, 8 );
+}
 
 B3SpikeWorld* b3sp_create_world(void)
 {
@@ -21,6 +49,7 @@ B3SpikeWorld* b3sp_create_world(void)
     worldDef.gravity = (b3Vec3){ 0.0f, -9.8f, 0.0f };
     worldDef.enableSleep = true;
     worldDef.enableContinuous = true;
+    worldDef.workerCount = (uint32_t)default_worker_count();
     spike->worldId = b3CreateWorld(&worldDef);
 
     b3BodyDef groundBodyDef = b3DefaultBodyDef();
