@@ -2030,11 +2030,13 @@ impl NativeApp {
                 .filter(|object| self.is_drone_carry_candidate(drone_id, object))
                 .map(|object| {
                     let center = object_center(object);
-                    (object.id, center, (center - drone_center).length_squared())
+                    let distance = (center - drone_center).length_squared();
+                    let priority = if object.visual_kind == ObjectVisualKind::BitCrystal { 0.18 } else { 1.0 };
+                    (object.id, center, distance, distance * priority)
                 })
-                .min_by(|(_, _, left), (_, _, right)| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+                .min_by(|(_, _, _, left), (_, _, _, right)| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
 
-            if let Some((object_id, object_center, distance)) = nearest {
+            if let Some((object_id, object_center, distance, _)) = nearest {
                 let target = object_center + Vector2::new(0.0, -80.0);
                 self.fly_drone_toward(drone_id, target, dt);
                 if distance <= DRONE_PICKUP_RADIUS_PIXELS * DRONE_PICKUP_RADIUS_PIXELS {
@@ -2140,7 +2142,7 @@ impl NativeApp {
             object.body.velocity = Vector2::ZERO;
             object.rotation_z *= 0.9;
             let drone_center = object_center(drone);
-            let cargo_center = drone_center + Vector2::new(0.0, drone.body.height * 0.55 + object.body.height * 0.44);
+            let cargo_center = drone_center + Vector2::new(0.0, drone.body.height * 0.42 + object.body.height * 0.34);
             object.body.position = Vector2::new(
                 cargo_center.x - object.body.width * 0.5,
                 cargo_center.y - object.body.height * 0.5,
@@ -2170,7 +2172,7 @@ impl NativeApp {
 
     fn drone_drop_target(&self) -> Vector2 {
         let bin = self.robot_bin_rect();
-        Vector2::new(bin.x + bin.width * 0.5, bin.y - 54.0)
+        Vector2::new(bin.x + bin.width * 0.5, bin.y - 165.0)
     }
 
     fn stabilize_quad_drones(&mut self) {

@@ -597,8 +597,8 @@ impl SceneController {
             state.body.width = base_size * 1.10;
             state.body.height = base_size * 0.72;
         } else if visual_kind == ObjectVisualKind::QuadDrone {
-            state.body.width = base_size * 0.92;
-            state.body.height = base_size * 0.54;
+            state.body.width = base_size * 1.22;
+            state.body.height = base_size * 0.72;
         } else {
             state.body.width = base_size;
             state.body.height = base_size;

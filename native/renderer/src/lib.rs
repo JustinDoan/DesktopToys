@@ -2418,8 +2418,9 @@ fn fan_mesh(size: f32, base_color: AppColor) -> Mesh {
 fn quad_drone_mesh(size: f32, base_color: AppColor) -> Mesh {
     let mut triangles = Vec::new();
     let body = scale_color(base_color, 0.92);
-    let trim = AppColor::from_rgb(28, 34, 44);
-    let arm = AppColor::from_rgb(84, 98, 116);
+    let body_shadow = scale_color(base_color, 0.70);
+    let trim = AppColor::from_rgb(38, 47, 60);
+    let arm = AppColor::from_rgb(118, 137, 158);
     let rotor_guard = AppColor::from_rgb(74, 230, 255);
     let rotor_blade = AppColor::from_rgb(226, 236, 244);
     let accent = AppColor::from_rgb(255, 176, 76);
@@ -2429,21 +2430,74 @@ fn quad_drone_mesh(size: f32, base_color: AppColor) -> Mesh {
         ellipsoid_mesh(size * 0.42, size * 0.26, size * 0.22, body),
         Vec3::new(0.0, 0.0, size * 0.02),
     );
-    append_mesh_offset(
+    append_mesh_offset_rotated_z(
         &mut triangles,
-        rectangular_prism_mesh(size * 0.94, size * 0.055, size * 0.08, arm),
+        rectangular_prism_mesh(size * 1.02, size * 0.07, size * 0.09, arm),
         Vec3::new(0.0, 0.0, 0.0),
+        35.0,
+    );
+    append_mesh_offset_rotated_z(
+        &mut triangles,
+        rectangular_prism_mesh(size * 1.02, size * 0.07, size * 0.09, arm),
+        Vec3::new(0.0, 0.0, 0.0),
+        -35.0,
     );
     append_mesh_offset(
         &mut triangles,
-        rectangular_prism_mesh(size * 0.055, size * 0.62, size * 0.08, arm),
-        Vec3::new(0.0, 0.0, 0.0),
+        rectangular_prism_mesh(size * 0.42, size * 0.28, size * 0.10, body_shadow),
+        Vec3::new(0.0, 0.0, -size * 0.15),
+    );
+    append_mesh_offset(
+        &mut triangles,
+        rectangular_prism_mesh(size * 0.32, size * 0.20, size * 0.07, trim),
+        Vec3::new(0.0, 0.0, size * 0.23),
     );
     append_mesh_offset(
         &mut triangles,
         rectangular_prism_mesh(size * 0.24, size * 0.06, size * 0.05, accent),
         Vec3::new(size * 0.12, 0.0, size * 0.15),
     );
+
+    // Underslung camera, landing rails, and a visible cargo hook make the
+    // autonomous pickup behavior legible from the desktop camera.
+    append_mesh_offset(
+        &mut triangles,
+        ball_mesh(size * 0.12, trim),
+        Vec3::new(size * 0.13, 0.0, -size * 0.26),
+    );
+    append_mesh_offset(
+        &mut triangles,
+        ball_mesh(size * 0.055, rotor_guard),
+        Vec3::new(size * 0.16, -size * 0.02, -size * 0.30),
+    );
+    for rail_y in [-size * 0.24, size * 0.24] {
+        append_mesh_offset(
+            &mut triangles,
+            rectangular_prism_mesh(size * 0.48, size * 0.035, size * 0.035, trim),
+            Vec3::new(0.0, rail_y, -size * 0.31),
+        );
+        for leg_x in [-size * 0.17, size * 0.17] {
+            append_mesh_offset_rotated_z(
+                &mut triangles,
+                rectangular_prism_mesh(size * 0.035, size * 0.16, size * 0.035, arm),
+                Vec3::new(leg_x, rail_y * 0.72, -size * 0.23),
+                if rail_y < 0.0 { -18.0 } else { 18.0 },
+            );
+        }
+    }
+    append_mesh_offset(
+        &mut triangles,
+        rectangular_prism_mesh(size * 0.035, size * 0.035, size * 0.30, rotor_guard),
+        Vec3::new(0.0, 0.0, -size * 0.38),
+    );
+    for claw_x in [-size * 0.045, size * 0.045] {
+        append_mesh_offset_rotated_z(
+            &mut triangles,
+            rectangular_prism_mesh(size * 0.035, size * 0.17, size * 0.035, accent),
+            Vec3::new(claw_x, 0.0, -size * 0.50),
+            if claw_x < 0.0 { -28.0 } else { 28.0 },
+        );
+    }
 
     for (index, (x, y)) in [
         (-size * 0.43, -size * 0.30),
