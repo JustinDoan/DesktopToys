@@ -49,6 +49,7 @@ pub struct RenderScene<'a> {
     pub lasso_cells: &'a [SandRenderCell],
     pub portal_cells: &'a [SandRenderCell],
     pub shatter_gun_cells: &'a [SandRenderCell],
+    pub window_capture_guide: Option<RectF>,
     pub hud: &'a HudState,
 }
 
@@ -410,6 +411,36 @@ impl SceneRenderer {
         emit_sand(&mut vertices, width, height, scene.lasso_cells);
         emit_sand(&mut vertices, width, height, scene.portal_cells);
         emit_sand(&mut vertices, width, height, scene.shatter_gun_cells);
+        if let Some(guide) = scene.window_capture_guide {
+            let x = guide.x.round() as i32;
+            let y = guide.y.round() as i32;
+            let w = guide.width.round().max(1.0) as i32;
+            let h = guide.height.round().max(1.0) as i32;
+            emit_rect(
+                &mut vertices,
+                width,
+                height,
+                x,
+                y,
+                w,
+                h,
+                AppColor::from_argb(24, 72, 210, 255),
+                0.012,
+            );
+            for inset in 0..3 {
+                emit_rect_outline(
+                    &mut vertices,
+                    width,
+                    height,
+                    x + inset,
+                    y + inset,
+                    (w - inset * 2).max(1),
+                    (h - inset * 2).max(1),
+                    AppColor::from_argb(220, 104, 224, 255),
+                    0.01,
+                );
+            }
+        }
         emit_panels(&mut vertices, width, height, scene.hud);
         self.vertices = vertices;
         Ok(&self.vertices)

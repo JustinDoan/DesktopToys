@@ -43,11 +43,13 @@ use winit::monitor::MonitorHandle;
 use winit::platform::x11::WindowAttributesExtX11;
 #[cfg(target_os = "windows")]
 use windows::Win32::{
-    Foundation::HWND,
+    Foundation::{BOOL, HWND, LPARAM, POINT, RECT},
+    Graphics::Gdi::ClientToScreen,
     UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOMOVE,
-        SWP_NOSIZE, SWP_NOZORDER, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-        WS_EX_TRANSPARENT,
+        EnumWindows, GetClassNameW, GetClientRect, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW,
+        GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE,
+        HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_APPWINDOW, WS_EX_LAYERED,
+        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
     },
 };
 
@@ -83,6 +85,129 @@ pub struct GlobalPointerState {
     pub robot_buddy_down: bool,
     pub basketball_toggle_down: bool,
     pub import_keys: GlobalImportKeys,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DesktopWindowTarget {
+    pub id: isize,
+    pub title: String,
+    pub client_rect: RectF,
+}
+
+#[cfg(target_os = "windows")]
+struct WindowSearch {
+    point: POINT,
+    process_id: u32,
+    result: Option<DesktopWindowTarget>,
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn find_window_at_point(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let search = unsafe { &mut *(lparam.0 as *mut WindowSearch) };
+    if search.result.is_some()
+        || !unsafe { IsWindowVisible(hwnd) }.as_bool()
+        || unsafe { IsIconic(hwnd) }.as_bool()
+    {
+        return BOOL(1);
+    }
+
+    let mut process_id = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut process_id)) };
+    if process_id == search.process_id {
+        return BOOL(1);
+    }
+    let mut class_buffer = [0u16; 128];
+    let class_length = unsafe { GetClassNameW(hwnd, &mut class_buffer) }.max(0) as usize;
+    let class_name = String::from_utf16_lossy(&class_buffer[..class_length]);
+    if matches!(class_name.as_str(), "Progman" | "WorkerW" | "Shell_TrayWnd") {
+        return BOOL(1);
+    }
+
+    let mut rect = RECT::default();
+    if unsafe { GetClientRect(hwnd, &mut rect) }.is_err() {
+        return BOOL(1);
+    }
+    let mut origin = POINT { x: rect.left, y: rect.top };
+    let mut extent = POINT { x: rect.right, y: rect.bottom };
+    if !unsafe { ClientToScreen(hwnd, &mut origin) }.as_bool()
+        || !unsafe { ClientToScreen(hwnd, &mut extent) }.as_bool()
+    {
+        return BOOL(1);
+    }
+    if extent.x - origin.x < 80 || extent.y - origin.y < 60 {
+        return BOOL(1);
+    }
+    if search.point.x < origin.x
+        || search.point.x >= extent.x
+        || search.point.y < origin.y
+        || search.point.y >= extent.y
+    {
+        return BOOL(1);
+    }
+
+    search.result = desktop_window_target(hwnd, origin, extent);
+    BOOL(0)
+}
+
+#[cfg(target_os = "windows")]
+fn desktop_window_target(hwnd: HWND, origin: POINT, extent: POINT) -> Option<DesktopWindowTarget> {
+    let title_length = unsafe { GetWindowTextLengthW(hwnd) };
+    let mut title_buffer = vec![0u16; title_length.max(0) as usize + 1];
+    let copied = unsafe { GetWindowTextW(hwnd, &mut title_buffer) };
+    let title = String::from_utf16_lossy(&title_buffer[..copied.max(0) as usize]);
+    Some(DesktopWindowTarget {
+        id: hwnd.0,
+        title: if title.trim().is_empty() { "Untitled window".to_string() } else { title },
+        client_rect: RectF::new(
+            origin.x as f32,
+            origin.y as f32,
+            (extent.x - origin.x) as f32,
+            (extent.y - origin.y) as f32,
+        ),
+    })
+}
+
+#[cfg(target_os = "windows")]
+pub fn desktop_window_at_point(screen_position: (i32, i32)) -> Option<DesktopWindowTarget> {
+    let mut search = WindowSearch {
+        point: POINT { x: screen_position.0, y: screen_position.1 },
+        process_id: std::process::id(),
+        result: None,
+    };
+    unsafe {
+        let _ = EnumWindows(Some(find_window_at_point), LPARAM((&mut search as *mut WindowSearch) as isize));
+    }
+    search.result
+}
+
+#[cfg(target_os = "windows")]
+pub fn desktop_window_by_id(id: isize) -> Option<DesktopWindowTarget> {
+    let hwnd = HWND(id);
+    unsafe {
+        if !IsWindow(hwnd).as_bool() || !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            return None;
+        }
+        let mut rect = RECT::default();
+        if GetClientRect(hwnd, &mut rect).is_err() {
+            return None;
+        }
+        let mut origin = POINT { x: rect.left, y: rect.top };
+        let mut extent = POINT { x: rect.right, y: rect.bottom };
+        if !ClientToScreen(hwnd, &mut origin).as_bool() || !ClientToScreen(hwnd, &mut extent).as_bool() {
+            return None;
+        }
+        desktop_window_target(hwnd, origin, extent)
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn desktop_window_at_point(_screen_position: (i32, i32)) -> Option<DesktopWindowTarget> {
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn desktop_window_by_id(_id: isize) -> Option<DesktopWindowTarget> {
+    None
 }
 
 pub fn overlay_window_attributes(title: &str, bounds: RectF) -> WindowAttributes {

@@ -21,8 +21,8 @@ use std::{ffi::CString, os::windows::process::CommandExt};
 use anyhow::{Context, Result};
 use core_types::{AppColor, AppConfig, CollisionShape, ObjectState, ObjectVisualKind, RectF, Vector2};
 use native_shell::{
-    configure_overlay_window, overlay_window_attributes, pick_model_file, set_overlay_input_mode, show_error_dialog,
-    sync_window_to_monitor,
+    configure_overlay_window, desktop_window_at_point, desktop_window_by_id, overlay_window_attributes,
+    pick_model_file, set_overlay_input_mode, show_error_dialog, sync_window_to_monitor, DesktopWindowTarget,
     GlobalImportKeys, GlobalInputPoller, OverlayInputMode, TrayAction, TrayController,
 };
 use renderer::{hoop_geometry, GpuVertex, HudState, OverlayPanel, PanelLine, RenderScene, SandRenderCell, SceneRenderer};
@@ -145,6 +145,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     event_loop.run_app(&mut app).map_err(Into::into)
 }
 
+#[derive(Clone, Debug)]
+struct WindowCapture {
+    window_id: isize,
+    title: String,
+    client_rect_screen: RectF,
+}
+
 struct NativeApp {
     window: Option<Arc<Window>>,
     window_id: Option<WindowId>,
@@ -167,6 +174,8 @@ struct NativeApp {
     mode_candidate_since_seconds: f64,
     cursor_local: Vector2,
     selected_id: Option<u64>,
+    window_capture_candidate: Option<DesktopWindowTarget>,
+    window_captures: HashMap<u64, WindowCapture>,
     debug_visible: bool,
     debug_hit_primary_cursor: bool,
     debug_left_down: bool,
@@ -294,6 +303,8 @@ impl Default for NativeApp {
             mode_candidate_since_seconds: 0.0,
             cursor_local: Vector2::ZERO,
             selected_id: None,
+            window_capture_candidate: None,
+            window_captures: HashMap::new(),
             debug_visible: false,
             debug_hit_primary_cursor: false,
             debug_left_down: false,
@@ -536,6 +547,9 @@ impl NativeApp {
             self.drag_controller
                 .update_drag(self.scene.objects_mut(), self.cursor_local, now);
             self.update_held_object_rotation(pointer.right_down);
+            self.window_capture_candidate = desktop_window_at_point(pointer.screen_position);
+        } else {
+            self.window_capture_candidate = None;
         }
 
         self.handle_global_mouse_buttons(now, pointer.left_down, pointer.right_down);
@@ -565,6 +579,7 @@ impl NativeApp {
         if !self.physics_paused {
             self.scene.step(dt, self.scene_bounds());
         }
+        self.enforce_window_captures();
         self.collect_robot_bin_cubes();
         self.stabilize_robot_buddies();
         self.stabilize_quad_drones();
@@ -2924,6 +2939,94 @@ impl NativeApp {
             object.angular_velocity_z = 0.0;
         }
         self.is_rotation_dragging = false;
+        self.finish_window_capture(selected_id);
+    }
+
+    fn finish_window_capture(&mut self, object_id: u64) {
+        let previous = self.window_captures.remove(&object_id);
+        let Some(target) = self.window_capture_candidate.take() else {
+            if previous.is_some() {
+                self.push_status_message("Released object from its window terrarium.".to_string());
+            }
+            return;
+        };
+
+        let title = target.title.clone();
+        self.window_captures.insert(
+            object_id,
+            WindowCapture {
+                window_id: target.id,
+                title: title.clone(),
+                client_rect_screen: target.client_rect,
+            },
+        );
+        self.constrain_object_to_window(object_id, target.client_rect, Vector2::ZERO);
+        self.push_status_message(format!("Captured object in {title}. Drag it outside a window to release."));
+    }
+
+    fn enforce_window_captures(&mut self) {
+        let dragged_id = self.drag_controller.dragged_id();
+        let captures: Vec<(u64, WindowCapture)> = self
+            .window_captures
+            .iter()
+            .map(|(&object_id, capture)| (object_id, capture.clone()))
+            .collect();
+        let mut missing = Vec::new();
+
+        for (object_id, capture) in captures {
+            if dragged_id == Some(object_id) {
+                continue;
+            }
+            let Some(target) = desktop_window_by_id(capture.window_id) else {
+                missing.push((object_id, capture.title));
+                continue;
+            };
+            let delta = Vector2::new(
+                target.client_rect.x - capture.client_rect_screen.x,
+                target.client_rect.y - capture.client_rect_screen.y,
+            );
+            self.constrain_object_to_window(object_id, target.client_rect, delta);
+            if let Some(stored) = self.window_captures.get_mut(&object_id) {
+                stored.client_rect_screen = target.client_rect;
+                stored.title = target.title;
+            }
+        }
+
+        for (object_id, title) in missing {
+            self.window_captures.remove(&object_id);
+            self.push_status_message(format!("Released object because {title} is hidden or closed."));
+        }
+    }
+
+    fn constrain_object_to_window(&mut self, object_id: u64, client_rect_screen: RectF, window_delta: Vector2) {
+        let local_rect = self.screen_rect_to_local(client_rect_screen);
+        let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == object_id) else {
+            self.window_captures.remove(&object_id);
+            return;
+        };
+
+        object.body.position += window_delta;
+        let max_x = (local_rect.right() - object.body.width).max(local_rect.left());
+        let max_y = (local_rect.bottom() - object.body.height).max(local_rect.top());
+        if object.body.position.x < local_rect.left() {
+            object.body.position.x = local_rect.left();
+            object.body.velocity.x = object.body.velocity.x.abs() * object.body.restitution;
+        } else if object.body.position.x > max_x {
+            object.body.position.x = max_x;
+            object.body.velocity.x = -object.body.velocity.x.abs() * object.body.restitution;
+        }
+        if object.body.position.y < local_rect.top() {
+            object.body.position.y = local_rect.top();
+            object.body.velocity.y = object.body.velocity.y.abs() * object.body.restitution;
+        } else if object.body.position.y > max_y {
+            object.body.position.y = max_y;
+            object.body.velocity.y = -object.body.velocity.y.abs() * object.body.restitution;
+        }
+        object.body.is_sleeping = false;
+    }
+
+    fn screen_rect_to_local(&self, rect: RectF) -> RectF {
+        RectF::new(rect.x - self.bounds.x, rect.y - self.bounds.y, rect.width, rect.height)
     }
 
     fn update_held_object_rotation(&mut self, is_right_down: bool) {
@@ -3286,6 +3389,10 @@ impl NativeApp {
             lasso_cells: self.lasso_tool.render_cells(),
             portal_cells: self.portal_pair_tool.render_cells(),
             shatter_gun_cells: self.shatter_gun.render_cells(),
+            window_capture_guide: self
+                .window_capture_candidate
+                .as_ref()
+                .map(|target| self.screen_rect_to_local(target.client_rect)),
             hud: &self.hud,
         };
         let vertices = self.renderer.build_vertices(size.width, size.height, &scene)?;

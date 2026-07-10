@@ -62,6 +62,18 @@ For one portable runtime `.exe`, the renderer and Tauri shell still need to be m
 - `B`: equip the shatter gun; click to shoot textured screen shards
 - `Esc`: quit
 
+## Window terrariums (prototype)
+
+On Windows, drag any physics object over the client area of another application. A cyan guide marks the window that will capture it. Release the object to bind it to that window:
+
+- the object bounces inside the window's client bounds;
+- moving the window carries the object with it;
+- resizing the window pushes the object back inside;
+- minimizing or closing the window releases the object; and
+- dragging the object onto the desktop releases it, while dropping it over another window transfers it.
+
+This first prototype constrains objects to real window geometry but does not yet clip rendering behind overlapping windows or title bars.
+
 ## Project map
 
 - `native/app/src/main.rs`: native app shell, hotkeys, tray actions, HUD/game state
