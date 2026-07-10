@@ -22,7 +22,7 @@ use anyhow::{Context, Result};
 use core_types::{AppColor, AppConfig, CollisionShape, ObjectState, ObjectVisualKind, RectF, Vector2};
 use native_shell::{
     configure_overlay_window, desktop_window_at_point, desktop_window_by_id, overlay_window_attributes,
-    pick_model_file, set_overlay_input_mode, show_error_dialog, sync_window_to_monitor, DesktopWindowTarget,
+    pick_model_file, set_overlay_input_mode, show_error_dialog, sync_window_to_bounds, DesktopWindowTarget,
     GlobalImportKeys, GlobalInputPoller, OverlayInputMode, TrayAction, TrayController,
 };
 use renderer::{hoop_geometry, GpuVertex, HudState, OverlayPanel, PanelLine, RenderScene, SandRenderCell, SceneRenderer};
@@ -398,7 +398,7 @@ impl NativeApp {
             };
         }
 
-        let initial_bounds = monitor_bounds(event_loop).unwrap_or(self.bounds);
+        let initial_bounds = desktop_bounds(event_loop).unwrap_or(self.bounds);
         self.bounds = initial_bounds;
 
         let window = Arc::new(
@@ -407,7 +407,7 @@ impl NativeApp {
                 .context("Failed to create native overlay window")?,
         );
         configure_overlay_window(&window)?;
-        self.bounds = sync_window_to_monitor(&window);
+        self.bounds = sync_window_to_bounds(&window, initial_bounds);
         self.target_frame_duration = Duration::ZERO;
         self.overlay_mode = if self.scene.config().start_in_pass_through {
             OverlayInputMode::PassThrough
@@ -3707,15 +3707,30 @@ impl NativeApp {
     }
 }
 
-fn monitor_bounds(event_loop: &ActiveEventLoop) -> Option<RectF> {
-    let monitor = event_loop.primary_monitor()?;
-    let position = monitor.position();
-    let size = monitor.size();
+fn desktop_bounds(event_loop: &ActiveEventLoop) -> Option<RectF> {
+    let mut monitors = event_loop.available_monitors();
+    let first = monitors.next()?;
+    let first_position = first.position();
+    let first_size = first.size();
+    let mut left = first_position.x;
+    let mut top = first_position.y;
+    let mut right = first_position.x + first_size.width as i32;
+    let mut bottom = first_position.y + first_size.height as i32;
+
+    for monitor in monitors {
+        let position = monitor.position();
+        let size = monitor.size();
+        left = left.min(position.x);
+        top = top.min(position.y);
+        right = right.max(position.x + size.width as i32);
+        bottom = bottom.max(position.y + size.height as i32);
+    }
+
     Some(RectF::new(
-        position.x as f32,
-        position.y as f32,
-        size.width as f32,
-        size.height as f32,
+        left as f32,
+        top as f32,
+        (right - left).max(1) as f32,
+        (bottom - top).max(1) as f32,
     ))
 }
 

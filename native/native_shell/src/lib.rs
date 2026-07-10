@@ -233,36 +233,7 @@ pub fn overlay_window_attributes(title: &str, bounds: RectF) -> WindowAttributes
     attributes
 }
 
-pub fn sync_window_to_monitor(window: &Window) -> RectF {
-    let Some(monitor) = window.current_monitor() else {
-        let size = window.inner_size();
-        return RectF::new(0.0, 0.0, size.width as f32, size.height as f32);
-    };
-
-    #[cfg(target_os = "macos")]
-    let bounds = macos_visible_monitor_bounds(&monitor).unwrap_or_else(|| {
-        let position = monitor.position();
-        let size = monitor.size();
-        RectF::new(
-            position.x as f32,
-            position.y as f32,
-            size.width as f32,
-            size.height as f32,
-        )
-    });
-
-    #[cfg(not(target_os = "macos"))]
-    let bounds = {
-        let position = monitor.position();
-        let size = monitor.size();
-        RectF::new(
-            position.x as f32,
-            position.y as f32,
-            size.width as f32,
-            size.height as f32,
-        )
-    };
-
+pub fn sync_window_to_bounds(window: &Window, bounds: RectF) -> RectF {
     let position = PhysicalPosition::new(bounds.x.round() as i32, bounds.y.round() as i32);
     let size = PhysicalSize::new(bounds.width.max(1.0).round() as u32, bounds.height.max(1.0).round() as u32);
     window.set_outer_position(position);
