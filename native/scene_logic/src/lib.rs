@@ -648,7 +648,7 @@ impl SceneController {
             | ObjectVisualKind::Snail
             | ObjectVisualKind::QuadDrone
             | ObjectVisualKind::Basketball => CollisionShape::Circle,
-            ObjectVisualKind::Crystal | ObjectVisualKind::Star => CollisionShape::Diamond,
+            ObjectVisualKind::Crystal | ObjectVisualKind::BitCrystal | ObjectVisualKind::Star => CollisionShape::Diamond,
             _ => CollisionShape::Box,
         };
         state.body.collision_scale = 1.0;

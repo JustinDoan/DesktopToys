@@ -50,7 +50,25 @@ pub struct RenderScene<'a> {
     pub portal_cells: &'a [SandRenderCell],
     pub shatter_gun_cells: &'a [SandRenderCell],
     pub window_capture_guide: Option<RectF>,
+    pub cheer_portals: &'a [CheerPortalVisual],
+    pub screen_labels: &'a [ScreenLabel],
     pub hud: &'a HudState,
+}
+
+#[derive(Clone, Debug)]
+pub struct ScreenLabel {
+    pub position: Vector2,
+    pub text: String,
+    pub color: AppColor,
+    pub scale: i32,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CheerPortalVisual {
+    pub center: Vector2,
+    pub radius: f32,
+    pub color: AppColor,
+    pub intensity: f32,
 }
 
 #[repr(C)]
@@ -444,6 +462,36 @@ impl SceneRenderer {
                 );
             }
         }
+        for portal in scene.cheer_portals {
+            emit_cheer_portal(&mut vertices, width, height, *portal);
+        }
+        for label in scene.screen_labels {
+            let text_width = label.text.chars().count() as i32 * 8 * label.scale.max(1);
+            let x = label.position.x.round() as i32 - text_width / 2;
+            let y = label.position.y.round() as i32;
+            emit_text(
+                &mut vertices,
+                width,
+                height,
+                x + label.scale,
+                y + label.scale,
+                &label.text,
+                AppColor::from_argb(170, 12, 8, 28),
+                label.scale.max(1),
+                0.006,
+            );
+            emit_text(
+                &mut vertices,
+                width,
+                height,
+                x,
+                y,
+                &label.text,
+                label.color,
+                label.scale.max(1),
+                0.004,
+            );
+        }
         emit_panels(&mut vertices, width, height, scene.hud);
         self.vertices = vertices;
         Ok(&self.vertices)
@@ -463,6 +511,7 @@ impl SceneRenderer {
             ObjectVisualKind::Cube => self.generated_mesh(key, || cube_mesh(size, object.base_color)),
             ObjectVisualKind::Dice => self.generated_mesh(key, || dice_mesh(size)),
             ObjectVisualKind::Crystal => self.generated_mesh(key, || crystal_mesh(size, object.base_color)),
+            ObjectVisualKind::BitCrystal => self.generated_mesh(key, || bit_crystal_mesh(size, object.base_color)),
             ObjectVisualKind::Satellite => self.generated_mesh(key, || satellite_mesh(size, object.base_color)),
             ObjectVisualKind::Ball => self.generated_mesh(key, || ball_mesh(size, object.base_color)),
             ObjectVisualKind::SoftBall => self.generated_mesh(key, || soft_ball_mesh(size, object.base_color)),
@@ -560,6 +609,7 @@ impl MeshCacheKey {
                 ObjectVisualKind::Basketball => 25,
                 ObjectVisualKind::BasketballHoop => 26,
                 ObjectVisualKind::ScreenShard => 27,
+                ObjectVisualKind::BitCrystal => 28,
             },
             width_milli: quantize_size(object.body.width.max(1.0)),
             height_milli: quantize_size(object.body.height.max(1.0)),
@@ -1164,6 +1214,10 @@ fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds
             scale_y *= 1.0 + (((elapsed_seconds * 3.1) + phase).cos() as f32 * 0.055);
             rotation_y += ((elapsed_seconds * 1.1) + phase).sin() * 7.0;
         },
+        ObjectVisualKind::BitCrystal => {
+            center_z += 12.0;
+            rotation_y += ((elapsed_seconds * 0.9) + phase).sin() * 4.0;
+        },
         ObjectVisualKind::Satellite => {
             let wobble = ((elapsed_seconds * 2.2) + phase).sin();
             center_z += 30.0 + (wobble as f32 * 7.0);
@@ -1599,6 +1653,102 @@ fn crystal_mesh(size: f32, base_color: AppColor) -> Mesh {
             vertices,
             color,
             alpha,
+        });
+    }
+
+    Mesh { triangles }
+}
+
+fn emit_cheer_portal(
+    vertices: &mut Vec<GpuVertex>,
+    width: u32,
+    height: u32,
+    portal: CheerPortalVisual,
+) {
+    const SEGMENTS: usize = 36;
+    let intensity = portal.intensity.clamp(0.0, 1.0);
+    let radius_x = portal.radius.max(8.0);
+    let radius_y = radius_x * 0.32;
+    for ring in 0..3 {
+        let ring_radius = 1.0 + ring as f32 * 0.13;
+        for index in 0..SEGMENTS {
+            let angle = index as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+            let x = portal.center.x + angle.cos() * radius_x * ring_radius;
+            let y = portal.center.y + angle.sin() * radius_y * ring_radius;
+            let sparkle = ((index * 17 + ring * 11) % 13) as f32 / 13.0;
+            let alpha = (90.0 + 150.0 * intensity * (0.55 + sparkle * 0.45)) as u8;
+            emit_rect(
+                vertices,
+                width,
+                height,
+                x.round() as i32 - 2,
+                y.round() as i32 - 2,
+                5,
+                5,
+                AppColor::from_argb(alpha, portal.color.r, portal.color.g, portal.color.b),
+                0.008 + ring as f32 * 0.0002,
+            );
+        }
+    }
+    emit_rect(
+        vertices,
+        width,
+        height,
+        (portal.center.x - radius_x * 0.72).round() as i32,
+        portal.center.y.round() as i32,
+        (radius_x * 1.44).round() as i32,
+        5,
+        AppColor::from_argb((150.0 * intensity) as u8, 245, 238, 255),
+        0.007,
+    );
+}
+
+/// A tall, beveled gem with the split silhouette associated with cheering
+/// currency, while remaining an original mesh rather than a copied logo asset.
+fn bit_crystal_mesh(size: f32, base_color: AppColor) -> Mesh {
+    let half_width = size * 0.34;
+    let shoulder_y = -size * 0.20;
+    let waist_y = size * 0.10;
+    let top_y = -size * 0.52;
+    let bottom_y = size * 0.52;
+    let depth = size * 0.22;
+    let front = depth;
+    let back = -depth;
+    let outline = [
+        Vec3::new(0.0, top_y, front),
+        Vec3::new(half_width, shoulder_y, front),
+        Vec3::new(half_width * 0.62, waist_y, front),
+        Vec3::new(0.0, bottom_y, front),
+        Vec3::new(-half_width * 0.62, waist_y, front),
+        Vec3::new(-half_width, shoulder_y, front),
+    ];
+    let back_outline = outline.map(|point| Vec3::new(point.x, point.y, back));
+    let front_center = Vec3::new(0.0, -size * 0.02, front + depth * 0.42);
+    let back_center = Vec3::new(0.0, -size * 0.02, back - depth * 0.18);
+    let shades = [1.28, 1.05, 0.82, 0.62, 0.76, 1.10];
+    let mut triangles = Vec::with_capacity(24);
+
+    for index in 0..outline.len() {
+        let next = (index + 1) % outline.len();
+        triangles.push(SourceTriangle {
+            vertices: [front_center, outline[index], outline[next]],
+            color: scale_color(base_color, shades[index]),
+            alpha: 255,
+        });
+        triangles.push(SourceTriangle {
+            vertices: [back_center, back_outline[next], back_outline[index]],
+            color: scale_color(base_color, shades[(index + 3) % shades.len()] * 0.66),
+            alpha: 255,
+        });
+        triangles.push(SourceTriangle {
+            vertices: [outline[index], back_outline[index], back_outline[next]],
+            color: scale_color(base_color, shades[index] * 0.74),
+            alpha: 255,
+        });
+        triangles.push(SourceTriangle {
+            vertices: [outline[index], back_outline[next], outline[next]],
+            color: scale_color(base_color, shades[index] * 0.92),
+            alpha: 255,
         });
     }
 

@@ -25,7 +25,10 @@ use native_shell::{
     pick_model_file, set_overlay_input_mode, show_error_dialog, sync_window_to_bounds, DesktopWindowTarget,
     GlobalImportKeys, GlobalInputPoller, OverlayInputMode, TrayAction, TrayController,
 };
-use renderer::{hoop_geometry, GpuVertex, HudState, OverlayPanel, PanelLine, RenderScene, SandRenderCell, SceneRenderer};
+use renderer::{
+    hoop_geometry, CheerPortalVisual, GpuVertex, HudState, OverlayPanel, PanelLine, RenderScene, SandRenderCell,
+    SceneRenderer, ScreenLabel,
+};
 use scene_logic::{DragController, FrameClock, HitTester, MouseTracker, SceneController};
 use serde::Deserialize;
 use winit::{
@@ -153,6 +156,17 @@ struct WindowCapture {
     object_collidable: bool,
 }
 
+#[derive(Clone, Debug)]
+struct CheerDropEffect {
+    donor: String,
+    bits: u32,
+    center: Vector2,
+    color: AppColor,
+    started_at: f64,
+    ends_at: f64,
+    anonymous: bool,
+}
+
 struct NativeApp {
     window: Option<Arc<Window>>,
     window_id: Option<WindowId>,
@@ -177,6 +191,9 @@ struct NativeApp {
     selected_id: Option<u64>,
     window_capture_candidate: Option<DesktopWindowTarget>,
     window_captures: HashMap<u64, WindowCapture>,
+    cheer_drop_effects: Vec<CheerDropEffect>,
+    cheer_portals: Vec<CheerPortalVisual>,
+    cheer_labels: Vec<ScreenLabel>,
     debug_visible: bool,
     debug_hit_primary_cursor: bool,
     debug_left_down: bool,
@@ -306,6 +323,9 @@ impl Default for NativeApp {
             selected_id: None,
             window_capture_candidate: None,
             window_captures: HashMap::new(),
+            cheer_drop_effects: Vec::new(),
+            cheer_portals: Vec::new(),
+            cheer_labels: Vec::new(),
             debug_visible: false,
             debug_hit_primary_cursor: false,
             debug_left_down: false,
@@ -582,6 +602,7 @@ impl NativeApp {
         self.update_quad_drones(dt);
         self.update_snails(dt, &window);
         self.update_portals(dt);
+        self.update_cheer_drop_effects(now);
         if !self.physics_paused {
             self.scene.step(dt, self.scene_bounds());
         }
@@ -1233,6 +1254,7 @@ impl NativeApp {
                 self.push_status_message("Control UI spawned target.".to_string());
             },
             "spawn_visual_kind" => self.spawn_control_visual_kind(command.payload.as_ref()),
+            "simulate_twitch_cheer" => self.simulate_twitch_cheer(command.payload.as_ref()),
             "spawn_robot_buddy" => self.spawn_robot_buddy(),
             "spawn_stress_batch" => self.spawn_stress_cubes(),
             "reset_scene" => self.reset_everything(),
@@ -2948,6 +2970,123 @@ impl NativeApp {
         self.finish_window_capture(selected_id);
     }
 
+    fn simulate_twitch_cheer(&mut self, payload: Option<&serde_json::Value>) {
+        let bits = payload
+            .and_then(|value| value.get("bits"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(100)
+            .clamp(1, 100_000) as u32;
+        let anonymous = payload
+            .and_then(|value| value.get("anonymous"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let donor = if anonymous {
+            "MYSTERIOUS CHEERER".to_string()
+        } else {
+            payload
+                .and_then(|value| value.get("donor"))
+                .and_then(serde_json::Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .unwrap_or("GoblinFan42")
+                .chars()
+                .take(24)
+                .collect()
+        };
+        let message = payload
+            .and_then(|value| value.get("message"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("!!!");
+        self.spawn_cheer_drop(bits, donor, message, anonymous);
+    }
+
+    fn spawn_cheer_drop(&mut self, bits: u32, donor: String, message: &str, anonymous: bool) {
+        let bounds = self.scene_bounds();
+        let center = Vector2::new(
+            self.cursor_local.x.clamp(220.0, (bounds.right() - 220.0).max(220.0)),
+            82.0,
+        );
+        let color = cheer_tier_color(bits, anonymous);
+        let count = (((bits + 1) as f32).log2().ceil() as usize).clamp(3, 12);
+        let tier = (bits as f32).log10().max(0.0);
+        let size = (34.0 + tier * 7.0).clamp(34.0, 72.0);
+        let excitement = message.chars().filter(|character| matches!(character, '!' | '?')).count().min(8) as f32;
+        let mass_per_crystal = ((bits as f32 / 100.0) / count as f32).clamp(0.35, 10.0);
+
+        for index in 0..count {
+            let phase = index as f32 * 2.399_963_1 + bits as f32 * 0.017;
+            let horizontal = phase.sin() * (42.0 + index as f32 * 4.0);
+            let position = Vector2::new(center.x + horizontal - size * 0.5, center.y + 10.0 + phase.cos().abs() * 18.0);
+            let id = self.scene.spawn_custom_object(
+                position,
+                Vector2::new(size * 0.72, size),
+                color,
+                ObjectVisualKind::BitCrystal,
+                CollisionShape::Diamond,
+            );
+            if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == id) {
+                object.body.mass = mass_per_crystal;
+                object.body.restitution = (0.48 + tier * 0.055).clamp(0.48, 0.82);
+                object.body.friction = 0.58;
+                object.body.velocity = Vector2::new(
+                    phase.sin() * (150.0 + excitement * 28.0),
+                    120.0 + phase.cos().abs() * 145.0 + excitement * 20.0,
+                );
+                object.rotation_y = phase as f64 * 35.0;
+                object.angular_velocity_x = phase.cos() as f64 * 180.0;
+                object.angular_velocity_y = phase.sin() as f64 * 240.0;
+                object.angular_velocity_z = (index as f64 - count as f64 * 0.5) * 22.0;
+                object.source_owner = Some(donor.clone());
+                object.source_value = Some((bits / count as u32).max(1));
+            }
+            self.selected_id = Some(id);
+        }
+
+        let now = self.frame_clock.elapsed_seconds;
+        self.cheer_drop_effects.push(CheerDropEffect {
+            donor: donor.clone(),
+            bits,
+            center,
+            color,
+            started_at: now,
+            ends_at: now + 3.4,
+            anonymous,
+        });
+        self.push_status_message(format!("{donor} cheered {bits} simulated Bits."));
+    }
+
+    fn update_cheer_drop_effects(&mut self, now: f64) {
+        self.cheer_drop_effects.retain(|effect| now < effect.ends_at);
+        self.cheer_portals.clear();
+        self.cheer_labels.clear();
+        for effect in &self.cheer_drop_effects {
+            let age = (now - effect.started_at).max(0.0) as f32;
+            let remaining = (effect.ends_at - now).max(0.0) as f32;
+            let open = (age / 0.24).clamp(0.0, 1.0);
+            let close = (remaining / 0.55).clamp(0.0, 1.0);
+            let intensity = open.min(close);
+            self.cheer_portals.push(CheerPortalVisual {
+                center: effect.center,
+                radius: (70.0 + (effect.bits as f32).log10() * 16.0) * intensity.max(0.12),
+                color: effect.color,
+                intensity,
+            });
+            if age < 2.7 {
+                let alpha = if age < 0.25 {
+                    (age / 0.25 * 255.0) as u8
+                } else {
+                    ((2.7 - age).clamp(0.0, 0.7) / 0.7 * 255.0).min(255.0) as u8
+                };
+                let prefix = if effect.anonymous { "?" } else { "+" };
+                self.cheer_labels.push(ScreenLabel {
+                    position: Vector2::new(effect.center.x, effect.center.y + 34.0),
+                    text: format!("{prefix} {}  {} BITS", effect.donor.to_uppercase(), effect.bits),
+                    color: AppColor::from_argb(alpha, 248, 244, 255),
+                    scale: 2,
+                });
+            }
+        }
+    }
+
     fn finish_window_capture(&mut self, object_id: u64) {
         let previous = self.window_captures.remove(&object_id);
         let Some(target) = self.window_capture_candidate.take() else {
@@ -3438,6 +3577,8 @@ impl NativeApp {
                 .window_capture_candidate
                 .as_ref()
                 .map(|target| self.screen_rect_to_local(target.client_rect)),
+            cheer_portals: &self.cheer_portals,
+            screen_labels: &self.cheer_labels,
             hud: &self.hud,
         };
         let vertices = self.renderer.build_vertices(size.width, size.height, &scene)?;
@@ -3802,6 +3943,19 @@ fn payload_f32(payload: &serde_json::Value, key: &str, fallback: f32, min: f32, 
         .and_then(serde_json::Value::as_f64)
         .map(|value| (value as f32).clamp(min, max))
         .unwrap_or(fallback)
+}
+
+fn cheer_tier_color(bits: u32, anonymous: bool) -> AppColor {
+    if anonymous {
+        return AppColor::from_rgb(54, 34, 82);
+    }
+    match bits {
+        0..=99 => AppColor::from_rgb(150, 92, 255),
+        100..=999 => AppColor::from_rgb(68, 214, 255),
+        1_000..=4_999 => AppColor::from_rgb(235, 74, 255),
+        5_000..=9_999 => AppColor::from_rgb(255, 78, 112),
+        _ => AppColor::from_rgb(255, 204, 72),
+    }
 }
 
 #[derive(Debug, Deserialize)]

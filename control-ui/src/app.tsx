@@ -101,6 +101,17 @@ const spawnGroups: Array<{ id: string; label: string; variants: SpawnVariant[] }
 
 const labGroups: Array<{ id: string; label: string; actions: LabAction[] }> = [
   {
+    id: "cheers",
+    label: "Cheers",
+    actions: [
+      { label: "Cheer 10", shortLabel: "10 Bits", command: "simulate_twitch_cheer", payload: { bits: 10, donor: "PixelGoblin", message: "nice!" }, icon: Gem, tone: "violet" },
+      { label: "Cheer 100", shortLabel: "100 Bits", command: "simulate_twitch_cheer", payload: { bits: 100, donor: "GoblinFan42", message: "LET'S GO!!!" }, icon: Gem, tone: "cyan" },
+      { label: "Cheer 1000", shortLabel: "1K Bits", command: "simulate_twitch_cheer", payload: { bits: 1000, donor: "CrystalWhale", message: "BIG DROP!!!!!" }, icon: Sparkles, tone: "violet" },
+      { label: "Cheer 5000", shortLabel: "5K Bits", command: "simulate_twitch_cheer", payload: { bits: 5000, donor: "MeteorPatron", message: "CHAOS!!!!!!!!" }, icon: Sparkles, tone: "amber" },
+      { label: "Anonymous 500", shortLabel: "Anon", command: "simulate_twitch_cheer", payload: { bits: 500, anonymous: true, message: "???" }, icon: Gem, tone: "steel" },
+    ],
+  },
+  {
     id: "tools",
     label: "Tools",
     actions: [

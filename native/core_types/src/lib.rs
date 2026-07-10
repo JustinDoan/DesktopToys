@@ -136,6 +136,7 @@ pub enum ObjectVisualKind {
     Cube,
     Dice,
     Crystal,
+    BitCrystal,
     Satellite,
     DvdLogo,
     Ball,
@@ -254,6 +255,8 @@ pub struct ObjectState {
     pub model_source_path: Option<String>,
     pub model_scale_multiplier: f32,
     pub screen_shard: Option<ScreenShardGeometry>,
+    pub source_owner: Option<String>,
+    pub source_value: Option<u32>,
 }
 
 impl Default for ObjectState {
@@ -279,6 +282,8 @@ impl Default for ObjectState {
             model_source_path: None,
             model_scale_multiplier: 1.0,
             screen_shard: None,
+            source_owner: None,
+            source_value: None,
         }
     }
 }
