@@ -184,6 +184,7 @@ struct NativeApp {
     control_command_rx: Option<Receiver<ControlIpcCommand>>,
     physics_paused: bool,
     bounds: RectF,
+    spawn_monitor_bounds: Option<RectF>,
     overlay_mode: OverlayInputMode,
     pending_mode: OverlayInputMode,
     mode_candidate_since_seconds: f64,
@@ -316,6 +317,7 @@ impl Default for NativeApp {
             control_command_rx: None,
             physics_paused: false,
             bounds: RectF::new(0.0, 0.0, 1280.0, 720.0),
+            spawn_monitor_bounds: None,
             overlay_mode: OverlayInputMode::Interactive,
             pending_mode: OverlayInputMode::Interactive,
             mode_candidate_since_seconds: 0.0,
@@ -1276,6 +1278,7 @@ impl NativeApp {
                 self.push_status_message(format!("Control UI scene mode: {mode}."));
             },
             "apply_runtime_settings" => self.apply_control_runtime_settings(command.payload.as_ref()),
+            "set_spawn_monitor" => self.set_spawn_monitor(command.payload.as_ref()),
             "toggle_weather" => self.toggle_weather_world(),
             "toggle_sand" => self.toggle_sand_world(),
             "toggle_measure_tool" => self.toggle_measure_tool(),
@@ -3000,10 +3003,10 @@ impl NativeApp {
     }
 
     fn spawn_cheer_drop(&mut self, bits: u32, donor: String, message: &str, anonymous: bool) {
-        let bounds = self.scene_bounds();
+        let bounds = self.spawn_bounds();
         let center = Vector2::new(
-            self.cursor_local.x.clamp(220.0, (bounds.right() - 220.0).max(220.0)),
-            82.0,
+            bounds.x + bounds.width * 0.5,
+            bounds.y + 82.0,
         );
         let color = cheer_tier_color(bits, anonymous);
         let count = (((bits + 1) as f32).log2().ceil() as usize).clamp(3, 12);
@@ -3858,8 +3861,30 @@ impl NativeApp {
     }
 
     fn default_spawn_position(&self) -> Vector2 {
-        let bounds = self.scene_bounds();
-        Vector2::new(bounds.width * 0.5, 40.0)
+        let bounds = self.spawn_bounds();
+        Vector2::new(bounds.x + bounds.width * 0.5, bounds.y + 40.0)
+    }
+
+    fn spawn_bounds(&self) -> RectF {
+        self.spawn_monitor_bounds.unwrap_or_else(|| self.scene_bounds())
+    }
+
+    fn set_spawn_monitor(&mut self, payload: Option<&serde_json::Value>) {
+        let Some(payload) = payload else {
+            return;
+        };
+        let desktop = self.scene_bounds();
+        let screen_x = payload_f32(payload, "x", self.bounds.x, -100_000.0, 100_000.0);
+        let screen_y = payload_f32(payload, "y", self.bounds.y, -100_000.0, 100_000.0);
+        let width = payload_f32(payload, "width", desktop.width, 1.0, desktop.width);
+        let height = payload_f32(payload, "height", desktop.height, 1.0, desktop.height);
+        let local = RectF::new(screen_x - self.bounds.x, screen_y - self.bounds.y, width, height);
+        let left = local.x.clamp(0.0, desktop.right() - 1.0);
+        let top = local.y.clamp(0.0, desktop.bottom() - 1.0);
+        let right = local.right().clamp(left + 1.0, desktop.right());
+        let bottom = local.bottom().clamp(top + 1.0, desktop.bottom());
+        self.spawn_monitor_bounds = Some(RectF::new(left, top, right - left, bottom - top));
+        self.push_status_message("Control UI changed the primary spawn monitor.".to_string());
     }
 }
 

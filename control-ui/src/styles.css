@@ -257,7 +257,7 @@ select:focus-visible {
 .tab-header {
   position: relative;
   display: grid;
-  grid-template-columns: 94px 66px 72px minmax(24px, 1fr) auto;
+  grid-template-columns: 1.15fr 0.85fr 1fr;
   align-items: center;
   gap: 5px;
   padding: 5px 7px;
@@ -319,40 +319,6 @@ select:focus-visible {
   border-radius: 3px;
   background: radial-gradient(circle, #d6ff72 0 32%, var(--green) 33% 62%, #376f24 63%);
   box-shadow: 0 0 8px rgb(159 240 90 / 0.7);
-}
-
-.object-bars {
-  display: flex;
-  height: 23px;
-  min-width: 0;
-  align-items: end;
-  gap: 2px;
-  overflow: hidden;
-  padding: 0 2px;
-  background-image:
-    linear-gradient(90deg, rgb(255 255 255 / 0.045) 1px, transparent 1px),
-    linear-gradient(rgb(255 255 255 / 0.04) 1px, transparent 1px);
-  background-size: 8px 8px;
-}
-
-.object-bars span {
-  flex: 0 0 3px;
-  min-height: 2px;
-  background: linear-gradient(180deg, #b8ff70, #5ca336);
-  box-shadow: 0 0 5px rgb(159 240 90 / 0.22);
-}
-
-.transport-chip {
-  max-width: 58px;
-  overflow: hidden;
-  justify-self: end;
-  color: var(--dim);
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.3px;
-  text-overflow: ellipsis;
-  text-transform: uppercase;
-  white-space: nowrap;
 }
 
 .frame-section {
@@ -788,7 +754,8 @@ select:focus-visible {
 }
 
 .setting-field,
-.setting-toggle {
+.setting-toggle,
+.display-setting {
   display: grid;
   min-width: 0;
   align-items: center;
@@ -809,6 +776,30 @@ select:focus-visible {
 
 .setting-toggle {
   grid-template-columns: 1fr auto 28px;
+}
+
+.display-setting {
+  grid-template-columns: 112px minmax(0, 1fr);
+  padding: 4px 8px;
+}
+
+.display-setting span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.35px;
+  text-transform: uppercase;
+}
+
+.display-setting select {
+  width: 100%;
+  min-width: 0;
+  height: 24px;
+  color: #ece8df;
+  border: 1px solid #050606;
+  border-radius: 4px;
+  background: #0d0e0e;
+  font-size: 10px;
 }
 
 .setting-field span,
@@ -914,11 +905,7 @@ select:focus-visible {
   }
 
   .tab-header {
-    grid-template-columns: 90px 62px 68px minmax(0, 1fr);
-  }
-
-  .transport-chip {
-    display: none;
+    grid-template-columns: 1.15fr 0.85fr 1fr;
   }
 
   .cheer-fields {

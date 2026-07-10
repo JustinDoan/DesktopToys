@@ -39,6 +39,21 @@ export type CommandEntry = {
 
 export type EngineCommandPayload = Record<string, string | number | boolean>;
 
+export type DisplayInfo = {
+  id: string;
+  label: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  primary: boolean;
+};
+
+const previewDisplays: DisplayInfo[] = [
+  { id: "0:0:1920:1080", label: "Display 1", x: 0, y: 0, width: 1920, height: 1080, primary: true },
+  { id: "1920:0:1920:1080", label: "Display 2", x: 1920, y: 0, width: 1920, height: 1080, primary: false },
+];
+
 const previewSnapshot: EngineSnapshot = {
   connected: false,
   transport: "browser preview",
@@ -101,6 +116,13 @@ export async function getEngineSnapshot(): Promise<EngineSnapshot> {
   }
 
   return invoke<EngineSnapshot>("engine_snapshot");
+}
+
+export async function getDisplayLayout(): Promise<DisplayInfo[]> {
+  if (!hasTauriRuntime()) {
+    return previewDisplays;
+  }
+  return invoke<DisplayInfo[]>("display_layout");
 }
 
 export async function dispatchEngineCommand(

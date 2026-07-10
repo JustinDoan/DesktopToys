@@ -18,12 +18,14 @@ import {
 } from "lucide-preact";
 import {
   dispatchEngineCommand,
+  DisplayInfo,
   EngineCommandPayload,
   EngineSnapshot,
   hideOverlay,
   minimizeOverlay,
   RuntimeSettings,
   getEngineSnapshot,
+  getDisplayLayout,
 } from "./bridge";
 
 type Tone = "steel" | "cyan" | "amber" | "violet" | "green";
@@ -159,8 +161,6 @@ const labGroups: Array<{ id: string; label: string; actions: LabAction[] }> = [
 ];
 
 const quickLabActionKeys = new Set(["toggle_shatter_gun", "shatter_screen", "toggle_weather", "toggle_sand"]);
-const objectBars = [22, 38, 52, 72, 88, 66, 58, 42, 34, 29, 38, 44, 31, 27, 25, 23, 22, 21];
-
 const defaultSnapshot: EngineSnapshot = {
   connected: false,
   transport: "loading",
@@ -190,6 +190,8 @@ export function App() {
   const [selectedLabActionKey, setSelectedLabActionKey] = useState("toggle_debug");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState<RuntimeSettings>(defaultRuntimeSettings);
+  const [displays, setDisplays] = useState<DisplayInfo[]>([]);
+  const [spawnDisplayId, setSpawnDisplayId] = useState("");
   const [cheerDraft, setCheerDraft] = useState<CheerDraft>({
     bits: 100,
     donor: "GoblinFan42",
@@ -199,6 +201,17 @@ export function App() {
 
   useEffect(() => {
     getEngineSnapshot().then(applySnapshot).catch(() => applySnapshot(defaultSnapshot));
+    getDisplayLayout().then((layout) => {
+      setDisplays(layout);
+      const savedDisplayId = window.localStorage.getItem("overlay.spawnDisplayId");
+      const preferred = layout.find((display) => display.id === savedDisplayId)
+        ?? layout.find((display) => display.primary)
+        ?? layout[0];
+      if (preferred) {
+        setSpawnDisplayId(preferred.id);
+        void dispatchEngineCommand("set_spawn_monitor", displayPayload(preferred)).then(applySnapshot);
+      }
+    }).catch(() => setDisplays([]));
   }, []);
 
   useEffect(() => {
@@ -219,7 +232,6 @@ export function App() {
   const SelectedSpawnIcon = selectedVariant.icon;
   const SelectedLabIcon = selectedLabAction.icon;
   const commandText = formatCommand(snapshot.lastCommand);
-  const transportText = formatTransport(snapshot.transport);
   const cheerTier = describeCheerTier(cheerDraft.bits, cheerDraft.anonymous);
 
   async function send(command: string, payload: EngineCommandPayload = {}) {
@@ -290,6 +302,15 @@ export function App() {
     setCheerDraft({ bits, donor, message, anonymous });
   }
 
+  function chooseSpawnDisplay(displayId: string) {
+    setSpawnDisplayId(displayId);
+    window.localStorage.setItem("overlay.spawnDisplayId", displayId);
+    const display = displays.find((candidate) => candidate.id === displayId);
+    if (display) {
+      void send("set_spawn_monitor", displayPayload(display));
+    }
+  }
+
   return (
     <main className="pod-shell" data-pending={pendingCommand ?? ""}>
       <section className="command-pod" aria-label="Screen overlay command pod">
@@ -358,12 +379,6 @@ export function App() {
             <Gem size={12} strokeWidth={2.2} />
             <span>Cheers</span>
           </button>
-          <div className="object-bars" aria-hidden="true">
-            {objectBars.map((height, index) => (
-              <span key={index} style={{ height: `${height}%` }} />
-            ))}
-          </div>
-          <span className="transport-chip">{transportText}</span>
         </section>
 
         {activeTab === "objects" ? (
@@ -550,6 +565,22 @@ export function App() {
               </button>
             </header>
             <div className="settings-scroll">
+              <label className="display-setting">
+                <span>Primary spawn display</span>
+                <select
+                  aria-label="Primary spawn display"
+                  value={spawnDisplayId}
+                  disabled={displays.length === 0}
+                  onChange={(event) => chooseSpawnDisplay(event.currentTarget.value)}
+                >
+                  {displays.length === 0 ? <option value="">Display unavailable</option> : null}
+                  {displays.map((display, index) => (
+                    <option value={display.id} key={display.id}>
+                      {index + 1}. {display.label} ({display.width} x {display.height}){display.primary ? " - System primary" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <ToggleField
                 label="Pass-through"
                 checked={settingsDraft.startInPassThrough}
@@ -718,14 +749,11 @@ function describeCheerTier(bits: number, anonymous: boolean) {
   return { id: "gold", label: "Mythic" };
 }
 
-function formatTransport(transport: string) {
-  if (transport.toLowerCase().includes("browser")) {
-    return "Preview";
-  }
-
-  if (transport.toLowerCase().includes("loading")) {
-    return "Loading";
-  }
-
-  return transport.split("_").join(" ");
+function displayPayload(display: DisplayInfo): EngineCommandPayload {
+  return {
+    x: display.x,
+    y: display.y,
+    width: display.width,
+    height: display.height,
+  };
 }

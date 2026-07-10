@@ -91,6 +91,48 @@ struct CommandEntry {
     payload: String,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DisplayInfo {
+    id: String,
+    label: String,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+    primary: bool,
+}
+
+#[tauri::command]
+fn display_layout(app: tauri::AppHandle) -> Result<Vec<DisplayInfo>, String> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Ok(Vec::new());
+    };
+    let primary = window.primary_monitor().map_err(|error| error.to_string())?;
+    let primary_position = primary.as_ref().map(|monitor| monitor.position());
+    let primary_size = primary.as_ref().map(|monitor| monitor.size());
+    let monitors = window.available_monitors().map_err(|error| error.to_string())?;
+    Ok(monitors
+        .into_iter()
+        .enumerate()
+        .map(|(index, monitor)| {
+            let position = monitor.position();
+            let size = monitor.size();
+            let is_primary = primary_position == Some(position) && primary_size == Some(size);
+            let name = monitor.name().filter(|name| !name.trim().is_empty()).cloned();
+            DisplayInfo {
+                id: format!("{}:{}:{}:{}", position.x, position.y, size.width, size.height),
+                label: name.unwrap_or_else(|| format!("Display {}", index + 1)),
+                x: position.x,
+                y: position.y,
+                width: size.width,
+                height: size.height,
+                primary: is_primary,
+            }
+        })
+        .collect())
+}
+
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RuntimeSettings {
@@ -522,6 +564,7 @@ fn main() {
         .manage(ControlState::default())
         .invoke_handler(tauri::generate_handler![
             engine_snapshot,
+            display_layout,
             dispatch_engine_command,
             set_overlay_interactive,
             hide_overlay,
