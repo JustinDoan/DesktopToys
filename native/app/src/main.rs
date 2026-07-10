@@ -3878,7 +3878,6 @@ impl NativeApp {
             ResetWipeKind::Airlock => 3.3,
         };
         self.drag_controller.cancel_drag(self.scene.objects_mut());
-        self.window_captures.clear();
         self.pending_cheer_drops.clear();
         self.reset_wipe = Some(ResetWipe { kind, started_at: self.frame_clock.elapsed_seconds, duration });
         self.physics_paused = false;
@@ -3917,20 +3916,10 @@ impl NativeApp {
         match wipe.kind {
             ResetWipeKind::Snowplow => {
                 let blade_x = -180.0 + (bounds.width + 360.0) * progress;
-                let previous_progress = ((elapsed - dt as f64) / wipe.duration).clamp(0.0, 1.0) as f32;
-                let previous_blade_x = -180.0 + (bounds.width + 360.0) * previous_progress;
-                let blade_front = blade_x + 220.0;
-                let previous_front = previous_blade_x + 220.0;
-                let blade_speed = (bounds.width + 360.0) / wipe.duration as f32;
                 for object in self.scene.objects_mut() {
-                    let object_left = object.body.position.x;
-                    let object_right = object_left + object.body.width;
-                    let within_blade_height = object.body.position.y + object.body.height > bounds.height - 245.0;
-                    let blade_crossed_object = object_left <= blade_front && object_right >= previous_front - 18.0;
-                    if within_blade_height && blade_crossed_object {
-                        object.body.position.x = object.body.position.x.max(blade_front + 4.0);
-                        object.body.velocity.x = object.body.velocity.x.max(blade_speed * 1.08);
-                        object.body.velocity.y -= 115.0 + (object.id % 5) as f32 * 24.0;
+                    if object.body.position.x + object.body.width * 0.5 < blade_x + 150.0 {
+                        object.body.velocity.x = object.body.velocity.x.max(1100.0 + progress * 900.0);
+                        object.body.velocity.y -= 80.0 * dt;
                         object.body.is_sleeping = false;
                     }
                 }
