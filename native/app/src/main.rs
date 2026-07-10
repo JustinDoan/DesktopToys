@@ -185,22 +185,6 @@ struct PendingCheerDrop {
     emission_seconds: f64,
 }
 
-#[derive(Clone, Copy, Debug)]
-enum ResetWipeKind {
-    Snowplow,
-    BlackHole,
-    GravityFlush,
-    GiantBroom,
-    Airlock,
-}
-
-#[derive(Clone, Copy, Debug)]
-struct ResetWipe {
-    kind: ResetWipeKind,
-    started_at: f64,
-    duration: f64,
-}
-
 struct NativeApp {
     window: Option<Arc<Window>>,
     window_id: Option<WindowId>,
@@ -228,8 +212,6 @@ struct NativeApp {
     window_captures: HashMap<u64, WindowCapture>,
     cheer_drop_effects: Vec<CheerDropEffect>,
     pending_cheer_drops: Vec<PendingCheerDrop>,
-    reset_wipe: Option<ResetWipe>,
-    reset_wipe_nonce: u64,
     cheer_portals: Vec<CheerPortalVisual>,
     cheer_labels: Vec<ScreenLabel>,
     debug_visible: bool,
@@ -364,8 +346,6 @@ impl Default for NativeApp {
             window_captures: HashMap::new(),
             cheer_drop_effects: Vec::new(),
             pending_cheer_drops: Vec::new(),
-            reset_wipe: None,
-            reset_wipe_nonce: 0,
             cheer_portals: Vec::new(),
             cheer_labels: Vec::new(),
             debug_visible: false,
@@ -655,7 +635,6 @@ impl NativeApp {
         self.update_snails(dt, &window);
         self.update_portals(dt);
         self.update_cheer_drop_effects(now);
-        self.update_reset_wipe(now, dt);
         if !self.physics_paused {
             self.scene.step(dt, self.scene_bounds());
         }
@@ -920,7 +899,7 @@ impl NativeApp {
 
     fn handle_global_reset(&mut self, is_down: bool) {
         if is_down && !self.was_reset_down {
-            self.start_random_reset_wipe();
+            self.reset_everything();
         }
         self.was_reset_down = is_down;
     }
@@ -1314,7 +1293,7 @@ impl NativeApp {
             "simulate_twitch_cheer" => self.simulate_twitch_cheer(command.payload.as_ref()),
             "spawn_robot_buddy" => self.spawn_robot_buddy(),
             "spawn_stress_batch" => self.spawn_stress_cubes(),
-            "reset_scene" => self.start_random_reset_wipe(),
+            "reset_scene" => self.reset_everything(),
             "pause_physics" => {
                 self.physics_paused = true;
                 self.push_status_message("Control UI paused physics.".to_string());
@@ -3813,7 +3792,7 @@ impl NativeApp {
                 self.toggle_basketball_game();
             },
             AppAction::Reset => {
-                self.start_random_reset_wipe();
+                self.reset_everything();
             },
             AppAction::ToggleSettings => {
                 self.settings_panel.visible = !self.settings_panel.visible;
@@ -3852,113 +3831,6 @@ impl NativeApp {
         }
     }
 
-    fn start_random_reset_wipe(&mut self) {
-        self.reset_wipe_nonce = self.reset_wipe_nonce.wrapping_add(1);
-        let mut seed = (self.frame_clock.elapsed_seconds * 1000.0) as u64
-            ^ self.reset_wipe_nonce.wrapping_mul(0x9E37_79B9_7F4A_7C15);
-        seed ^= seed >> 30;
-        seed = seed.wrapping_mul(0xBF58_476D_1CE4_E5B9);
-        seed ^= seed >> 27;
-        let kind = match seed % 5 {
-            0 => ResetWipeKind::Snowplow,
-            1 => ResetWipeKind::BlackHole,
-            2 => ResetWipeKind::GravityFlush,
-            3 => ResetWipeKind::GiantBroom,
-            _ => ResetWipeKind::Airlock,
-        };
-        let duration = match kind {
-            ResetWipeKind::Snowplow => 3.2,
-            ResetWipeKind::BlackHole => 3.4,
-            ResetWipeKind::GravityFlush => 2.8,
-            ResetWipeKind::GiantBroom => 3.0,
-            ResetWipeKind::Airlock => 3.3,
-        };
-        self.drag_controller.cancel_drag(self.scene.objects_mut());
-        self.pending_cheer_drops.clear();
-        self.reset_wipe = Some(ResetWipe { kind, started_at: self.frame_clock.elapsed_seconds, duration });
-        self.physics_paused = false;
-        self.push_status_message(format!("Reset event: {}.", reset_wipe_name(kind)));
-    }
-
-    fn update_reset_wipe(&mut self, now: f64, dt: f32) {
-        let Some(wipe) = self.reset_wipe else { return; };
-        let elapsed = (now - wipe.started_at).max(0.0);
-        if elapsed >= wipe.duration {
-            self.reset_everything();
-            return;
-        }
-        let progress = (elapsed / wipe.duration).clamp(0.0, 1.0) as f32;
-        let bounds = self.scene_bounds();
-        let center = Vector2::new(bounds.width * 0.5, bounds.height * 0.5);
-        let accent = match wipe.kind {
-            ResetWipeKind::Snowplow => AppColor::from_rgb(118, 205, 255),
-            ResetWipeKind::BlackHole => AppColor::from_rgb(170, 82, 255),
-            ResetWipeKind::GravityFlush => AppColor::from_rgb(255, 204, 72),
-            ResetWipeKind::GiantBroom => AppColor::from_rgb(255, 142, 62),
-            ResetWipeKind::Airlock => AppColor::from_rgb(72, 238, 210),
-        };
-        match wipe.kind {
-            ResetWipeKind::Snowplow => {
-                let blade_x = -180.0 + (bounds.width + 360.0) * progress;
-                for object in self.scene.objects_mut() {
-                    if object.body.position.x + object.body.width * 0.5 < blade_x + 150.0 {
-                        object.body.velocity.x = object.body.velocity.x.max(1100.0 + progress * 900.0);
-                        object.body.velocity.y -= 80.0 * dt;
-                        object.body.is_sleeping = false;
-                    }
-                }
-                self.cheer_labels.push(ScreenLabel { position: Vector2::new(blade_x, bounds.height - 118.0), text: "[ SNOWPLOW ] >>>".to_string(), color: accent, scale: 3 });
-            },
-            ResetWipeKind::BlackHole => {
-                let strength = 900.0 + progress * 2600.0;
-                for object in self.scene.objects_mut() {
-                    let p = Vector2::new(object.body.position.x + object.body.width * 0.5, object.body.position.y + object.body.height * 0.5);
-                    let delta = center - p;
-                    let distance = delta.length_squared().sqrt().max(32.0);
-                    let tangent = Vector2::new(-delta.y, delta.x) * (1.0 / distance);
-                    object.body.velocity += delta * (strength * dt / distance) + tangent * (520.0 * dt);
-                    object.body.is_sleeping = false;
-                }
-                self.cheer_portals.push(CheerPortalVisual { center, radius: 54.0 + progress * 150.0, color: accent, intensity: 1.0 });
-            },
-            ResetWipeKind::GravityFlush => {
-                for object in self.scene.objects_mut() {
-                    object.body.velocity.y -= (1900.0 + progress * 1700.0) * dt;
-                    object.body.velocity.x += ((object.id % 7) as f32 - 3.0) * 18.0 * dt;
-                    object.body.is_sleeping = false;
-                }
-                self.cheer_labels.push(ScreenLabel { position: Vector2::new(center.x, bounds.height - 90.0 - progress * bounds.height * 0.55), text: "GRAVITY FLUSH  ^^^".to_string(), color: accent, scale: 3 });
-            },
-            ResetWipeKind::GiantBroom => {
-                let sweep_x = -120.0 + (bounds.width + 240.0) * progress;
-                let sweep_y = bounds.height * (0.22 + progress * 0.58);
-                for object in self.scene.objects_mut() {
-                    let x = object.body.position.x + object.body.width * 0.5;
-                    let y = object.body.position.y + object.body.height * 0.5;
-                    if x < sweep_x + 120.0 && y < sweep_y + 180.0 {
-                        object.body.velocity.x = object.body.velocity.x.max(820.0);
-                        object.body.velocity.y = object.body.velocity.y.max(620.0);
-                        object.body.is_sleeping = false;
-                    }
-                }
-                self.cheer_labels.push(ScreenLabel { position: Vector2::new(sweep_x, sweep_y), text: "//// GIANT BROOM ////".to_string(), color: accent, scale: 3 });
-            },
-            ResetWipeKind::Airlock => {
-                let airlock = Vector2::new(bounds.width - 58.0, center.y);
-                for object in self.scene.objects_mut() {
-                    let p = Vector2::new(object.body.position.x + object.body.width * 0.5, object.body.position.y + object.body.height * 0.5);
-                    let delta = airlock - p;
-                    let distance = delta.length_squared().sqrt().max(36.0);
-                    object.body.velocity += delta * ((1050.0 + progress * 1900.0) * dt / distance);
-                    object.body.velocity.x += 420.0 * dt;
-                    object.body.is_sleeping = false;
-                }
-                self.cheer_portals.push(CheerPortalVisual { center: airlock, radius: 78.0 + progress * 46.0, color: accent, intensity: 1.0 });
-                self.cheer_labels.push(ScreenLabel { position: Vector2::new(bounds.width - 250.0, center.y - 110.0), text: "AIRLOCK OPEN  >>>".to_string(), color: accent, scale: 2 });
-            },
-        }
-    }
-
     fn reset_everything(&mut self) {
         self.drag_controller.cancel_drag(self.scene.objects_mut());
         self.scene.clear_static_colliders();
@@ -3968,11 +3840,6 @@ impl NativeApp {
         self.basketball_game = BasketballGame::default();
         self.basketball_tracker.clear();
         self.basketball_confetti.clear();
-        self.pending_cheer_drops.clear();
-        self.cheer_drop_effects.clear();
-        self.cheer_portals.clear();
-        self.cheer_labels.clear();
-        self.reset_wipe = None;
         self.weather_world.clear();
         self.sand_world.clear();
         self.measure_tool.clear();
@@ -4190,16 +4057,6 @@ fn cheer_tier_color(tier: u32, anonymous: bool) -> AppColor {
         2 => AppColor::from_rgb(235, 74, 255),
         3 => AppColor::from_rgb(255, 78, 112),
         _ => AppColor::from_rgb(255, 204, 72),
-    }
-}
-
-fn reset_wipe_name(kind: ResetWipeKind) -> &'static str {
-    match kind {
-        ResetWipeKind::Snowplow => "Snowplow Run",
-        ResetWipeKind::BlackHole => "Black Hole Cleanup",
-        ResetWipeKind::GravityFlush => "Gravity Flush",
-        ResetWipeKind::GiantBroom => "Giant Broom",
-        ResetWipeKind::Airlock => "Airlock Decompression",
     }
 }
 
