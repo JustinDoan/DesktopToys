@@ -51,7 +51,6 @@ pub struct RenderScene<'a> {
     pub shatter_gun_cells: &'a [SandRenderCell],
     pub window_capture_guide: Option<RectF>,
     pub cheer_portals: &'a [CheerPortalVisual],
-    pub wipe_visuals: &'a [WipeVisual],
     pub screen_labels: &'a [ScreenLabel],
     pub hud: &'a HudState,
 }
@@ -70,22 +69,6 @@ pub struct CheerPortalVisual {
     pub radius: f32,
     pub color: AppColor,
     pub intensity: f32,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum WipeVisualKind {
-    Snowplow,
-    BlackHole,
-    GravityFlush,
-    GiantBroom,
-    Airlock,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct WipeVisual {
-    pub kind: WipeVisualKind,
-    pub progress: f32,
-    pub bounds: RectF,
 }
 
 #[repr(C)]
@@ -481,9 +464,6 @@ impl SceneRenderer {
         }
         for portal in scene.cheer_portals {
             emit_cheer_portal(&mut vertices, width, height, *portal);
-        }
-        for visual in scene.wipe_visuals {
-            emit_wipe_visual(&mut vertices, width, height, *visual);
         }
         for label in scene.screen_labels {
             let text_width = label.text.chars().count() as i32 * 8 * label.scale.max(1);
@@ -1721,75 +1701,6 @@ fn emit_cheer_portal(
         AppColor::from_argb((150.0 * intensity) as u8, 245, 238, 255),
         0.007,
     );
-}
-
-fn emit_wipe_visual(vertices: &mut Vec<GpuVertex>, width: u32, height: u32, visual: WipeVisual) {
-    let p = visual.progress.clamp(0.0, 1.0);
-    let w = visual.bounds.width;
-    let h = visual.bounds.height;
-    match visual.kind {
-        WipeVisualKind::Snowplow => {
-            let x = (-210.0 + (w + 420.0) * p).round() as i32;
-            let y = (h - 190.0).round() as i32;
-            emit_rect(vertices, width, height, x, y, 178, 82, AppColor::from_argb(245, 46, 67, 78), 0.003);
-            emit_rect(vertices, width, height, x + 82, y - 44, 72, 54, AppColor::from_argb(245, 67, 91, 105), 0.0028);
-            emit_rect(vertices, width, height, x + 96, y - 35, 43, 24, AppColor::from_argb(220, 80, 211, 255), 0.0025);
-            for wheel_x in [x + 34, x + 132] {
-                emit_rect(vertices, width, height, wheel_x, y + 66, 38, 38, AppColor::from_argb(255, 12, 16, 20), 0.002);
-                emit_rect(vertices, width, height, wheel_x + 9, y + 75, 20, 20, AppColor::from_argb(255, 84, 204, 242), 0.0018);
-            }
-            for layer in 0..4 {
-                emit_rect(vertices, width, height, x + 164 + layer * 9, y - 12 - layer * 5, 18, 112 + layer * 10, AppColor::from_argb(170 - layer as u8 * 24, 88, 220, 255), 0.0015);
-            }
-        },
-        WipeVisualKind::BlackHole => {
-            let center = Vector2::new(w * 0.5, h * 0.5);
-            for layer in 0..5 {
-                emit_cheer_portal(vertices, width, height, CheerPortalVisual {
-                    center,
-                    radius: 70.0 + p * 170.0 + layer as f32 * 18.0,
-                    color: AppColor::from_rgb(150 + layer as u8 * 12, 55, 255),
-                    intensity: (1.0 - layer as f32 * 0.12).max(0.25),
-                });
-            }
-            emit_rect(vertices, width, height, (center.x - 54.0 - p * 45.0) as i32, (center.y - 18.0 - p * 15.0) as i32, (108.0 + p * 90.0) as i32, (36.0 + p * 30.0) as i32, AppColor::from_argb(245, 5, 2, 14), 0.001);
-        },
-        WipeVisualKind::GravityFlush => {
-            let ring_y = (h - 74.0 - p * h * 0.48).max(60.0);
-            emit_cheer_portal(vertices, width, height, CheerPortalVisual { center: Vector2::new(w * 0.5, ring_y), radius: 120.0 + p * 260.0, color: AppColor::from_rgb(255, 194, 55), intensity: 1.0 - p * 0.35 });
-            for index in 0..18 {
-                let x = ((index as f32 + 0.5) / 18.0 * w) as i32;
-                let streak = 80 + ((index * 37) % 170) as i32;
-                emit_rect(vertices, width, height, x, (h * (1.0 - p) - streak as f32) as i32, 3 + (index % 3) as i32, streak, AppColor::from_argb(130, 255, 199, 64), 0.004);
-            }
-        },
-        WipeVisualKind::GiantBroom => {
-            let x = (-180.0 + (w + 360.0) * p) as i32;
-            let y = (h * (0.20 + p * 0.58)) as i32;
-            emit_rect(vertices, width, height, x - 15, y - 185, 30, 170, AppColor::from_argb(255, 70, 76, 82), 0.0025);
-            emit_rect(vertices, width, height, x - 95, y - 34, 190, 54, AppColor::from_argb(255, 202, 91, 28), 0.002);
-            for bristle in 0..14 {
-                let bx = x - 87 + bristle * 13;
-                let length = 55 + (bristle % 4) * 12;
-                emit_rect(vertices, width, height, bx, y + 16, 7, length, AppColor::from_argb(210, 255, 151, 48), 0.0018);
-            }
-            for dust in 0..12 {
-                emit_rect(vertices, width, height, x - 130 - dust * 18, y + 44 + ((dust * 17) % 52), 5, 5, AppColor::from_argb(150, 255, 119, 30), 0.004);
-            }
-        },
-        WipeVisualKind::Airlock => {
-            let x = (w - 150.0) as i32;
-            let y = (h * 0.5 - 170.0) as i32;
-            for inset in 0..5 {
-                emit_rect_outline(vertices, width, height, x + inset * 10, y + inset * 10, 140 - inset * 20, 340 - inset * 20, AppColor::from_argb(235 - inset as u8 * 28, 55, 232, 216), 0.002 + inset as f32 * 0.0002);
-            }
-            emit_cheer_portal(vertices, width, height, CheerPortalVisual { center: Vector2::new(w - 82.0, h * 0.5), radius: 116.0, color: AppColor::from_rgb(58, 239, 218), intensity: 0.85 + p * 0.15 });
-            for beam in 0..10 {
-                let beam_y = (h * 0.5 - 125.0 + beam as f32 * 27.0) as i32;
-                emit_rect(vertices, width, height, (w * (0.18 + p * 0.22)) as i32, beam_y, (w * (0.76 - p * 0.18)) as i32, 2, AppColor::from_argb(55 + beam as u8 * 6, 62, 231, 218), 0.005);
-            }
-        },
-    }
 }
 
 /// A tall, beveled gem with the split silhouette associated with cheering

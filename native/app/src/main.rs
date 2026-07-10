@@ -28,7 +28,6 @@ use native_shell::{
 use renderer::{
     hoop_geometry, CheerPortalVisual, GpuVertex, HudState, OverlayPanel, PanelLine, RenderScene, SandRenderCell,
     SceneRenderer, ScreenLabel,
-    WipeVisual, WipeVisualKind,
 };
 use scene_logic::{DragController, FrameClock, HitTester, MouseTracker, SceneController};
 use serde::Deserialize;
@@ -231,7 +230,6 @@ struct NativeApp {
     pending_cheer_drops: Vec<PendingCheerDrop>,
     reset_wipe: Option<ResetWipe>,
     reset_wipe_nonce: u64,
-    reset_wipe_visuals: Vec<WipeVisual>,
     cheer_portals: Vec<CheerPortalVisual>,
     cheer_labels: Vec<ScreenLabel>,
     debug_visible: bool,
@@ -368,7 +366,6 @@ impl Default for NativeApp {
             pending_cheer_drops: Vec::new(),
             reset_wipe: None,
             reset_wipe_nonce: 0,
-            reset_wipe_visuals: Vec::new(),
             cheer_portals: Vec::new(),
             cheer_labels: Vec::new(),
             debug_visible: false,
@@ -3682,7 +3679,6 @@ impl NativeApp {
                 .as_ref()
                 .map(|target| self.screen_rect_to_local(target.client_rect)),
             cheer_portals: &self.cheer_portals,
-            wipe_visuals: &self.reset_wipe_visuals,
             screen_labels: &self.cheer_labels,
             hud: &self.hud,
         };
@@ -3885,7 +3881,6 @@ impl NativeApp {
     }
 
     fn update_reset_wipe(&mut self, now: f64, dt: f32) {
-        self.reset_wipe_visuals.clear();
         let Some(wipe) = self.reset_wipe else { return; };
         let elapsed = (now - wipe.started_at).max(0.0);
         if elapsed >= wipe.duration {
@@ -3894,17 +3889,6 @@ impl NativeApp {
         }
         let progress = (elapsed / wipe.duration).clamp(0.0, 1.0) as f32;
         let bounds = self.scene_bounds();
-        self.reset_wipe_visuals.push(WipeVisual {
-            kind: match wipe.kind {
-                ResetWipeKind::Snowplow => WipeVisualKind::Snowplow,
-                ResetWipeKind::BlackHole => WipeVisualKind::BlackHole,
-                ResetWipeKind::GravityFlush => WipeVisualKind::GravityFlush,
-                ResetWipeKind::GiantBroom => WipeVisualKind::GiantBroom,
-                ResetWipeKind::Airlock => WipeVisualKind::Airlock,
-            },
-            progress,
-            bounds,
-        });
         let center = Vector2::new(bounds.width * 0.5, bounds.height * 0.5);
         let accent = match wipe.kind {
             ResetWipeKind::Snowplow => AppColor::from_rgb(118, 205, 255),
@@ -3989,7 +3973,6 @@ impl NativeApp {
         self.cheer_portals.clear();
         self.cheer_labels.clear();
         self.reset_wipe = None;
-        self.reset_wipe_visuals.clear();
         self.weather_world.clear();
         self.sand_world.clear();
         self.measure_tool.clear();
