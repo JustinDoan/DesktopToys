@@ -230,6 +230,7 @@ pub struct ScreenShardGeometry {
 pub struct ObjectState {
     pub id: u64,
     pub body: PhysicsBody,
+    pub is_visible: bool,
     pub rotation_x: f64,
     pub rotation_y: f64,
     pub rotation_z: f64,
@@ -260,6 +261,7 @@ impl Default for ObjectState {
         Self {
             id: 0,
             body: PhysicsBody::default(),
+            is_visible: true,
             rotation_x: 0.0,
             rotation_y: 0.0,
             rotation_z: 0.0,

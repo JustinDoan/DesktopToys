@@ -622,6 +622,7 @@ impl PhysicsWorld {
         }
         for object in &self.objects {
             if !object.body.collidable {
+                box3d.remove_body(object.id);
                 continue;
             }
             box3d.sync_body_if_needed(object);

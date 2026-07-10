@@ -92,6 +92,7 @@ pub struct DesktopWindowTarget {
     pub id: isize,
     pub title: String,
     pub client_rect: RectF,
+    pub is_visible: bool,
 }
 
 #[cfg(target_os = "windows")]
@@ -164,6 +165,7 @@ fn desktop_window_target(hwnd: HWND, origin: POINT, extent: POINT) -> Option<Des
             (extent.x - origin.x) as f32,
             (extent.y - origin.y) as f32,
         ),
+        is_visible: unsafe { IsWindowVisible(hwnd) }.as_bool() && !unsafe { IsIconic(hwnd) }.as_bool(),
     })
 }
 
@@ -184,7 +186,7 @@ pub fn desktop_window_at_point(screen_position: (i32, i32)) -> Option<DesktopWin
 pub fn desktop_window_by_id(id: isize) -> Option<DesktopWindowTarget> {
     let hwnd = HWND(id);
     unsafe {
-        if !IsWindow(hwnd).as_bool() || !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+        if !IsWindow(hwnd).as_bool() {
             return None;
         }
         let mut rect = RECT::default();

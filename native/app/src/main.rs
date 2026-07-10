@@ -150,6 +150,7 @@ struct WindowCapture {
     window_id: isize,
     title: String,
     client_rect_screen: RectF,
+    object_collidable: bool,
 }
 
 struct NativeApp {
@@ -2952,12 +2953,20 @@ impl NativeApp {
         };
 
         let title = target.title.clone();
+        let object_collidable = self
+            .scene
+            .objects()
+            .iter()
+            .find(|object| object.id == object_id)
+            .map(|object| object.body.collidable)
+            .unwrap_or(true);
         self.window_captures.insert(
             object_id,
             WindowCapture {
                 window_id: target.id,
                 title: title.clone(),
                 client_rect_screen: target.client_rect,
+                object_collidable,
             },
         );
         self.constrain_object_to_window(object_id, target.client_rect, Vector2::ZERO);
@@ -2978,9 +2987,21 @@ impl NativeApp {
                 continue;
             }
             let Some(target) = desktop_window_by_id(capture.window_id) else {
-                missing.push((object_id, capture.title));
+                missing.push((object_id, capture.title, capture.object_collidable));
                 continue;
             };
+            if !target.is_visible {
+                if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == object_id) {
+                    object.is_visible = false;
+                    object.body.collidable = false;
+                    object.body.velocity = Vector2::ZERO;
+                }
+                continue;
+            }
+            if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == object_id) {
+                object.is_visible = true;
+                object.body.collidable = capture.object_collidable;
+            }
             let delta = Vector2::new(
                 target.client_rect.x - capture.client_rect_screen.x,
                 target.client_rect.y - capture.client_rect_screen.y,
@@ -2992,37 +3013,46 @@ impl NativeApp {
             }
         }
 
-        for (object_id, title) in missing {
+        for (object_id, title, object_collidable) in missing {
             self.window_captures.remove(&object_id);
-            self.push_status_message(format!("Released object because {title} is hidden or closed."));
+            if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == object_id) {
+                object.is_visible = true;
+                object.body.collidable = object_collidable;
+            }
+            self.push_status_message(format!("Released object because {title} was closed."));
         }
     }
 
     fn constrain_object_to_window(&mut self, object_id: u64, client_rect_screen: RectF, window_delta: Vector2) {
         let local_rect = self.screen_rect_to_local(client_rect_screen);
-        let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == object_id) else {
+        let Some(object) = self.scene.objects().iter().find(|object| object.id == object_id) else {
             self.window_captures.remove(&object_id);
             return;
         };
 
-        object.body.position += window_delta;
+        let mut position = object.body.position + window_delta;
+        let mut velocity = object.body.velocity;
+        let restitution = object.body.restitution;
         let max_x = (local_rect.right() - object.body.width).max(local_rect.left());
         let max_y = (local_rect.bottom() - object.body.height).max(local_rect.top());
-        if object.body.position.x < local_rect.left() {
-            object.body.position.x = local_rect.left();
-            object.body.velocity.x = object.body.velocity.x.abs() * object.body.restitution;
-        } else if object.body.position.x > max_x {
-            object.body.position.x = max_x;
-            object.body.velocity.x = -object.body.velocity.x.abs() * object.body.restitution;
+        if position.x < local_rect.left() {
+            position.x = local_rect.left();
+            velocity.x = velocity.x.abs() * restitution;
+        } else if position.x > max_x {
+            position.x = max_x;
+            velocity.x = -velocity.x.abs() * restitution;
         }
-        if object.body.position.y < local_rect.top() {
-            object.body.position.y = local_rect.top();
-            object.body.velocity.y = object.body.velocity.y.abs() * object.body.restitution;
-        } else if object.body.position.y > max_y {
-            object.body.position.y = max_y;
-            object.body.velocity.y = -object.body.velocity.y.abs() * object.body.restitution;
+        if position.y < local_rect.top() {
+            position.y = local_rect.top();
+            velocity.y = velocity.y.abs() * restitution;
+        } else if position.y > max_y {
+            position.y = max_y;
+            velocity.y = -velocity.y.abs() * restitution;
         }
-        object.body.is_sleeping = false;
+
+        if position != object.body.position || velocity != object.body.velocity {
+            let _ = self.scene.teleport_object(object_id, position, velocity);
+        }
     }
 
     fn screen_rect_to_local(&self, rect: RectF) -> RectF {

@@ -178,6 +178,9 @@ impl HitTester {
         let mut best_z = i32::MIN;
 
         for candidate in objects {
+            if !candidate.is_visible {
+                continue;
+            }
             // Objects pushed back in 3D space render offset by perspective, so
             // screen-space hit testing no longer lines up with them.
             if candidate.depth_z < -1.0 {
@@ -200,7 +203,7 @@ impl HitTester {
     pub fn is_point_over_any_object(&self, objects: &[ObjectState], point: Vector2) -> bool {
         objects
             .iter()
-            .any(|object| object.depth_z >= -1.0 && contains_point(&object.body, point))
+            .any(|object| object.is_visible && object.depth_z >= -1.0 && contains_point(&object.body, point))
     }
 }
 

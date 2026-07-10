@@ -351,6 +351,9 @@ impl SceneRenderer {
             emit_shatter_backdrop(&mut vertices, width, height);
         }
         for object in scene.objects {
+            if !object.is_visible {
+                continue;
+            }
             if object.visual_kind == ObjectVisualKind::ScreenShard {
                 if let Some(shard) = &object.screen_shard {
                     let transform = compute_visual_transform(object, scene.bounds, scene.elapsed_seconds);
