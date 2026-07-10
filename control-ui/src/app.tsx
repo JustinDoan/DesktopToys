@@ -744,11 +744,14 @@ function formatCommand(lastCommand: string | null) {
 
 function describeCheerTier(bits: number, anonymous: boolean) {
   if (anonymous) return { id: "anonymous", label: "Masked" };
-  if (bits < 100) return { id: "violet", label: "Violet" };
-  if (bits < 1000) return { id: "cyan", label: "Cyan" };
-  if (bits < 5000) return { id: "magenta", label: "Magenta" };
-  if (bits < 10000) return { id: "red", label: "Meteor" };
-  return { id: "gold", label: "Mythic" };
+  const count = Math.min(Math.max(1, Math.round(bits)), 300);
+  const crystalValue = Math.ceil(Math.max(1, bits) / count);
+  const tier = Math.min(4, Math.floor(Math.log10(crystalValue)));
+  if (tier === 0) return { id: "violet", label: `${count} Violet` };
+  if (tier === 1) return { id: "cyan", label: `${count} Blue` };
+  if (tier === 2) return { id: "magenta", label: `${count} Magenta` };
+  if (tier === 3) return { id: "red", label: `${count} Meteor` };
+  return { id: "gold", label: `${count} Mythic` };
 }
 
 function displayPayload(display: DisplayInfo): EngineCommandPayload {

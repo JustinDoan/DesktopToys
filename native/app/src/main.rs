@@ -3021,16 +3021,19 @@ impl NativeApp {
             bounds.x + bounds.width * 0.5,
             bounds.y + 82.0,
         );
-        let color = cheer_tier_color(bits, anonymous);
-        let count = (((bits + 1) as f32).log2().ceil() as usize).clamp(3, 12);
-        let tier = (bits as f32).log10().max(0.0);
-        let size = (34.0 + tier * 7.0).clamp(34.0, 72.0);
+        let count = bits.min(300) as usize;
+        let crystal_value = bits.div_ceil(count as u32);
+        let tier = crystal_value.ilog10().min(4);
+        let color = cheer_tier_color(tier, anonymous);
+        let size = (34.0 + tier as f32 * 7.0).clamp(34.0, 62.0);
         let excitement = message.chars().filter(|character| matches!(character, '!' | '?')).count().min(8) as f32;
         let mass_per_crystal = ((bits as f32 / 100.0) / count as f32).clamp(0.35, 10.0);
+        let base_value = bits / count as u32;
+        let remainder = bits % count as u32;
 
         for index in 0..count {
             let phase = index as f32 * 2.399_963_1 + bits as f32 * 0.017;
-            let horizontal = phase.sin() * (42.0 + index as f32 * 4.0);
+            let horizontal = phase.sin() * (42.0 + (index % 24) as f32 * 8.0);
             let position = Vector2::new(center.x + horizontal - size * 0.5, center.y + 10.0 + phase.cos().abs() * 18.0);
             let id = self.scene.spawn_custom_object(
                 position,
@@ -3041,7 +3044,7 @@ impl NativeApp {
             );
             if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == id) {
                 object.body.mass = mass_per_crystal;
-                object.body.restitution = (0.48 + tier * 0.055).clamp(0.48, 0.82);
+                object.body.restitution = (0.48 + tier as f32 * 0.055).clamp(0.48, 0.82);
                 object.body.friction = 0.58;
                 object.body.velocity = Vector2::new(
                     phase.sin() * (150.0 + excitement * 28.0),
@@ -3052,7 +3055,7 @@ impl NativeApp {
                 object.angular_velocity_y = phase.sin() as f64 * 240.0;
                 object.angular_velocity_z = (index as f64 - count as f64 * 0.5) * 22.0;
                 object.source_owner = Some(donor.clone());
-                object.source_value = Some((bits / count as u32).max(1));
+                object.source_value = Some(base_value + u32::from((index as u32) < remainder));
             }
             self.selected_id = Some(id);
         }
@@ -3983,15 +3986,15 @@ fn payload_f32(payload: &serde_json::Value, key: &str, fallback: f32, min: f32, 
         .unwrap_or(fallback)
 }
 
-fn cheer_tier_color(bits: u32, anonymous: bool) -> AppColor {
+fn cheer_tier_color(tier: u32, anonymous: bool) -> AppColor {
     if anonymous {
         return AppColor::from_rgb(54, 34, 82);
     }
-    match bits {
-        0..=99 => AppColor::from_rgb(150, 92, 255),
-        100..=999 => AppColor::from_rgb(68, 214, 255),
-        1_000..=4_999 => AppColor::from_rgb(235, 74, 255),
-        5_000..=9_999 => AppColor::from_rgb(255, 78, 112),
+    match tier {
+        0 => AppColor::from_rgb(150, 92, 255),
+        1 => AppColor::from_rgb(68, 214, 255),
+        2 => AppColor::from_rgb(235, 74, 255),
+        3 => AppColor::from_rgb(255, 78, 112),
         _ => AppColor::from_rgb(255, 204, 72),
     }
 }
