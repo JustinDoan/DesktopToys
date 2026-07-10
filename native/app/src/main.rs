@@ -3862,7 +3862,7 @@ impl NativeApp {
 
     fn default_spawn_position(&self) -> Vector2 {
         let bounds = self.spawn_bounds();
-        Vector2::new(bounds.x + bounds.width * 0.5, bounds.y + 40.0)
+        Vector2::new(bounds.x + bounds.width * 0.5, bounds.y + bounds.height * 0.5)
     }
 
     fn spawn_bounds(&self) -> RectF {
