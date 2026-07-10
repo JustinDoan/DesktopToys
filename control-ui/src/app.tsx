@@ -36,7 +36,13 @@ type SpawnVariant = {
   shader?: boolean;
 };
 
-type ActiveTab = "objects" | "labs";
+type ActiveTab = "objects" | "labs" | "cheers";
+type CheerDraft = {
+  bits: number;
+  donor: string;
+  message: string;
+  anonymous: boolean;
+};
 type LabAction = {
   label: string;
   shortLabel?: string;
@@ -100,17 +106,6 @@ const spawnGroups: Array<{ id: string; label: string; variants: SpawnVariant[] }
 ];
 
 const labGroups: Array<{ id: string; label: string; actions: LabAction[] }> = [
-  {
-    id: "cheers",
-    label: "Cheers",
-    actions: [
-      { label: "Cheer 10", shortLabel: "10 Bits", command: "simulate_twitch_cheer", payload: { bits: 10, donor: "PixelGoblin", message: "nice!" }, icon: Gem, tone: "violet" },
-      { label: "Cheer 100", shortLabel: "100 Bits", command: "simulate_twitch_cheer", payload: { bits: 100, donor: "GoblinFan42", message: "LET'S GO!!!" }, icon: Gem, tone: "cyan" },
-      { label: "Cheer 1000", shortLabel: "1K Bits", command: "simulate_twitch_cheer", payload: { bits: 1000, donor: "CrystalWhale", message: "BIG DROP!!!!!" }, icon: Sparkles, tone: "violet" },
-      { label: "Cheer 5000", shortLabel: "5K Bits", command: "simulate_twitch_cheer", payload: { bits: 5000, donor: "MeteorPatron", message: "CHAOS!!!!!!!!" }, icon: Sparkles, tone: "amber" },
-      { label: "Anonymous 500", shortLabel: "Anon", command: "simulate_twitch_cheer", payload: { bits: 500, anonymous: true, message: "???" }, icon: Gem, tone: "steel" },
-    ],
-  },
   {
     id: "tools",
     label: "Tools",
@@ -195,6 +190,12 @@ export function App() {
   const [selectedLabActionKey, setSelectedLabActionKey] = useState("toggle_debug");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsDraft, setSettingsDraft] = useState<RuntimeSettings>(defaultRuntimeSettings);
+  const [cheerDraft, setCheerDraft] = useState<CheerDraft>({
+    bits: 100,
+    donor: "GoblinFan42",
+    message: "LET'S GO!!!",
+    anonymous: false,
+  });
 
   useEffect(() => {
     getEngineSnapshot().then(applySnapshot).catch(() => applySnapshot(defaultSnapshot));
@@ -219,6 +220,7 @@ export function App() {
   const SelectedLabIcon = selectedLabAction.icon;
   const commandText = formatCommand(snapshot.lastCommand);
   const transportText = formatTransport(snapshot.transport);
+  const cheerTier = describeCheerTier(cheerDraft.bits, cheerDraft.anonymous);
 
   async function send(command: string, payload: EngineCommandPayload = {}) {
     setPendingCommand(command);
@@ -273,6 +275,19 @@ export function App() {
       clickThrough: settingsDraft.startInPassThrough,
     });
     setSettingsOpen(false);
+  }
+
+  function dropCheer() {
+    return send("simulate_twitch_cheer", {
+      bits: Math.round(Math.max(1, Math.min(100000, cheerDraft.bits))),
+      donor: cheerDraft.donor.trim() || "GoblinFan42",
+      message: cheerDraft.message,
+      anonymous: cheerDraft.anonymous,
+    });
+  }
+
+  function applyCheerPreset(bits: number, donor: string, message: string, anonymous = false) {
+    setCheerDraft({ bits, donor, message, anonymous });
   }
 
   return (
@@ -332,6 +347,17 @@ export function App() {
             <Crosshair size={12} strokeWidth={2.2} />
             <span>Labs</span>
           </button>
+          <button
+            className={activeTab === "cheers" ? "panel-tab selected bevel-button" : "panel-tab bevel-button"}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === "cheers"}
+            aria-controls="cheers-panel"
+            onClick={() => setActiveTab("cheers")}
+          >
+            <Gem size={12} strokeWidth={2.2} />
+            <span>Cheers</span>
+          </button>
           <div className="object-bars" aria-hidden="true">
             {objectBars.map((height, index) => (
               <span key={index} style={{ height: `${height}%` }} />
@@ -375,7 +401,7 @@ export function App() {
               </div>
             </div>
           </FrameSection>
-        ) : (
+        ) : activeTab === "labs" ? (
           <FrameSection label="Experimental" className="labs-section" id="labs-panel">
             <div className="lab-selector">
               <div className="lab-row">
@@ -425,6 +451,67 @@ export function App() {
                     </button>
                   );
                 })}
+              </div>
+            </div>
+          </FrameSection>
+        ) : (
+          <FrameSection label="Cheer simulator" className="cheer-section" id="cheers-panel">
+            <div className="cheer-console">
+              <div className="cheer-presets" aria-label="Cheer presets">
+                <button type="button" className="bevel-button" onClick={() => applyCheerPreset(10, "PixelGoblin", "nice!")}>10</button>
+                <button type="button" className="bevel-button" onClick={() => applyCheerPreset(100, "GoblinFan42", "LET'S GO!!!")}>100</button>
+                <button type="button" className="bevel-button" onClick={() => applyCheerPreset(1000, "CrystalWhale", "BIG DROP!!!!!")}>1K</button>
+                <button type="button" className="bevel-button" onClick={() => applyCheerPreset(5000, "MeteorPatron", "CHAOS!!!!!!!!")}>5K</button>
+                <button type="button" className="bevel-button" onClick={() => applyCheerPreset(500, "Anonymous", "???", true)}>Anon</button>
+              </div>
+              <div className="cheer-fields">
+                <label>
+                  <span>Bits</span>
+                  <input
+                    type="number"
+                    min="1"
+                    max="100000"
+                    value={cheerDraft.bits}
+                    onInput={(event) => setCheerDraft((draft) => ({ ...draft, bits: Number(event.currentTarget.value) || 1 }))}
+                  />
+                </label>
+                <label>
+                  <span>Donor</span>
+                  <input
+                    type="text"
+                    maxLength={24}
+                    disabled={cheerDraft.anonymous}
+                    value={cheerDraft.anonymous ? "Mysterious Cheerer" : cheerDraft.donor}
+                    onInput={(event) => setCheerDraft((draft) => ({ ...draft, donor: event.currentTarget.value }))}
+                  />
+                </label>
+                <label className="cheer-message-field">
+                  <span>Message</span>
+                  <input
+                    type="text"
+                    maxLength={80}
+                    value={cheerDraft.message}
+                    onInput={(event) => setCheerDraft((draft) => ({ ...draft, message: event.currentTarget.value }))}
+                  />
+                </label>
+              </div>
+              <div className="cheer-footer">
+                <label className="cheer-anonymous">
+                  <input
+                    type="checkbox"
+                    checked={cheerDraft.anonymous}
+                    onChange={(event) => setCheerDraft((draft) => ({ ...draft, anonymous: event.currentTarget.checked }))}
+                  />
+                  <span>Anonymous</span>
+                </label>
+                <span className={`cheer-tier tier-${cheerTier.id}`}><i />{cheerTier.label}</span>
+                <button
+                  className={`cheer-drop bevel-button ${pendingCommand === "simulate_twitch_cheer" ? "is-pending" : ""}`}
+                  type="button"
+                  onClick={() => void dropCheer()}
+                >
+                  Drop Cheer
+                </button>
               </div>
             </div>
           </FrameSection>
@@ -620,6 +707,15 @@ function formatCommand(lastCommand: string | null) {
   return {
     label: lastCommand.split("_").join(" ").toUpperCase(),
   };
+}
+
+function describeCheerTier(bits: number, anonymous: boolean) {
+  if (anonymous) return { id: "anonymous", label: "Masked" };
+  if (bits < 100) return { id: "violet", label: "Violet" };
+  if (bits < 1000) return { id: "cyan", label: "Cyan" };
+  if (bits < 5000) return { id: "magenta", label: "Magenta" };
+  if (bits < 10000) return { id: "red", label: "Meteor" };
+  return { id: "gold", label: "Mythic" };
 }
 
 function formatTransport(transport: string) {

@@ -42,6 +42,7 @@ body,
   background: transparent;
 }
 
+input,
 button,
 select {
   font: inherit;
@@ -72,8 +73,8 @@ button {
   isolation: isolate;
   display: grid;
   width: min(388px, calc(100vw - 16px));
-  height: min(246px, calc(100dvh - 12px));
-  grid-template-rows: 33px 37px 74px 36px minmax(16px, 1fr);
+  height: min(296px, calc(100dvh - 12px));
+  grid-template-rows: 33px 37px 124px 36px minmax(16px, 1fr);
   gap: 5px;
   padding: 10px 16px 12px;
   overflow: hidden;
@@ -256,7 +257,7 @@ select:focus-visible {
 .tab-header {
   position: relative;
   display: grid;
-  grid-template-columns: 104px 76px minmax(34px, 1fr) auto;
+  grid-template-columns: 94px 66px 72px minmax(24px, 1fr) auto;
   align-items: center;
   gap: 5px;
   padding: 5px 7px;
@@ -296,6 +297,10 @@ select:focus-visible {
 
 .panel-tab:nth-child(2) strong {
   color: var(--orange);
+}
+
+.panel-tab:nth-child(3) svg {
+  color: #b49bff;
 }
 
 .panel-tab.selected {
@@ -511,6 +516,150 @@ select:focus-visible {
   background:
     linear-gradient(180deg, rgb(255 171 77 / 0.16), rgb(93 47 10 / 0.3)),
     #1d1711;
+}
+
+.cheer-console {
+  display: grid;
+  height: 100%;
+  grid-template-rows: 24px minmax(0, 1fr) 27px;
+  gap: 6px;
+}
+
+.cheer-presets {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.cheer-presets button {
+  min-width: 0;
+  color: #cfc8e8;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.35px;
+  text-transform: uppercase;
+}
+
+.cheer-fields {
+  display: grid;
+  grid-template-columns: 68px minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 6px;
+}
+
+.cheer-fields label {
+  display: grid;
+  min-width: 0;
+  grid-template-rows: auto 25px;
+  gap: 3px;
+}
+
+.cheer-fields span {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.45px;
+  text-transform: uppercase;
+}
+
+.cheer-fields input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #050606;
+  border-radius: 5px;
+  outline: 0;
+  background:
+    linear-gradient(180deg, rgb(255 255 255 / 0.055), transparent 48%),
+    #0d0e0e;
+  box-shadow:
+    inset 0 0 0 1px #333431,
+    0 2px 0 #070808;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 0 7px;
+}
+
+.cheer-fields input:focus {
+  border-color: #8e72dc;
+  box-shadow:
+    inset 0 0 0 1px #493a72,
+    0 0 0 1px rgb(180 155 255 / 0.35);
+}
+
+.cheer-fields input:disabled {
+  color: #77717f;
+}
+
+.cheer-footer {
+  display: grid;
+  grid-template-columns: auto minmax(72px, 1fr) 94px;
+  align-items: center;
+  gap: 7px;
+}
+
+.cheer-anonymous {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #c6c2ba;
+  cursor: pointer;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.35px;
+  text-transform: uppercase;
+}
+
+.cheer-anonymous input {
+  width: 14px;
+  height: 14px;
+  accent-color: #9b7ee5;
+}
+
+.cheer-tier {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  color: #cfcad6;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+}
+
+.cheer-tier i {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 auto;
+  transform: rotate(45deg);
+  border: 1px solid rgb(255 255 255 / 0.28);
+  background: #9671ff;
+  box-shadow: 0 0 7px currentColor;
+}
+
+.tier-cyan i { background: #44d6ff; }
+.tier-magenta i { background: #eb4aff; }
+.tier-red i { background: #ff4e70; }
+.tier-gold i { background: #ffcc48; }
+.tier-anonymous i { background: #362252; }
+
+.cheer-drop {
+  height: 27px;
+  color: #d8caff;
+  border-color: #493270;
+  background:
+    linear-gradient(180deg, rgb(210 183 255 / 0.15), transparent 44%),
+    #21182d;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: 0.4px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.cheer-drop.is-pending {
+  color: #fff;
+  filter: brightness(1.35);
 }
 
 .control-strip {
@@ -762,6 +911,18 @@ select:focus-visible {
   .panel-tab strong,
   .lab-quick strong {
     font-size: 9px;
+  }
+
+  .tab-header {
+    grid-template-columns: 90px 62px 68px minmax(0, 1fr);
+  }
+
+  .transport-chip {
+    display: none;
+  }
+
+  .cheer-fields {
+    grid-template-columns: 58px minmax(0, 0.8fr) minmax(0, 1.2fr);
   }
 }
 
