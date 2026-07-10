@@ -64,7 +64,7 @@ For one portable runtime `.exe`, the renderer and Tauri shell still need to be m
 
 ## Window terrariums (prototype)
 
-On Windows, drag any physics object over the client area of another application. A cyan guide marks the window that will capture it. Release the object to bind it to that window:
+On Windows, hold `Shift` while dragging a physics object over the client area of another application. A cyan guide marks the window that will capture it. Release the object while still holding `Shift` to bind it to that window. Ordinary dragging never captures a window object:
 
 - the object bounces inside the window's client bounds;
 - moving the window carries the object with it;

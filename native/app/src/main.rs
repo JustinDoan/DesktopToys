@@ -503,6 +503,7 @@ impl NativeApp {
                         local_position: self.cursor_local,
                         left_down: self.fallback_left_down,
                         right_down: self.fallback_right_down,
+                        shift_down: self.keyboard_modifiers.shift_key(),
                         spawn_object_down: false,
                         spawn_crystal_down: false,
                         reset_down: false,
@@ -522,6 +523,7 @@ impl NativeApp {
                 local_position: self.cursor_local,
                 left_down: self.fallback_left_down,
                 right_down: self.fallback_right_down,
+                shift_down: self.keyboard_modifiers.shift_key(),
                 spawn_object_down: false,
                 spawn_crystal_down: false,
                 reset_down: false,
@@ -548,7 +550,10 @@ impl NativeApp {
             self.drag_controller
                 .update_drag(self.scene.objects_mut(), self.cursor_local, now);
             self.update_held_object_rotation(pointer.right_down);
-            self.window_capture_candidate = desktop_window_at_point(pointer.screen_position);
+            let capture_modifier_down = pointer.shift_down || self.keyboard_modifiers.shift_key();
+            self.window_capture_candidate = capture_modifier_down
+                .then(|| desktop_window_at_point(pointer.screen_position))
+                .flatten();
         } else {
             self.window_capture_candidate = None;
         }
