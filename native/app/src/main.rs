@@ -2951,8 +2951,18 @@ impl NativeApp {
     fn finish_window_capture(&mut self, object_id: u64) {
         let previous = self.window_captures.remove(&object_id);
         let Some(target) = self.window_capture_candidate.take() else {
-            if previous.is_some() {
-                self.push_status_message("Released object from its window terrarium.".to_string());
+            if let Some(previous) = previous {
+                let cursor_screen = Vector2::new(
+                    self.cursor_local.x + self.bounds.x,
+                    self.cursor_local.y + self.bounds.y,
+                );
+                if previous.client_rect_screen.contains(cursor_screen) {
+                    let client_rect = previous.client_rect_screen;
+                    self.window_captures.insert(object_id, previous);
+                    self.constrain_object_to_window(object_id, client_rect, Vector2::ZERO);
+                } else {
+                    self.push_status_message("Released object from its window terrarium.".to_string());
+                }
             }
             return;
         };
