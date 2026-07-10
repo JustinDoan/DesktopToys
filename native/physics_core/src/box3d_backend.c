@@ -372,6 +372,30 @@ void sop_box3d_sync_body(SopBox3dWorld* world, const SopBox3dBodyDef* def)
     }
 }
 
+bool sop_box3d_add_velocity(SopBox3dWorld* world, uint64_t id, float deltaX, float deltaY, float deltaZ)
+{
+    if (world == NULL)
+    {
+        return false;
+    }
+
+    SopBox3dBody* body = find_body(world, id);
+    if (body == NULL || !b3Body_IsValid(body->bodyId))
+    {
+        return false;
+    }
+
+    b3Vec3 velocity = b3Body_GetLinearVelocity(body->bodyId);
+    b3Vec3 delta = to_world_velocity(world, deltaX, deltaY, deltaZ);
+    velocity.x += delta.x;
+    velocity.y += delta.y;
+    velocity.z += delta.z;
+    b3Body_SetLinearVelocity(body->bodyId, velocity);
+    b3Body_SetAwake(body->bodyId, true);
+    body->wasAwake = true;
+    return true;
+}
+
 static b3Vec3 static_center_to_world(const SopBox3dWorld* world, float centerX, float centerY, float centerZ)
 {
     return (b3Vec3){

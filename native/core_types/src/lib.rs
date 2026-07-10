@@ -140,6 +140,12 @@ pub enum ObjectVisualKind {
     DvdLogo,
     Ball,
     SoftBall,
+    GlassMarble,
+    PlasmaOrb,
+    PortalOrb,
+    SoapBubble,
+    ForcefieldOrb,
+    RaymarchCube,
     Pyramid,
     Barrel,
     Ring,
@@ -148,8 +154,12 @@ pub enum ObjectVisualKind {
     GameTarget,
     FoxBuddy,
     RobotBuddy,
+    Snail,
+    Fan,
+    QuadDrone,
     Basketball,
     BasketballHoop,
+    ScreenShard,
     ImportedModel,
 }
 
@@ -210,6 +220,13 @@ impl Default for PhysicsBody {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct ScreenShardGeometry {
+    pub local_points: Vec<Vector2>,
+    pub texture_uvs: Vec<Vector2>,
+    pub thickness: f32,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct ObjectState {
     pub id: u64,
     pub body: PhysicsBody,
@@ -235,6 +252,7 @@ pub struct ObjectState {
     pub visual_kind: ObjectVisualKind,
     pub model_source_path: Option<String>,
     pub model_scale_multiplier: f32,
+    pub screen_shard: Option<ScreenShardGeometry>,
 }
 
 impl Default for ObjectState {
@@ -258,6 +276,7 @@ impl Default for ObjectState {
             visual_kind: ObjectVisualKind::Cube,
             model_source_path: None,
             model_scale_multiplier: 1.0,
+            screen_shard: None,
         }
     }
 }

@@ -61,6 +61,7 @@ void sop_box3d_add_static_box(SopBox3dWorld* world, float centerX, float centerY
 void sop_box3d_add_static_sphere(SopBox3dWorld* world, float centerX, float centerY, float centerZ,
                                  float radius, float friction, float restitution);
 void sop_box3d_sync_body(SopBox3dWorld* world, const SopBox3dBodyDef* def);
+bool sop_box3d_add_velocity(SopBox3dWorld* world, uint64_t id, float deltaX, float deltaY, float deltaZ);
 void sop_box3d_remove_body(SopBox3dWorld* world, uint64_t id);
 void sop_box3d_step(SopBox3dWorld* world, float timeStep, int subStepCount);
 int sop_box3d_snapshot_count(const SopBox3dWorld* world);

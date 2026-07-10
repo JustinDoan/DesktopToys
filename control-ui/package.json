@@ -1,0 +1,28 @@
+{
+  "name": "screen-overlay-control",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 1420",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.node.json",
+    "build": "npm run typecheck && vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 1420",
+    "package:windows": "powershell -ExecutionPolicy Bypass -File ../scripts/package-windows.ps1",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "lucide-preact": "^0.468.0",
+    "preact": "^10.24.3"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.9.1",
+    "@tauri-apps/cli": "^2.0.0",
+    "@types/node": "^26.1.1",
+    "typescript": "^5.6.3",
+    "vite": "^8.1.3"
+  }
+}

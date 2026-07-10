@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fs::File, io::BufReader, mem, path::Path, sync::OnceLock};
 
 use anyhow::{bail, Context, Result};
-use core_types::{AppColor, ObjectState, ObjectVisualKind, RectF, Vector2};
+use core_types::{AppColor, ObjectState, ObjectVisualKind, RectF, ScreenShardGeometry, Vector2};
 use font8x8::UnicodeFonts;
 use gltf::{
     animation::util::ReadOutputs,
@@ -24,6 +24,7 @@ pub struct OverlayPanel {
 #[derive(Clone, Debug, Default)]
 pub struct HudState {
     pub status_message: Option<String>,
+    pub center_message: Option<String>,
     pub panels: Vec<OverlayPanel>,
 }
 
@@ -40,9 +41,14 @@ pub struct RenderScene<'a> {
     pub bounds: RectF,
     pub elapsed_seconds: f64,
     pub objects: &'a [ObjectState],
+    pub shatter_backdrop_active: bool,
     pub sand_cells: &'a [SandRenderCell],
     pub weather_cells: &'a [SandRenderCell],
     pub measure_cells: &'a [SandRenderCell],
+    pub spotlight_cells: &'a [SandRenderCell],
+    pub lasso_cells: &'a [SandRenderCell],
+    pub portal_cells: &'a [SandRenderCell],
+    pub shatter_gun_cells: &'a [SandRenderCell],
     pub hud: &'a HudState,
 }
 
@@ -51,6 +57,8 @@ pub struct RenderScene<'a> {
 pub struct GpuVertex {
     pub position: [f32; 3],
     pub color: [f32; 4],
+    pub material: [f32; 4],
+    pub material_extra: [f32; 4],
 }
 
 #[derive(Default)]
@@ -328,10 +336,28 @@ impl SceneRenderer {
         vertices.clear();
         vertices.reserve(
             scene.objects.len() * 36
-                + (scene.sand_cells.len() + scene.weather_cells.len() + scene.measure_cells.len()) * 6
+                + (scene.sand_cells.len()
+                    + scene.weather_cells.len()
+                    + scene.measure_cells.len()
+                    + scene.spotlight_cells.len()
+                    + scene.lasso_cells.len()
+                    + scene.portal_cells.len()
+                    + scene.shatter_gun_cells.len())
+                    * 6
                 + 4096,
         );
+        if scene.shatter_backdrop_active {
+            emit_shatter_backdrop(&mut vertices, width, height);
+        }
         for object in scene.objects {
+            if object.visual_kind == ObjectVisualKind::ScreenShard {
+                if let Some(shard) = &object.screen_shard {
+                    let transform = compute_visual_transform(object, scene.bounds, scene.elapsed_seconds);
+                    emit_screen_shard(&mut vertices, shard, transform);
+                }
+                continue;
+            }
+
             if object.visual_kind == ObjectVisualKind::FoxBuddy {
                 let mesh = fox_buddy_animated_mesh(
                     object.body.width.min(object.body.height).max(1.0),
@@ -348,6 +374,25 @@ impl SceneRenderer {
                 continue;
             }
 
+            if is_shader_sphere(object.visual_kind) {
+                let mesh = self.mesh_for_object(object)?;
+                let transform = compute_visual_transform(object, scene.bounds, scene.elapsed_seconds);
+                let material_id = shader_sphere_material_id(object.visual_kind);
+                for triangle in &mesh.triangles {
+                    emit_shader_sphere_triangle(&mut vertices, *triangle, transform, material_id, scene.elapsed_seconds as f32);
+                }
+                continue;
+            }
+
+            if is_shader_cube(object.visual_kind) {
+                let mesh = self.mesh_for_object(object)?;
+                let transform = compute_visual_transform(object, scene.bounds, scene.elapsed_seconds);
+                for triangle in &mesh.triangles {
+                    emit_shader_cube_triangle(&mut vertices, *triangle, transform, 6.0, scene.elapsed_seconds as f32);
+                }
+                continue;
+            }
+
             let mesh = self.mesh_for_object(object)?;
             let transform = compute_visual_transform(object, scene.bounds, scene.elapsed_seconds);
             for triangle in &mesh.triangles {
@@ -360,7 +405,11 @@ impl SceneRenderer {
 
         emit_sand(&mut vertices, width, height, scene.sand_cells);
         emit_sand(&mut vertices, width, height, scene.weather_cells);
+        emit_sand(&mut vertices, width, height, scene.spotlight_cells);
         emit_sand(&mut vertices, width, height, scene.measure_cells);
+        emit_sand(&mut vertices, width, height, scene.lasso_cells);
+        emit_sand(&mut vertices, width, height, scene.portal_cells);
+        emit_sand(&mut vertices, width, height, scene.shatter_gun_cells);
         emit_panels(&mut vertices, width, height, scene.hud);
         self.vertices = vertices;
         Ok(&self.vertices)
@@ -383,6 +432,12 @@ impl SceneRenderer {
             ObjectVisualKind::Satellite => self.generated_mesh(key, || satellite_mesh(size, object.base_color)),
             ObjectVisualKind::Ball => self.generated_mesh(key, || ball_mesh(size, object.base_color)),
             ObjectVisualKind::SoftBall => self.generated_mesh(key, || soft_ball_mesh(size, object.base_color)),
+            ObjectVisualKind::GlassMarble => self.generated_mesh(key, || glass_marble_mesh(size, object.base_color)),
+            ObjectVisualKind::PlasmaOrb => self.generated_mesh(key, || glass_marble_mesh(size, object.base_color)),
+            ObjectVisualKind::PortalOrb => self.generated_mesh(key, || glass_marble_mesh(size, object.base_color)),
+            ObjectVisualKind::SoapBubble => self.generated_mesh(key, || glass_marble_mesh(size, object.base_color)),
+            ObjectVisualKind::ForcefieldOrb => self.generated_mesh(key, || glass_marble_mesh(size, object.base_color)),
+            ObjectVisualKind::RaymarchCube => self.generated_mesh(key, || cube_mesh(size, object.base_color)),
             ObjectVisualKind::Pyramid => self.generated_mesh(key, || pyramid_mesh(size, object.base_color)),
             ObjectVisualKind::Barrel => self.generated_mesh(key, || barrel_mesh(size, object.base_color)),
             ObjectVisualKind::Ring => self.generated_mesh(key, || ring_mesh(size, object.base_color)),
@@ -393,9 +448,15 @@ impl SceneRenderer {
             ObjectVisualKind::GameTarget => self.generated_mesh(key, || target_mesh(size, object.base_color)),
             ObjectVisualKind::FoxBuddy => self.generated_mesh(key, || fox_buddy_mesh(size)),
             ObjectVisualKind::RobotBuddy => self.generated_mesh(key, || robot_buddy_mesh(size, object.base_color)),
+            ObjectVisualKind::Snail => self.generated_mesh(key, || snail_mesh(size, object.base_color)),
+            ObjectVisualKind::Fan => self.generated_mesh(key, || fan_mesh(size, object.base_color)),
+            ObjectVisualKind::QuadDrone => self.generated_mesh(key, || quad_drone_mesh(size, object.base_color)),
             ObjectVisualKind::Basketball => self.generated_mesh(key, || basketball_mesh(size)),
             ObjectVisualKind::BasketballHoop => self.generated_mesh(key, || {
                 basketball_hoop_mesh(object.body.width.max(1.0), object.body.height.max(1.0))
+            }),
+            ObjectVisualKind::ScreenShard => self.generated_mesh(key, || {
+                rectangular_prism_mesh(object.body.width.max(1.0), object.body.height.max(1.0), 18.0, object.base_color)
             }),
             ObjectVisualKind::DvdLogo => self.generated_mesh(key, || {
                 dvd_logo_mesh(object.body.width.max(1.0), object.body.height.max(1.0), object.base_color)
@@ -444,23 +505,59 @@ impl MeshCacheKey {
                 ObjectVisualKind::DvdLogo => 4,
                 ObjectVisualKind::Ball => 5,
                 ObjectVisualKind::SoftBall => 6,
-                ObjectVisualKind::Pyramid => 7,
-                ObjectVisualKind::Barrel => 8,
-                ObjectVisualKind::Ring => 9,
-                ObjectVisualKind::Star => 10,
-                ObjectVisualKind::GamePlank => 11,
-                ObjectVisualKind::GameTarget => 12,
-                ObjectVisualKind::FoxBuddy => 13,
-                ObjectVisualKind::RobotBuddy => 14,
-                ObjectVisualKind::ImportedModel => 15,
-                ObjectVisualKind::Basketball => 16,
-                ObjectVisualKind::BasketballHoop => 17,
+                ObjectVisualKind::GlassMarble => 7,
+                ObjectVisualKind::PlasmaOrb => 8,
+                ObjectVisualKind::PortalOrb => 9,
+                ObjectVisualKind::SoapBubble => 10,
+                ObjectVisualKind::ForcefieldOrb => 11,
+                ObjectVisualKind::RaymarchCube => 12,
+                ObjectVisualKind::Pyramid => 13,
+                ObjectVisualKind::Barrel => 14,
+                ObjectVisualKind::Ring => 15,
+                ObjectVisualKind::Star => 16,
+                ObjectVisualKind::GamePlank => 17,
+                ObjectVisualKind::GameTarget => 18,
+                ObjectVisualKind::FoxBuddy => 19,
+                ObjectVisualKind::RobotBuddy => 20,
+                ObjectVisualKind::Snail => 21,
+                ObjectVisualKind::Fan => 22,
+                ObjectVisualKind::QuadDrone => 23,
+                ObjectVisualKind::ImportedModel => 24,
+                ObjectVisualKind::Basketball => 25,
+                ObjectVisualKind::BasketballHoop => 26,
+                ObjectVisualKind::ScreenShard => 27,
             },
             width_milli: quantize_size(object.body.width.max(1.0)),
             height_milli: quantize_size(object.body.height.max(1.0)),
             size_milli: quantize_size(size),
             color: object.base_color,
         }
+    }
+}
+
+fn is_shader_sphere(visual_kind: ObjectVisualKind) -> bool {
+    matches!(
+        visual_kind,
+        ObjectVisualKind::GlassMarble
+            | ObjectVisualKind::PlasmaOrb
+            | ObjectVisualKind::PortalOrb
+            | ObjectVisualKind::SoapBubble
+            | ObjectVisualKind::ForcefieldOrb
+    )
+}
+
+fn is_shader_cube(visual_kind: ObjectVisualKind) -> bool {
+    matches!(visual_kind, ObjectVisualKind::RaymarchCube)
+}
+
+fn shader_sphere_material_id(visual_kind: ObjectVisualKind) -> f32 {
+    match visual_kind {
+        ObjectVisualKind::GlassMarble => 1.0,
+        ObjectVisualKind::PlasmaOrb => 2.0,
+        ObjectVisualKind::PortalOrb => 3.0,
+        ObjectVisualKind::SoapBubble => 4.0,
+        ObjectVisualKind::ForcefieldOrb => 5.0,
+        _ => 0.0,
     }
 }
 
@@ -483,12 +580,72 @@ fn emit_panels(vertices: &mut Vec<GpuVertex>, width: u32, height: u32, hud: &Hud
         emit_panel(vertices, width, height, 12, top, &panel.title, &panel.lines, &panel.footer);
         top += ((panel.lines.len() + panel.footer.len() + 2) as i32 * 12).max(72) + 10;
     }
+
+    if let Some(message) = &hud.center_message {
+        emit_center_message(vertices, width, height, message);
+    }
 }
 
 fn emit_sand(vertices: &mut Vec<GpuVertex>, width: u32, height: u32, cells: &[SandRenderCell]) {
     for cell in cells {
         emit_rect(vertices, width, height, cell.x, cell.y, cell.width, cell.height, cell.color, 0.028);
     }
+}
+
+fn emit_shatter_backdrop(vertices: &mut Vec<GpuVertex>, width: u32, height: u32) {
+    let width = width.max(1) as f32;
+    let height = height.max(1) as f32;
+    let camera_distance = width.max(height) * 1.25;
+    let z = -camera_distance;
+    let perspective = camera_distance / (camera_distance - z);
+    let center_x = width * 0.5;
+    let center_y = height * 0.5;
+    let left = center_x + (0.0 - center_x) / perspective;
+    let right = center_x + (width - center_x) / perspective;
+    let top = center_y + (0.0 - center_y) / perspective;
+    let bottom = center_y + (height - center_y) / perspective;
+    let color = color_to_f32(AppColor::from_rgb(43, 43, 45), 255);
+    let material = [0.0, 0.0, 0.0, 0.0];
+    let material_extra = [0.0, 0.0, 0.0, 0.0];
+
+    vertices.extend_from_slice(&[
+        GpuVertex {
+            position: [left, top, z],
+            color,
+            material,
+            material_extra,
+        },
+        GpuVertex {
+            position: [right, top, z],
+            color,
+            material,
+            material_extra,
+        },
+        GpuVertex {
+            position: [right, bottom, z],
+            color,
+            material,
+            material_extra,
+        },
+        GpuVertex {
+            position: [left, top, z],
+            color,
+            material,
+            material_extra,
+        },
+        GpuVertex {
+            position: [right, bottom, z],
+            color,
+            material,
+            material_extra,
+        },
+        GpuVertex {
+            position: [left, bottom, z],
+            color,
+            material,
+            material_extra,
+        },
+    ]);
 }
 
 fn emit_panel(
@@ -595,8 +752,237 @@ fn emit_draw_triangle(vertices: &mut Vec<GpuVertex>, triangle: DrawTriangle) {
         vertices.push(GpuVertex {
             position: [point.x, point.y, point.z],
             color,
+            material: [0.0, 0.0, 0.0, 0.0],
+            material_extra: [0.0, 0.0, 0.0, 0.0],
         });
     }
+}
+
+fn emit_shader_sphere_triangle(
+    vertices: &mut Vec<GpuVertex>,
+    triangle: SourceTriangle,
+    transform: VisualTransform,
+    material_id: f32,
+    elapsed_seconds: f32,
+) {
+    let points = triangle.vertices.map(|vertex| project_vertex(vertex, transform));
+    let color = color_to_f32(triangle.color, triangle.alpha);
+    for (index, point) in points.into_iter().enumerate() {
+        let marble_point = triangle.vertices[index].normalized();
+        let normal = rotate_normal(marble_point, transform);
+        vertices.push(GpuVertex {
+            position: [point.x, point.y, point.z],
+            color,
+            material: [material_id, marble_point.x, marble_point.y, marble_point.z],
+            material_extra: [normal.x, normal.y, normal.z, elapsed_seconds],
+        });
+    }
+}
+
+fn emit_shader_cube_triangle(
+    vertices: &mut Vec<GpuVertex>,
+    triangle: SourceTriangle,
+    transform: VisualTransform,
+    material_id: f32,
+    elapsed_seconds: f32,
+) {
+    let points = triangle.vertices.map(|vertex| project_vertex(vertex, transform));
+    let color = color_to_f32(triangle.color, triangle.alpha);
+    let edge_a = Vec3::new(
+        triangle.vertices[1].x - triangle.vertices[0].x,
+        triangle.vertices[1].y - triangle.vertices[0].y,
+        triangle.vertices[1].z - triangle.vertices[0].z,
+    );
+    let edge_b = Vec3::new(
+        triangle.vertices[2].x - triangle.vertices[0].x,
+        triangle.vertices[2].y - triangle.vertices[0].y,
+        triangle.vertices[2].z - triangle.vertices[0].z,
+    );
+    let local_normal = edge_a.cross(edge_b).normalized();
+    let normal = rotate_normal(local_normal, transform);
+    for (index, point) in points.into_iter().enumerate() {
+        let cube_point = cube_material_point(triangle.vertices[index]);
+        vertices.push(GpuVertex {
+            position: [point.x, point.y, point.z],
+            color,
+            material: [material_id, cube_point.x, cube_point.y, cube_point.z],
+            material_extra: [normal.x, normal.y, normal.z, elapsed_seconds],
+        });
+    }
+}
+
+fn emit_center_message(vertices: &mut Vec<GpuVertex>, width: u32, height: u32, message: &str) {
+    let scale = 5;
+    let text_width = message.chars().count() as i32 * 8 * scale;
+    let text_height = 8 * scale;
+    let panel_width = text_width + 54;
+    let panel_height = text_height + 34;
+    let left = (width as i32 - panel_width) / 2;
+    let top = (height as i32 - panel_height) / 2;
+    emit_rect(
+        vertices,
+        width,
+        height,
+        left,
+        top,
+        panel_width,
+        panel_height,
+        AppColor::from_argb(218, 8, 8, 10),
+        0.08,
+    );
+    emit_rect_outline(
+        vertices,
+        width,
+        height,
+        left,
+        top,
+        panel_width,
+        panel_height,
+        AppColor::from_argb(255, 255, 82, 82),
+        0.07,
+    );
+    emit_text(
+        vertices,
+        width,
+        height,
+        left + 27,
+        top + 17,
+        message,
+        AppColor::from_rgb(255, 82, 82),
+        scale,
+        0.055,
+    );
+}
+
+const SCREEN_SHARD_MATERIAL_ID: f32 = 7.0;
+
+fn emit_screen_shard(vertices: &mut Vec<GpuVertex>, shard: &ScreenShardGeometry, transform: VisualTransform) {
+    let point_count = shard.local_points.len().min(shard.texture_uvs.len());
+    if point_count < 3 {
+        return;
+    }
+
+    let hz = shard.thickness.max(2.0) * 0.5;
+    let front: Vec<Vec3> = shard
+        .local_points
+        .iter()
+        .take(point_count)
+        .map(|point| Vec3::new(point.x, point.y, hz))
+        .collect();
+    let back: Vec<Vec3> = shard
+        .local_points
+        .iter()
+        .take(point_count)
+        .map(|point| Vec3::new(point.x, point.y, -hz))
+        .collect();
+    let front_normal = rotate_normal(Vec3::new(0.0, 0.0, 1.0), transform);
+    let back_normal = rotate_normal(Vec3::new(0.0, 0.0, -1.0), transform);
+
+    for index in 1..point_count - 1 {
+        emit_textured_shard_triangle(
+            vertices,
+            [front[0], front[index], front[index + 1]],
+            [
+                shard.texture_uvs[0],
+                shard.texture_uvs[index],
+                shard.texture_uvs[index + 1],
+            ],
+            transform,
+            front_normal,
+        );
+        emit_solid_local_triangle(
+            vertices,
+            [back[0], back[index + 1], back[index]],
+            transform,
+            AppColor::from_rgb(38, 41, 45),
+            back_normal,
+            255,
+        );
+    }
+
+    for index in 0..point_count {
+        let next = (index + 1) % point_count;
+        let a = front[index];
+        let b = front[next];
+        let c = back[next];
+        let d = back[index];
+        let normal = local_triangle_normal([a, b, c]);
+        emit_solid_local_triangle(
+            vertices,
+            [a, b, c],
+            transform,
+            AppColor::from_rgb(54, 58, 63),
+            rotate_normal(normal, transform),
+            255,
+        );
+        emit_solid_local_triangle(
+            vertices,
+            [a, c, d],
+            transform,
+            AppColor::from_rgb(43, 46, 50),
+            rotate_normal(normal, transform),
+            255,
+        );
+    }
+}
+
+fn emit_textured_shard_triangle(
+    vertices: &mut Vec<GpuVertex>,
+    points: [Vec3; 3],
+    uvs: [Vector2; 3],
+    transform: VisualTransform,
+    normal: Vec3,
+) {
+    for index in 0..3 {
+        let point = project_vertex(points[index], transform);
+        let uv = uvs[index];
+        vertices.push(GpuVertex {
+            position: [point.x, point.y, point.z],
+            color: [1.0, 1.0, 1.0, 1.0],
+            material: [SCREEN_SHARD_MATERIAL_ID, uv.x, uv.y, 0.0],
+            material_extra: [normal.x, normal.y, normal.z, 0.0],
+        });
+    }
+}
+
+fn emit_solid_local_triangle(
+    vertices: &mut Vec<GpuVertex>,
+    points: [Vec3; 3],
+    transform: VisualTransform,
+    color: AppColor,
+    normal: Vec3,
+    alpha: u8,
+) {
+    let projected = points.map(|point| project_vertex(point, transform));
+    let shade = (0.62 + normal.z.max(0.0) * 0.28 + (-normal.y).max(0.0) * 0.12).clamp(0.42, 1.0);
+    let color = color_to_f32(scale_color(color, shade), alpha);
+    for point in projected {
+        vertices.push(GpuVertex {
+            position: [point.x, point.y, point.z],
+            color,
+            material: [0.0, 0.0, 0.0, 0.0],
+            material_extra: [0.0, 0.0, 0.0, 0.0],
+        });
+    }
+}
+
+fn local_triangle_normal(points: [Vec3; 3]) -> Vec3 {
+    let edge_a = Vec3::new(
+        points[1].x - points[0].x,
+        points[1].y - points[0].y,
+        points[1].z - points[0].z,
+    );
+    let edge_b = Vec3::new(
+        points[2].x - points[0].x,
+        points[2].y - points[0].y,
+        points[2].z - points[0].z,
+    );
+    edge_a.cross(edge_b).normalized()
+}
+
+fn cube_material_point(point: Vec3) -> Vec3 {
+    let scale = point.x.abs().max(point.y.abs()).max(point.z.abs()).max(1.0);
+    Vec3::new(point.x / scale, point.y / scale, point.z / scale)
 }
 
 fn emit_rect(
@@ -620,26 +1006,38 @@ fn emit_rect(
         GpuVertex {
             position: [left, top, z],
             color,
+            material: [0.0, 0.0, 0.0, 0.0],
+            material_extra: [0.0, 0.0, 0.0, 0.0],
         },
         GpuVertex {
             position: [right, top, z],
             color,
+            material: [0.0, 0.0, 0.0, 0.0],
+            material_extra: [0.0, 0.0, 0.0, 0.0],
         },
         GpuVertex {
             position: [right, bottom, z],
             color,
+            material: [0.0, 0.0, 0.0, 0.0],
+            material_extra: [0.0, 0.0, 0.0, 0.0],
         },
         GpuVertex {
             position: [left, top, z],
             color,
+            material: [0.0, 0.0, 0.0, 0.0],
+            material_extra: [0.0, 0.0, 0.0, 0.0],
         },
         GpuVertex {
             position: [right, bottom, z],
             color,
+            material: [0.0, 0.0, 0.0, 0.0],
+            material_extra: [0.0, 0.0, 0.0, 0.0],
         },
         GpuVertex {
             position: [left, bottom, z],
             color,
+            material: [0.0, 0.0, 0.0, 0.0],
+            material_extra: [0.0, 0.0, 0.0, 0.0],
         },
     ]);
 }
@@ -717,7 +1115,7 @@ fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds
     let center_x = object.body.position.x + (object.body.width * 0.5);
     let center_y = object.body.position.y + (object.body.height * 0.5);
     let mut center_z = 0.0f32;
-    let rotation_x = object.rotation_x;
+    let mut rotation_x = object.rotation_x;
     let mut rotation_y = object.rotation_y;
     let mut rotation_z = object.rotation_z;
     let mut scale_x = compute_stretch_x(object);
@@ -753,6 +1151,18 @@ fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds
             scale_x *= 1.0 + stretch * 0.13 + impact * 0.18 + wobble * 0.025;
             scale_y *= 1.0 - stretch * 0.05 - impact * 0.22 - wobble * 0.018;
             rotation_z += (object.body.velocity.x as f64 * 0.012).clamp(-8.0, 8.0);
+        },
+        ObjectVisualKind::GlassMarble
+        | ObjectVisualKind::PlasmaOrb
+        | ObjectVisualKind::PortalOrb
+        | ObjectVisualKind::SoapBubble
+        | ObjectVisualKind::ForcefieldOrb => {
+            center_z += 12.0;
+            rotation_z += object.body.velocity.x as f64 * 0.009;
+            rotation_x += object.body.velocity.y as f64 * 0.004;
+        },
+        ObjectVisualKind::RaymarchCube => {
+            center_z += 8.0;
         },
         ObjectVisualKind::Pyramid => {
             center_z += 6.0;
@@ -797,6 +1207,28 @@ fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds
             }
             rotation_z += (object.body.velocity.x as f64 * 0.01).clamp(-4.0, 4.0);
         },
+        ObjectVisualKind::Snail => {
+            let speed_sq = object.body.velocity.length_squared();
+            if speed_sq > 1.0 {
+                rotation_z += object.body.velocity.y.atan2(object.body.velocity.x).to_degrees() as f64;
+            }
+            let crawl = ((elapsed_seconds * 5.2) + phase).sin() as f32;
+            center_z += 8.0 + crawl * 1.8;
+            scale_x *= 1.0 + crawl * 0.018;
+            scale_y *= 1.0 - crawl * 0.012;
+        },
+        ObjectVisualKind::Fan => {
+            let pulse = ((elapsed_seconds * 8.0) + phase).sin() as f32;
+            center_z += 15.0 + pulse.max(0.0) * 2.0;
+            scale_x *= 1.0 + pulse * 0.01;
+            scale_y *= 1.0 - pulse * 0.006;
+        },
+        ObjectVisualKind::QuadDrone => {
+            let hover = ((elapsed_seconds * 4.2) + phase).sin() as f32;
+            center_z += 38.0 + hover * 5.0;
+            rotation_x += (object.body.velocity.y as f64 * 0.018).clamp(-9.0, 9.0);
+            rotation_y += (-object.body.velocity.x as f64 * 0.018).clamp(-9.0, 9.0);
+        },
         ObjectVisualKind::ImportedModel => {
             center_z += 12.0;
         },
@@ -804,6 +1236,7 @@ fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds
             center_z += 10.0;
         },
         ObjectVisualKind::BasketballHoop => {},
+        ObjectVisualKind::ScreenShard => {},
         ObjectVisualKind::DvdLogo => {},
         ObjectVisualKind::Cube => {},
     }
@@ -867,6 +1300,13 @@ fn project_vertex(vertex: Vec3, transform: VisualTransform) -> Vec3 {
     point.y += transform.center_y;
     point.z += transform.center_z;
     point
+}
+
+fn rotate_normal(normal: Vec3, transform: VisualTransform) -> Vec3 {
+    let mut point = rotate_x(normal, transform.rotation_x as f32);
+    point = rotate_y(point, transform.rotation_y as f32);
+    point = rotate_z(point, transform.rotation_z as f32);
+    point.normalized()
 }
 
 fn rotate_x(point: Vec3, angle_degrees: f32) -> Vec3 {
@@ -1177,6 +1617,104 @@ fn ball_mesh(size: f32, base_color: AppColor) -> Mesh {
     }
 
     Mesh { triangles }
+}
+
+fn ellipsoid_mesh(width: f32, height: f32, depth: f32, base_color: AppColor) -> Mesh {
+    const LATITUDES: usize = 7;
+    const LONGITUDES: usize = 14;
+    let rx = width.max(1.0) * 0.5;
+    let ry = height.max(1.0) * 0.5;
+    let rz = depth.max(1.0) * 0.5;
+    let mut triangles = Vec::new();
+
+    for lat in 0..LATITUDES {
+        let theta0 = std::f32::consts::PI * (lat as f32 / LATITUDES as f32);
+        let theta1 = std::f32::consts::PI * ((lat + 1) as f32 / LATITUDES as f32);
+        for lon in 0..LONGITUDES {
+            let phi0 = std::f32::consts::TAU * (lon as f32 / LONGITUDES as f32);
+            let phi1 = std::f32::consts::TAU * ((lon + 1) as f32 / LONGITUDES as f32);
+            let p00 = ellipsoid_point(rx, ry, rz, theta0, phi0);
+            let p01 = ellipsoid_point(rx, ry, rz, theta0, phi1);
+            let p10 = ellipsoid_point(rx, ry, rz, theta1, phi0);
+            let p11 = ellipsoid_point(rx, ry, rz, theta1, phi1);
+            let shade = 0.64 + (lat as f32 / LATITUDES as f32 * 0.34);
+            let color = scale_color(base_color, shade);
+            if lat == 0 {
+                triangles.push(SourceTriangle {
+                    vertices: [p00, p10, p11],
+                    color,
+                    alpha: 255,
+                });
+            } else if lat + 1 == LATITUDES {
+                triangles.push(SourceTriangle {
+                    vertices: [p00, p10, p01],
+                    color,
+                    alpha: 255,
+                });
+            } else {
+                triangles.push(SourceTriangle {
+                    vertices: [p00, p10, p11],
+                    color,
+                    alpha: 255,
+                });
+                triangles.push(SourceTriangle {
+                    vertices: [p00, p11, p01],
+                    color,
+                    alpha: 255,
+                });
+            }
+        }
+    }
+
+    Mesh { triangles }
+}
+
+fn ellipsoid_point(rx: f32, ry: f32, rz: f32, theta: f32, phi: f32) -> Vec3 {
+    let sin_theta = theta.sin();
+    Vec3::new(
+        rx * sin_theta * phi.cos(),
+        ry * theta.cos(),
+        rz * sin_theta * phi.sin(),
+    )
+}
+
+fn glass_marble_mesh(size: f32, base_color: AppColor) -> Mesh {
+    const LATITUDES: usize = 28;
+    const LONGITUDES: usize = 56;
+    let radius = size * 0.5;
+    let mut triangles = Vec::with_capacity(LATITUDES * LONGITUDES * 2);
+
+    for lat in 0..LATITUDES {
+        let theta0 = std::f32::consts::PI * (lat as f32 / LATITUDES as f32);
+        let theta1 = std::f32::consts::PI * ((lat + 1) as f32 / LATITUDES as f32);
+        for lon in 0..LONGITUDES {
+            let phi0 = std::f32::consts::TAU * (lon as f32 / LONGITUDES as f32);
+            let phi1 = std::f32::consts::TAU * ((lon + 1) as f32 / LONGITUDES as f32);
+            let p00 = sphere_point(radius, theta0, phi0);
+            let p01 = sphere_point(radius, theta0, phi1);
+            let p10 = sphere_point(radius, theta1, phi0);
+            let p11 = sphere_point(radius, theta1, phi1);
+
+            if lat == 0 {
+                push_glass_marble_triangle(&mut triangles, [p00, p10, p11], radius, base_color);
+            } else if lat + 1 == LATITUDES {
+                push_glass_marble_triangle(&mut triangles, [p00, p10, p01], radius, base_color);
+            } else {
+                push_glass_marble_triangle(&mut triangles, [p00, p10, p11], radius, base_color);
+                push_glass_marble_triangle(&mut triangles, [p00, p11, p01], radius, base_color);
+            }
+        }
+    }
+
+    Mesh { triangles }
+}
+
+fn push_glass_marble_triangle(triangles: &mut Vec<SourceTriangle>, vertices: [Vec3; 3], _radius: f32, base_color: AppColor) {
+    triangles.push(SourceTriangle {
+        vertices,
+        color: base_color,
+        alpha: 188,
+    });
 }
 
 fn soft_ball_mesh(size: f32, base_color: AppColor) -> Mesh {
@@ -1560,9 +2098,234 @@ fn robot_buddy_mesh(size: f32, base_color: AppColor) -> Mesh {
     Mesh { triangles }
 }
 
+fn snail_mesh(size: f32, base_color: AppColor) -> Mesh {
+    let mut triangles = Vec::new();
+    let body_color = scale_color(base_color, 0.92);
+    let belly_color = scale_color(base_color, 0.72);
+    let shell_color = AppColor::from_rgb(128, 84, 54);
+    let shell_ridge = AppColor::from_rgb(222, 168, 92);
+    let eye_color = AppColor::from_rgb(24, 28, 22);
+
+    append_mesh_offset(
+        &mut triangles,
+        ellipsoid_mesh(size * 0.92, size * 0.32, size * 0.34, body_color),
+        Vec3::new(-size * 0.04, size * 0.15, 0.0),
+    );
+    append_mesh_offset(
+        &mut triangles,
+        rectangular_prism_mesh(size * 0.88, size * 0.08, size * 0.22, belly_color),
+        Vec3::new(-size * 0.07, size * 0.32, -size * 0.01),
+    );
+    append_mesh_offset(
+        &mut triangles,
+        ellipsoid_mesh(size * 0.48, size * 0.48, size * 0.28, shell_color),
+        Vec3::new(-size * 0.2, -size * 0.04, size * 0.04),
+    );
+    for radius_factor in [0.18, 0.29, 0.39] {
+        add_disk(
+            &mut triangles,
+            Vec3::new(-size * 0.18, -size * 0.04, size * 0.2),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            size * radius_factor,
+            shell_ridge,
+            true,
+        );
+    }
+    append_mesh_offset(
+        &mut triangles,
+        ellipsoid_mesh(size * 0.34, size * 0.28, size * 0.26, scale_color(base_color, 1.08)),
+        Vec3::new(size * 0.4, size * 0.06, size * 0.02),
+    );
+
+    for eye_x in [size * 0.35, size * 0.52] {
+        append_mesh_offset(
+            &mut triangles,
+            rectangular_prism_mesh(size * 0.035, size * 0.28, size * 0.035, body_color),
+            Vec3::new(eye_x, -size * 0.17, size * 0.04),
+        );
+        append_mesh_offset(
+            &mut triangles,
+            ball_mesh(size * 0.08, eye_color),
+            Vec3::new(eye_x, -size * 0.32, size * 0.07),
+        );
+    }
+
+    Mesh { triangles }
+}
+
+fn fan_mesh(size: f32, base_color: AppColor) -> Mesh {
+    let mut triangles = Vec::new();
+    let shell = scale_color(base_color, 0.78);
+    let bright = scale_color(base_color, 1.24);
+    let dark = AppColor::from_rgb(22, 30, 38);
+    let grille = AppColor::from_rgb(172, 238, 255);
+    let blade = AppColor::from_rgb(242, 248, 252);
+
+    append_mesh_offset(
+        &mut triangles,
+        rectangular_prism_mesh(size * 0.56, size * 0.42, size * 0.38, shell),
+        Vec3::new(-size * 0.05, 0.02 * size, 0.0),
+    );
+    append_mesh_offset(
+        &mut triangles,
+        rectangular_prism_mesh(size * 0.28, size * 0.20, size * 0.34, bright),
+        Vec3::new(size * 0.38, size * 0.02, 0.0),
+    );
+    append_mesh_offset(
+        &mut triangles,
+        rectangular_prism_mesh(size * 0.34, size * 0.08, size * 0.22, dark),
+        Vec3::new(size * 0.48, size * 0.02, size * 0.12),
+    );
+
+    add_disk(
+        &mut triangles,
+        Vec3::new(-size * 0.08, 0.0, size * 0.24),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+        size * 0.34,
+        dark,
+        true,
+    );
+    add_disk(
+        &mut triangles,
+        Vec3::new(-size * 0.08, 0.0, size * 0.27),
+        Vec3::new(1.0, 0.0, 0.0),
+        Vec3::new(0.0, 1.0, 0.0),
+        size * 0.29,
+        scale_color(base_color, 0.48),
+        true,
+    );
+
+    for angle in [0.0, 60.0, 120.0] {
+        append_mesh_offset_rotated_z(
+            &mut triangles,
+            rectangular_prism_mesh(size * 0.42, size * 0.065, size * 0.045, blade),
+            Vec3::new(-size * 0.08, 0.0, size * 0.31),
+            angle,
+        );
+    }
+    for offset in [-0.21, 0.0, 0.21] {
+        append_mesh_offset(
+            &mut triangles,
+            rectangular_prism_mesh(size * 0.68, size * 0.022, size * 0.035, grille),
+            Vec3::new(-size * 0.08, size * offset, size * 0.34),
+        );
+        append_mesh_offset(
+            &mut triangles,
+            rectangular_prism_mesh(size * 0.022, size * 0.68, size * 0.035, grille),
+            Vec3::new(-size * 0.08 + size * offset, 0.0, size * 0.345),
+        );
+    }
+    append_mesh_offset(
+        &mut triangles,
+        ball_mesh(size * 0.12, AppColor::from_rgb(255, 185, 84)),
+        Vec3::new(-size * 0.08, 0.0, size * 0.36),
+    );
+    append_mesh_offset(
+        &mut triangles,
+        rectangular_prism_mesh(size * 0.22, size * 0.14, size * 0.12, AppColor::from_rgb(255, 176, 76)),
+        Vec3::new(size * 0.66, size * 0.02, size * 0.10),
+    );
+
+    Mesh { triangles }
+}
+
+fn quad_drone_mesh(size: f32, base_color: AppColor) -> Mesh {
+    let mut triangles = Vec::new();
+    let body = scale_color(base_color, 0.92);
+    let trim = AppColor::from_rgb(28, 34, 44);
+    let arm = AppColor::from_rgb(84, 98, 116);
+    let rotor_guard = AppColor::from_rgb(74, 230, 255);
+    let rotor_blade = AppColor::from_rgb(226, 236, 244);
+    let accent = AppColor::from_rgb(255, 176, 76);
+
+    append_mesh_offset(
+        &mut triangles,
+        ellipsoid_mesh(size * 0.42, size * 0.26, size * 0.22, body),
+        Vec3::new(0.0, 0.0, size * 0.02),
+    );
+    append_mesh_offset(
+        &mut triangles,
+        rectangular_prism_mesh(size * 0.94, size * 0.055, size * 0.08, arm),
+        Vec3::new(0.0, 0.0, 0.0),
+    );
+    append_mesh_offset(
+        &mut triangles,
+        rectangular_prism_mesh(size * 0.055, size * 0.62, size * 0.08, arm),
+        Vec3::new(0.0, 0.0, 0.0),
+    );
+    append_mesh_offset(
+        &mut triangles,
+        rectangular_prism_mesh(size * 0.24, size * 0.06, size * 0.05, accent),
+        Vec3::new(size * 0.12, 0.0, size * 0.15),
+    );
+
+    for (index, (x, y)) in [
+        (-size * 0.43, -size * 0.30),
+        (size * 0.43, -size * 0.30),
+        (-size * 0.43, size * 0.30),
+        (size * 0.43, size * 0.30),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        append_mesh_offset(
+            &mut triangles,
+            ellipsoid_mesh(size * 0.18, size * 0.18, size * 0.08, trim),
+            Vec3::new(x, y, size * 0.05),
+        );
+        add_disk(
+            &mut triangles,
+            Vec3::new(x, y, size * 0.18),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            size * 0.18,
+            rotor_guard,
+            true,
+        );
+        add_disk(
+            &mut triangles,
+            Vec3::new(x, y, size * 0.205),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            size * 0.11,
+            trim,
+            true,
+        );
+        let blade_angle = if index % 2 == 0 { 18.0 } else { -18.0 };
+        append_mesh_offset_rotated_z(
+            &mut triangles,
+            rectangular_prism_mesh(size * 0.34, size * 0.035, size * 0.035, rotor_blade),
+            Vec3::new(x, y, size * 0.24),
+            blade_angle,
+        );
+        append_mesh_offset_rotated_z(
+            &mut triangles,
+            rectangular_prism_mesh(size * 0.035, size * 0.34, size * 0.035, rotor_blade),
+            Vec3::new(x, y, size * 0.245),
+            blade_angle,
+        );
+    }
+
+    Mesh { triangles }
+}
+
 fn append_mesh_offset(triangles: &mut Vec<SourceTriangle>, mesh: Mesh, offset: Vec3) {
     triangles.extend(mesh.triangles.into_iter().map(|mut triangle| {
         for vertex in &mut triangle.vertices {
+            vertex.x += offset.x;
+            vertex.y += offset.y;
+            vertex.z += offset.z;
+        }
+        triangle
+    }));
+}
+
+fn append_mesh_offset_rotated_z(triangles: &mut Vec<SourceTriangle>, mesh: Mesh, offset: Vec3, angle_degrees: f32) {
+    triangles.extend(mesh.triangles.into_iter().map(|mut triangle| {
+        for vertex in &mut triangle.vertices {
+            *vertex = rotate_z(*vertex, angle_degrees);
             vertex.x += offset.x;
             vertex.y += offset.y;
             vertex.z += offset.z;
