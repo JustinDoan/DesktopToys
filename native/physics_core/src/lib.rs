@@ -90,6 +90,31 @@ unsafe extern "C" {
     fn sop_box3d_reset(world: *mut c_void, gravity_y: f32, bounds_width: f32, bounds_height: f32);
     fn sop_box3d_set_gravity(world: *mut c_void, gravity_y: f32);
     fn sop_box3d_sync_body(world: *mut c_void, def: *const SopBox3dBodyDef);
+<<<<<<< Updated upstream
+=======
+    fn sop_box3d_add_velocity(world: *mut c_void, id: u64, delta_x: f32, delta_y: f32, delta_z: f32) -> bool;
+    fn sop_box3d_remove_body(world: *mut c_void, id: u64);
+    fn sop_box3d_add_static_box(
+        world: *mut c_void,
+        center_x: f32,
+        center_y: f32,
+        center_z: f32,
+        half_width: f32,
+        half_height: f32,
+        half_depth: f32,
+        friction: f32,
+        restitution: f32,
+    );
+    fn sop_box3d_add_static_sphere(
+        world: *mut c_void,
+        center_x: f32,
+        center_y: f32,
+        center_z: f32,
+        radius: f32,
+        friction: f32,
+        restitution: f32,
+    );
+>>>>>>> Stashed changes
     fn sop_box3d_step(world: *mut c_void, time_step: f32, sub_step_count: i32);
     fn sop_box3d_snapshot_count(world: *const c_void) -> i32;
     fn sop_box3d_get_snapshots(
@@ -199,6 +224,18 @@ impl Box3dBackend {
         unsafe { sop_box3d_step(self.raw.as_ptr(), dt, BOX3D_SUB_STEPS) };
     }
 
+<<<<<<< Updated upstream
+=======
+    fn add_velocity(&mut self, id: u64, delta: Vector2, delta_z: f32) -> bool {
+        unsafe { sop_box3d_add_velocity(self.raw.as_ptr(), id, delta.x, delta.y, delta_z) }
+    }
+
+    fn remove_body(&mut self, id: u64) {
+        unsafe { sop_box3d_remove_body(self.raw.as_ptr(), id) };
+        self.synced_bodies.remove(&id);
+    }
+
+>>>>>>> Stashed changes
     fn snapshots(&mut self) -> &[SopBox3dSnapshot] {
         let count = unsafe { sop_box3d_snapshot_count(self.raw.as_ptr()) }.max(0);
         if count == 0 {
@@ -362,6 +399,12 @@ pub struct PhysicsWorld {
     box3d: Option<Box3dBackend>,
     box3d_bounds: Option<(u32, u32)>,
     object_indices: HashMap<u64, usize>,
+<<<<<<< Updated upstream
+=======
+    static_colliders: Vec<StaticCollider>,
+    static_colliders_synced: bool,
+    pending_velocity_deltas: Vec<(u64, Vector2, f32)>,
+>>>>>>> Stashed changes
 }
 
 impl PhysicsWorld {
@@ -372,6 +415,54 @@ impl PhysicsWorld {
             box3d: None,
             box3d_bounds: None,
             object_indices: HashMap::new(),
+<<<<<<< Updated upstream
+=======
+            static_colliders: Vec::new(),
+            static_colliders_synced: true,
+            pending_velocity_deltas: Vec::new(),
+        }
+    }
+
+    /// Registers a static (immovable) box collider, e.g. a backboard. It is
+    /// re-created automatically whenever the physics backend resets.
+    pub fn add_static_box_collider(
+        &mut self,
+        center: (f32, f32, f32),
+        half_extents: (f32, f32, f32),
+        friction: f32,
+        restitution: f32,
+    ) {
+        self.static_colliders.push(StaticCollider {
+            center,
+            shape: StaticColliderShape::Box { half_extents },
+            friction,
+            restitution,
+        });
+        self.static_colliders_synced = false;
+    }
+
+    /// Registers a static sphere collider, e.g. one segment of a hoop rim.
+    pub fn add_static_sphere_collider(&mut self, center: (f32, f32, f32), radius: f32, friction: f32, restitution: f32) {
+        self.static_colliders.push(StaticCollider {
+            center,
+            shape: StaticColliderShape::Sphere { radius },
+            friction,
+            restitution,
+        });
+        self.static_colliders_synced = false;
+    }
+
+    pub fn clear_static_colliders(&mut self) {
+        if self.static_colliders.is_empty() {
+            return;
+        }
+        self.static_colliders.clear();
+        // Static bodies have no handles we can remove individually, so rebuild
+        // the backend world; dynamic bodies re-sync from Rust-side state.
+        if let (Some(box3d), Some((width, height))) = (&mut self.box3d, self.box3d_bounds) {
+            let bounds = RectF::new(0.0, 0.0, width as f32, height as f32);
+            box3d.reset(self.gravity.y, bounds);
+>>>>>>> Stashed changes
         }
     }
 
@@ -391,8 +482,51 @@ impl PhysicsWorld {
         self.objects.push(state);
     }
 
+<<<<<<< Updated upstream
+=======
+    pub fn add_velocity(&mut self, id: u64, delta: Vector2) {
+        if delta.length_squared() <= f32::EPSILON {
+            return;
+        }
+        if let Some(object) = self.objects.iter_mut().find(|object| object.id == id) {
+            object.body.velocity += delta;
+            object.body.is_sleeping = false;
+            object.body.sleep_timer_seconds = 0.0;
+        }
+        self.pending_velocity_deltas.push((id, delta, 0.0));
+    }
+
+    pub fn teleport_object(&mut self, id: u64, position: Vector2, velocity: Vector2) -> bool {
+        let Some(object) = self.objects.iter_mut().find(|object| object.id == id) else {
+            return false;
+        };
+        object.body.position = position;
+        object.body.velocity = velocity;
+        object.body.is_sleeping = false;
+        object.body.sleep_timer_seconds = 0.0;
+        if let Some(box3d) = &mut self.box3d {
+            box3d.remove_body(id);
+        }
+        self.pending_velocity_deltas
+            .retain(|(pending_id, _, _)| *pending_id != id);
+        true
+    }
+
+    pub fn remove_object(&mut self, id: u64) -> Option<ObjectState> {
+        let index = self.objects.iter().position(|object| object.id == id)?;
+        let removed = self.objects.swap_remove(index);
+        if let Some(box3d) = &mut self.box3d {
+            box3d.remove_body(id);
+        }
+        self.pending_velocity_deltas
+            .retain(|(pending_id, _, _)| *pending_id != id);
+        Some(removed)
+    }
+
+>>>>>>> Stashed changes
     pub fn clear(&mut self) {
         self.objects.clear();
+        self.pending_velocity_deltas.clear();
         if let (Some(box3d), Some((width, height))) = (&mut self.box3d, self.box3d_bounds) {
             let bounds = RectF::new(0.0, 0.0, width as f32, height as f32);
             box3d.reset(self.gravity.y, bounds);
@@ -410,6 +544,10 @@ impl PhysicsWorld {
         box3d.set_gravity(self.gravity.y);
         for object in &self.objects {
             box3d.sync_body_if_needed(object);
+        }
+
+        for (id, delta, delta_z) in self.pending_velocity_deltas.drain(..) {
+            box3d.add_velocity(id, delta, delta_z);
         }
 
         box3d.step(dt);

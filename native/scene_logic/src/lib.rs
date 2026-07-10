@@ -1,6 +1,9 @@
 use std::time::Instant;
 
-use core_types::{AppColor, AppConfig, CollisionShape, ObjectState, ObjectVisualKind, PhysicsBody, RectF, Vector2};
+use core_types::{
+    AppColor, AppConfig, CollisionShape, ObjectState, ObjectVisualKind, PhysicsBody, RectF, ScreenShardGeometry,
+    Vector2,
+};
 use physics_core::PhysicsWorld;
 use rand::RngExt;
 
@@ -16,9 +19,34 @@ const DEFAULT_OBJECT_SIZE: f32 = 132.0;
 const STARTUP_CUBE_COUNT: usize = 100;
 const STARTUP_CUBE_COLUMNS: usize = 10;
 const STARTUP_CUBE_SIZE: f32 = DEFAULT_OBJECT_SIZE * 0.2;
+const SHATTER_WEDGE_COUNT: usize = 30;
+const SHATTER_RING_FACTORS: [f32; 5] = [0.0, 0.24, 0.48, 0.72, 1.08];
+const SHATTER_MIN_AREA: f32 = 260.0;
+const SHARD_THICKNESS: f32 = 18.0;
 
+<<<<<<< Updated upstream
 const SPAWN_CATALOG: [SpawnSpec; 6] = [
     SpawnSpec::new(ObjectVisualKind::Cube, None),
+=======
+const SPAWN_CATALOG: [SpawnSpec; 22] = [
+    SpawnSpec::new(ObjectVisualKind::Cube, None),
+    SpawnSpec::new(ObjectVisualKind::Ball, Some(AppColor::from_rgb(90, 205, 255))),
+    SpawnSpec::new(ObjectVisualKind::SoftBall, Some(AppColor::from_rgb(106, 236, 188))),
+    SpawnSpec::new(ObjectVisualKind::GlassMarble, Some(AppColor::from_rgb(220, 246, 255))),
+    SpawnSpec::new(ObjectVisualKind::PlasmaOrb, Some(AppColor::from_rgb(160, 88, 255))),
+    SpawnSpec::new(ObjectVisualKind::PortalOrb, Some(AppColor::from_rgb(80, 180, 255))),
+    SpawnSpec::new(ObjectVisualKind::SoapBubble, Some(AppColor::from_rgb(245, 255, 255))),
+    SpawnSpec::new(ObjectVisualKind::ForcefieldOrb, Some(AppColor::from_rgb(78, 240, 255))),
+    SpawnSpec::new(ObjectVisualKind::RaymarchCube, Some(AppColor::from_rgb(130, 92, 255))),
+    SpawnSpec::new(ObjectVisualKind::RobotBuddy, Some(AppColor::from_rgb(150, 220, 245))),
+    SpawnSpec::new(ObjectVisualKind::Snail, Some(AppColor::from_rgb(166, 214, 124))),
+    SpawnSpec::new(ObjectVisualKind::Fan, Some(AppColor::from_rgb(105, 230, 255))),
+    SpawnSpec::new(ObjectVisualKind::QuadDrone, Some(AppColor::from_rgb(248, 250, 252))),
+    SpawnSpec::new(ObjectVisualKind::Pyramid, Some(AppColor::from_rgb(255, 176, 92))),
+    SpawnSpec::new(ObjectVisualKind::Barrel, Some(AppColor::from_rgb(126, 226, 168))),
+    SpawnSpec::new(ObjectVisualKind::Ring, Some(AppColor::from_rgb(255, 118, 210))),
+    SpawnSpec::new(ObjectVisualKind::Star, Some(AppColor::from_rgb(255, 224, 92))),
+>>>>>>> Stashed changes
     SpawnSpec::new(ObjectVisualKind::Crystal, Some(AppColor::from_rgb(108, 241, 255))),
     SpawnSpec::new(ObjectVisualKind::Satellite, Some(AppColor::from_rgb(88, 160, 255))),
     SpawnSpec::new(ObjectVisualKind::DvdLogo, Some(AppColor::from_rgb(244, 78, 255))),
@@ -339,7 +367,19 @@ impl SceneController {
         self.physics_world.objects_mut()
     }
 
+<<<<<<< Updated upstream
     pub fn initialize(&mut self, bounds: RectF) {
+=======
+    pub fn add_object_velocity(&mut self, id: u64, delta: Vector2) {
+        self.physics_world.add_velocity(id, delta);
+    }
+
+    pub fn teleport_object(&mut self, id: u64, position: Vector2, velocity: Vector2) -> bool {
+        self.physics_world.teleport_object(id, position, velocity)
+    }
+
+    pub fn initialize(&mut self, _bounds: RectF) {
+>>>>>>> Stashed changes
         self.next_cube_color_index = 0;
         self.next_spawn_catalog_index = 0;
         self.spawn_initial_objects(bounds);
@@ -396,10 +436,129 @@ impl SceneController {
         last_id
     }
 
+    pub fn spawn_screen_shatter(&mut self, bounds: RectF, impact: Vector2) -> usize {
+        self.physics_world.clear();
+        let impact = Vector2::new(
+            impact.x.clamp(bounds.left(), bounds.right()),
+            impact.y.clamp(bounds.top(), bounds.bottom()),
+        );
+        let mut rng = rand::rng();
+        let shard_specs = generate_shatter_specs(bounds, impact, &mut rng);
+        let shard_count = shard_specs.len();
+        for spec in shard_specs {
+            self.spawn_screen_shard(spec, bounds, impact, &mut rng);
+        }
+        shard_count
+    }
+
     pub fn spawn_object(&mut self, position: Vector2, color: Option<AppColor>, visual_kind: ObjectVisualKind) -> u64 {
         self.spawn_object_with_size(position, color, visual_kind, DEFAULT_OBJECT_SIZE)
     }
 
+<<<<<<< Updated upstream
+=======
+    pub fn spawn_custom_object(
+        &mut self,
+        position: Vector2,
+        size: Vector2,
+        color: AppColor,
+        visual_kind: ObjectVisualKind,
+        shape: CollisionShape,
+    ) -> u64 {
+        let id = self.spawn_object_with_size(position, Some(color), visual_kind, size.x.min(size.y).max(1.0));
+        if let Some(object) = self.physics_world.objects_mut().iter_mut().find(|object| object.id == id) {
+            object.body.width = size.x.max(1.0);
+            object.body.height = size.y.max(1.0);
+            object.body.shape = shape;
+            object.body.collision_scale = 1.0;
+        }
+        id
+    }
+
+    fn spawn_screen_shard(
+        &mut self,
+        spec: ShatterShardSpec,
+        bounds: RectF,
+        impact: Vector2,
+        rng: &mut impl RngExt,
+    ) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        let center = Vector2::new(
+            spec.min.x + spec.size.x * 0.5,
+            spec.min.y + spec.size.y * 0.5,
+        );
+        let from_impact = center - impact;
+        let distance = from_impact.length_squared().sqrt().max(1.0);
+        let direction = from_impact / distance;
+        let max_distance = max_corner_distance(bounds, impact).max(1.0);
+        let near_impact = (1.0 - distance / max_distance).clamp(0.0, 1.0);
+        let blast_speed = rng.random_range(160.0..430.0) + near_impact * rng.random_range(480.0..920.0);
+        let lift = rng.random_range(80.0..310.0) + near_impact * 180.0;
+        let area_mass = (spec.area / 18_000.0).clamp(0.45, 3.5);
+
+        let mut state = ObjectState {
+            id,
+            z_index: self.physics_world.objects().len() as i32 + 1,
+            base_color: AppColor::from_rgb(205, 208, 212),
+            visual_kind: ObjectVisualKind::ScreenShard,
+            screen_shard: Some(spec.geometry),
+            ..ObjectState::default()
+        };
+        state.body.position = spec.min;
+        state.body.width = spec.size.x.max(4.0);
+        state.body.height = spec.size.y.max(4.0);
+        state.body.velocity = Vector2::new(direction.x * blast_speed, direction.y * blast_speed - lift);
+        state.body.mass = area_mass;
+        state.body.restitution = 0.34;
+        state.body.friction = 0.82;
+        state.body.linear_damping = 0.986;
+        state.body.gravity_scale = 1.0;
+        state.body.shape = CollisionShape::Box;
+        state.body.collision_scale = 0.88;
+        state.depth_unlocked = true;
+        state.depth_z = rng.random_range(0.0..18.0) + near_impact * 26.0;
+        state.depth_velocity = rng.random_range(90.0..240.0) + near_impact * rng.random_range(280.0..740.0);
+        state.rotation_x = rng.random_range(-10.0..10.0) as f64;
+        state.rotation_y = rng.random_range(-10.0..10.0) as f64;
+        state.rotation_z = rng.random_range(-4.0..4.0) as f64;
+        state.angular_velocity_x = rng.random_range(-340.0..340.0) as f64;
+        state.angular_velocity_y = rng.random_range(-360.0..360.0) as f64;
+        state.angular_velocity_z = rng.random_range(-420.0..420.0) as f64;
+
+        self.physics_world.add(state);
+        id
+    }
+
+    pub fn clear_objects(&mut self) {
+        self.physics_world.clear();
+    }
+
+    pub fn add_static_box_collider(
+        &mut self,
+        center: (f32, f32, f32),
+        half_extents: (f32, f32, f32),
+        friction: f32,
+        restitution: f32,
+    ) {
+        self.physics_world
+            .add_static_box_collider(center, half_extents, friction, restitution);
+    }
+
+    pub fn add_static_sphere_collider(&mut self, center: (f32, f32, f32), radius: f32, friction: f32, restitution: f32) {
+        self.physics_world
+            .add_static_sphere_collider(center, radius, friction, restitution);
+    }
+
+    pub fn clear_static_colliders(&mut self) {
+        self.physics_world.clear_static_colliders();
+    }
+
+    pub fn remove_object(&mut self, id: u64) -> Option<ObjectState> {
+        self.physics_world.remove_object(id)
+    }
+
+>>>>>>> Stashed changes
     fn spawn_object_with_size(
         &mut self,
         position: Vector2,
@@ -421,6 +580,21 @@ impl SceneController {
         if visual_kind == ObjectVisualKind::DvdLogo {
             state.body.width = base_size * 1.7;
             state.body.height = base_size * 0.78;
+<<<<<<< Updated upstream
+=======
+        } else if visual_kind == ObjectVisualKind::RobotBuddy {
+            state.body.width = base_size * 0.68;
+            state.body.height = base_size * 0.52;
+        } else if visual_kind == ObjectVisualKind::Snail {
+            state.body.width = base_size * 0.94;
+            state.body.height = base_size * 0.48;
+        } else if visual_kind == ObjectVisualKind::Fan {
+            state.body.width = base_size * 1.10;
+            state.body.height = base_size * 0.72;
+        } else if visual_kind == ObjectVisualKind::QuadDrone {
+            state.body.width = base_size * 0.92;
+            state.body.height = base_size * 0.54;
+>>>>>>> Stashed changes
         } else {
             state.body.width = base_size;
             state.body.height = base_size;
@@ -434,20 +608,109 @@ impl SceneController {
         };
         state.body.linear_damping = if visual_kind == ObjectVisualKind::DvdLogo {
             1.0
+<<<<<<< Updated upstream
+=======
+        } else if matches!(visual_kind, ObjectVisualKind::FoxBuddy | ObjectVisualKind::RobotBuddy) {
+            0.982
+        } else if matches!(visual_kind, ObjectVisualKind::Snail | ObjectVisualKind::QuadDrone) {
+            1.0
+        } else if visual_kind == ObjectVisualKind::Fan {
+            0.992
+>>>>>>> Stashed changes
         } else {
             self.config.linear_damping
         };
-        state.body.gravity_scale = if matches!(visual_kind, ObjectVisualKind::Satellite | ObjectVisualKind::DvdLogo) {
+        state.body.gravity_scale = if matches!(
+            visual_kind,
+            ObjectVisualKind::Satellite
+                | ObjectVisualKind::DvdLogo
+                | ObjectVisualKind::Snail
+                | ObjectVisualKind::Fan
+                | ObjectVisualKind::QuadDrone
+        ) {
             0.0
         } else {
             1.0
         };
+<<<<<<< Updated upstream
         state.body.shape = if visual_kind == ObjectVisualKind::Crystal {
             CollisionShape::Diamond
         } else {
             CollisionShape::Box
         };
         state.body.collision_scale = 1.0;
+=======
+        state.body.shape = match visual_kind {
+            ObjectVisualKind::Ball
+            | ObjectVisualKind::SoftBall
+            | ObjectVisualKind::GlassMarble
+            | ObjectVisualKind::PlasmaOrb
+            | ObjectVisualKind::PortalOrb
+            | ObjectVisualKind::SoapBubble
+            | ObjectVisualKind::ForcefieldOrb
+            | ObjectVisualKind::Ring
+            | ObjectVisualKind::GameTarget
+            | ObjectVisualKind::Snail
+            | ObjectVisualKind::QuadDrone
+            | ObjectVisualKind::Basketball => CollisionShape::Circle,
+            ObjectVisualKind::Crystal | ObjectVisualKind::Star => CollisionShape::Diamond,
+            _ => CollisionShape::Box,
+        };
+        state.body.collision_scale = 1.0;
+        if matches!(visual_kind, ObjectVisualKind::FoxBuddy | ObjectVisualKind::RobotBuddy) {
+            state.body.mass = 1.45;
+            state.body.friction = 1.05;
+            state.body.restitution = 0.28;
+        }
+        if visual_kind == ObjectVisualKind::SoftBall {
+            state.body.mass = 0.85;
+            state.body.friction = 0.92;
+            state.body.linear_damping = 0.986;
+            state.body.collision_scale = 0.94;
+        }
+        if matches!(
+            visual_kind,
+            ObjectVisualKind::GlassMarble
+                | ObjectVisualKind::PlasmaOrb
+                | ObjectVisualKind::PortalOrb
+                | ObjectVisualKind::SoapBubble
+                | ObjectVisualKind::ForcefieldOrb
+        ) {
+            state.body.mass = 1.35;
+            state.body.friction = 0.82;
+            state.body.restitution = 0.42;
+            state.body.linear_damping = 0.991;
+            state.body.collision_scale = 0.98;
+        }
+        if visual_kind == ObjectVisualKind::RobotBuddy {
+            state.body.mass = 1.65;
+            state.body.friction = 1.35;
+            state.body.restitution = 0.08;
+            state.body.linear_damping = 0.975;
+            state.body.collision_scale = 0.9;
+            state.body.lock_rotation = true;
+        }
+        if visual_kind == ObjectVisualKind::Snail {
+            state.body.mass = 2.4;
+            state.body.friction = 1.8;
+            state.body.restitution = 0.02;
+            state.body.collision_scale = 0.92;
+            state.body.lock_rotation = true;
+        }
+        if visual_kind == ObjectVisualKind::Fan {
+            state.body.mass = 4.0;
+            state.body.friction = 1.2;
+            state.body.restitution = 0.12;
+            state.body.collision_scale = 0.96;
+        }
+        if visual_kind == ObjectVisualKind::QuadDrone {
+            state.body.mass = 1.1;
+            state.body.friction = 0.5;
+            state.body.restitution = 0.18;
+            state.body.collision_scale = 0.88;
+            state.body.lock_rotation = true;
+        }
+>>>>>>> Stashed changes
         if visual_kind == ObjectVisualKind::DvdLogo {
             state.body.velocity = Vector2::new(420.0, 260.0);
         }
@@ -526,6 +789,223 @@ impl SceneController {
         self.next_cube_color_index += 1;
         color
     }
+}
+
+#[derive(Debug)]
+struct ShatterShardSpec {
+    min: Vector2,
+    size: Vector2,
+    area: f32,
+    geometry: ScreenShardGeometry,
+}
+
+fn generate_shatter_specs(bounds: RectF, impact: Vector2, rng: &mut impl RngExt) -> Vec<ShatterShardSpec> {
+    let max_radius = max_corner_distance(bounds, impact) * 1.12;
+    let impact_radius = (bounds.width.min(bounds.height) * 0.045).clamp(42.0, 92.0);
+    let usable_radius = (max_radius - impact_radius).max(1.0);
+    let angle_step = std::f32::consts::TAU / SHATTER_WEDGE_COUNT as f32;
+    let start_angle = rng.random_range(0.0..angle_step);
+    let mut angles = Vec::with_capacity(SHATTER_WEDGE_COUNT + 1);
+    for index in 0..=SHATTER_WEDGE_COUNT {
+        if index == SHATTER_WEDGE_COUNT {
+            angles.push(angles[0] + std::f32::consts::TAU);
+        } else {
+            let jitter = rng.random_range(-angle_step * 0.24..angle_step * 0.24);
+            angles.push(start_angle + angle_step * index as f32 + jitter);
+        }
+    }
+    angles.sort_by(|left, right| left.total_cmp(right));
+    let first = angles[0];
+    angles[SHATTER_WEDGE_COUNT] = first + std::f32::consts::TAU;
+
+    let mut radii_by_angle: Vec<Vec<f32>> = Vec::with_capacity(SHATTER_WEDGE_COUNT + 1);
+    for angle_index in 0..=SHATTER_WEDGE_COUNT {
+        if angle_index == SHATTER_WEDGE_COUNT {
+            radii_by_angle.push(radii_by_angle[0].clone());
+            continue;
+        }
+
+        let mut radii = Vec::with_capacity(SHATTER_RING_FACTORS.len());
+        for (ring_index, factor) in SHATTER_RING_FACTORS.iter().enumerate() {
+            let base = impact_radius + usable_radius * factor;
+            let jitter = if ring_index == 0 {
+                rng.random_range(0.82..1.18)
+            } else if ring_index == SHATTER_RING_FACTORS.len() - 1 {
+                rng.random_range(1.02..1.16)
+            } else {
+                rng.random_range(0.90..1.12)
+            };
+            radii.push(base * jitter);
+        }
+        radii_by_angle.push(radii);
+    }
+
+    let mut specs = Vec::with_capacity(SHATTER_WEDGE_COUNT * (SHATTER_RING_FACTORS.len() - 1));
+    for wedge_index in 0..SHATTER_WEDGE_COUNT {
+        let angle0 = angles[wedge_index];
+        let angle1 = angles[wedge_index + 1];
+        for ring_index in 0..SHATTER_RING_FACTORS.len() - 1 {
+            let polygon = vec![
+                point_from_polar(impact, angle0, radii_by_angle[wedge_index][ring_index]),
+                point_from_polar(impact, angle1, radii_by_angle[wedge_index + 1][ring_index]),
+                point_from_polar(impact, angle1, radii_by_angle[wedge_index + 1][ring_index + 1]),
+                point_from_polar(impact, angle0, radii_by_angle[wedge_index][ring_index + 1]),
+            ];
+            let clipped = dedupe_polygon(clip_polygon_to_rect(polygon, bounds));
+            if let Some(spec) = build_shatter_spec(clipped, bounds) {
+                specs.push(spec);
+            }
+        }
+    }
+    specs
+}
+
+fn build_shatter_spec(points: Vec<Vector2>, bounds: RectF) -> Option<ShatterShardSpec> {
+    if points.len() < 3 {
+        return None;
+    }
+
+    let area = polygon_area(&points);
+    if area < SHATTER_MIN_AREA {
+        return None;
+    }
+
+    let mut min = Vector2::new(f32::MAX, f32::MAX);
+    let mut max = Vector2::new(f32::MIN, f32::MIN);
+    for point in &points {
+        min.x = min.x.min(point.x);
+        min.y = min.y.min(point.y);
+        max.x = max.x.max(point.x);
+        max.y = max.y.max(point.y);
+    }
+    let size = Vector2::new((max.x - min.x).max(1.0), (max.y - min.y).max(1.0));
+    if size.x < 4.0 || size.y < 4.0 {
+        return None;
+    }
+
+    let center = Vector2::new(min.x + size.x * 0.5, min.y + size.y * 0.5);
+    let local_points = points.iter().map(|point| *point - center).collect();
+    let texture_uvs = points
+        .iter()
+        .map(|point| {
+            Vector2::new(
+                ((point.x - bounds.x) / bounds.width.max(1.0)).clamp(0.0, 1.0),
+                ((point.y - bounds.y) / bounds.height.max(1.0)).clamp(0.0, 1.0),
+            )
+        })
+        .collect();
+
+    Some(ShatterShardSpec {
+        min,
+        size,
+        area,
+        geometry: ScreenShardGeometry {
+            local_points,
+            texture_uvs,
+            thickness: SHARD_THICKNESS,
+        },
+    })
+}
+
+fn clip_polygon_to_rect(points: Vec<Vector2>, bounds: RectF) -> Vec<Vector2> {
+    let points = clip_polygon_edge(points, |point| point.x >= bounds.left(), |a, b| intersect_x(a, b, bounds.left()));
+    let points = clip_polygon_edge(points, |point| point.x <= bounds.right(), |a, b| intersect_x(a, b, bounds.right()));
+    let points = clip_polygon_edge(points, |point| point.y >= bounds.top(), |a, b| intersect_y(a, b, bounds.top()));
+    clip_polygon_edge(points, |point| point.y <= bounds.bottom(), |a, b| intersect_y(a, b, bounds.bottom()))
+}
+
+fn clip_polygon_edge(
+    points: Vec<Vector2>,
+    inside: impl Fn(Vector2) -> bool,
+    intersect: impl Fn(Vector2, Vector2) -> Vector2,
+) -> Vec<Vector2> {
+    if points.is_empty() {
+        return points;
+    }
+
+    let mut output = Vec::with_capacity(points.len() + 2);
+    let mut previous = *points.last().expect("non-empty polygon has a last point");
+    let mut previous_inside = inside(previous);
+    for current in points {
+        let current_inside = inside(current);
+        if current_inside {
+            if !previous_inside {
+                output.push(intersect(previous, current));
+            }
+            output.push(current);
+        } else if previous_inside {
+            output.push(intersect(previous, current));
+        }
+        previous = current;
+        previous_inside = current_inside;
+    }
+    output
+}
+
+fn intersect_x(a: Vector2, b: Vector2, x: f32) -> Vector2 {
+    let dx = b.x - a.x;
+    if dx.abs() <= f32::EPSILON {
+        return Vector2::new(x, a.y);
+    }
+    let t = ((x - a.x) / dx).clamp(0.0, 1.0);
+    Vector2::new(x, a.y + (b.y - a.y) * t)
+}
+
+fn intersect_y(a: Vector2, b: Vector2, y: f32) -> Vector2 {
+    let dy = b.y - a.y;
+    if dy.abs() <= f32::EPSILON {
+        return Vector2::new(a.x, y);
+    }
+    let t = ((y - a.y) / dy).clamp(0.0, 1.0);
+    Vector2::new(a.x + (b.x - a.x) * t, y)
+}
+
+fn dedupe_polygon(points: Vec<Vector2>) -> Vec<Vector2> {
+    let mut deduped: Vec<Vector2> = Vec::with_capacity(points.len());
+    for point in points {
+        if deduped
+            .last()
+            .map(|last| (*last - point).length_squared() > 0.25)
+            .unwrap_or(true)
+        {
+            deduped.push(point);
+        }
+    }
+    if deduped.len() > 2
+        && (deduped[0] - *deduped.last().expect("deduped polygon should have a last point")).length_squared() <= 0.25
+    {
+        deduped.pop();
+    }
+    deduped
+}
+
+fn polygon_area(points: &[Vector2]) -> f32 {
+    if points.len() < 3 {
+        return 0.0;
+    }
+    let mut sum = 0.0;
+    for index in 0..points.len() {
+        let next = (index + 1) % points.len();
+        sum += points[index].x * points[next].y - points[next].x * points[index].y;
+    }
+    sum.abs() * 0.5
+}
+
+fn point_from_polar(origin: Vector2, angle: f32, radius: f32) -> Vector2 {
+    let (sin, cos) = angle.sin_cos();
+    Vector2::new(origin.x + cos * radius, origin.y + sin * radius)
+}
+
+fn max_corner_distance(bounds: RectF, point: Vector2) -> f32 {
+    [
+        Vector2::new(bounds.left(), bounds.top()),
+        Vector2::new(bounds.right(), bounds.top()),
+        Vector2::new(bounds.right(), bounds.bottom()),
+        Vector2::new(bounds.left(), bounds.bottom()),
+    ]
+    .into_iter()
+    .map(|corner| (corner - point).length_squared().sqrt())
+    .fold(0.0, f32::max)
 }
 
 fn random_crystal_color() -> AppColor {

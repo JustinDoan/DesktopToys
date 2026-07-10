@@ -7,3 +7,9 @@ buildcheck-*/
 Assets/Models/*
 !Assets/Models/.gitkeep
 native/target/
+control-ui/node_modules/
+control-ui/dist/
+control-ui/src-tauri/target/
+control-ui/src-tauri/gen/
+control-ui/src-tauri/binaries/*.exe
+control-ui/tsconfig*.tsbuildinfo

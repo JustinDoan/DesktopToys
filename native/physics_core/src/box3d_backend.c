@@ -306,6 +306,117 @@ void sop_box3d_sync_body(SopBox3dWorld* world, const SopBox3dBodyDef* def)
         body->isDragging = false;
         body->wasAwake = true;
     }
+<<<<<<< Updated upstream
+=======
+
+    if (def->motorEnabled)
+    {
+        b3Vec3 velocity = b3Body_GetLinearVelocity(body->bodyId);
+        velocity.x = to_world_velocity_x(world, def->motorVelocityX);
+        b3Body_SetLinearVelocity(body->bodyId, velocity);
+        b3Body_SetAwake(body->bodyId, true);
+    }
+}
+
+bool sop_box3d_add_velocity(SopBox3dWorld* world, uint64_t id, float deltaX, float deltaY, float deltaZ)
+{
+    if (world == NULL)
+    {
+        return false;
+    }
+
+    SopBox3dBody* body = find_body(world, id);
+    if (body == NULL || !b3Body_IsValid(body->bodyId))
+    {
+        return false;
+    }
+
+    b3Vec3 velocity = b3Body_GetLinearVelocity(body->bodyId);
+    b3Vec3 delta = to_world_velocity(world, deltaX, deltaY, deltaZ);
+    velocity.x += delta.x;
+    velocity.y += delta.y;
+    velocity.z += delta.z;
+    b3Body_SetLinearVelocity(body->bodyId, velocity);
+    b3Body_SetAwake(body->bodyId, true);
+    body->wasAwake = true;
+    return true;
+}
+
+static b3Vec3 static_center_to_world(const SopBox3dWorld* world, float centerX, float centerY, float centerZ)
+{
+    return (b3Vec3){
+        centerX / world->pixelsPerMeter,
+        (world->boundsHeight - centerY) / world->pixelsPerMeter,
+        centerZ / world->pixelsPerMeter
+    };
+}
+
+void sop_box3d_add_static_box(SopBox3dWorld* world, float centerX, float centerY, float centerZ,
+                              float halfWidth, float halfHeight, float halfDepth,
+                              float friction, float restitution)
+{
+    if (world == NULL)
+    {
+        return;
+    }
+
+    b3BodyDef bodyDef = b3DefaultBodyDef();
+    bodyDef.position = static_center_to_world(world, centerX, centerY, centerZ);
+    b3BodyId bodyId = b3CreateBody(world->worldId, &bodyDef);
+
+    b3ShapeDef shapeDef = b3DefaultShapeDef();
+    shapeDef.baseMaterial.friction = fmaxf(friction, 0.0f);
+    shapeDef.baseMaterial.restitution = fmaxf(restitution, 0.0f);
+    float ppm = world->pixelsPerMeter;
+    b3BoxHull box = b3MakeBoxHull(
+        fmaxf(halfWidth / ppm, 0.02f),
+        fmaxf(halfHeight / ppm, 0.02f),
+        fmaxf(halfDepth / ppm, 0.02f));
+    b3CreateHullShape(bodyId, &shapeDef, &box.base);
+}
+
+void sop_box3d_add_static_sphere(SopBox3dWorld* world, float centerX, float centerY, float centerZ,
+                                 float radius, float friction, float restitution)
+{
+    if (world == NULL)
+    {
+        return;
+    }
+
+    b3BodyDef bodyDef = b3DefaultBodyDef();
+    bodyDef.position = static_center_to_world(world, centerX, centerY, centerZ);
+    b3BodyId bodyId = b3CreateBody(world->worldId, &bodyDef);
+
+    b3ShapeDef shapeDef = b3DefaultShapeDef();
+    shapeDef.baseMaterial.friction = fmaxf(friction, 0.0f);
+    shapeDef.baseMaterial.restitution = fmaxf(restitution, 0.0f);
+    b3Sphere sphere = { { 0.0f, 0.0f, 0.0f }, fmaxf(radius / world->pixelsPerMeter, 0.02f) };
+    b3CreateSphereShape(bodyId, &shapeDef, &sphere);
+}
+
+void sop_box3d_remove_body(SopBox3dWorld* world, uint64_t id)
+{
+    if (world == NULL)
+    {
+        return;
+    }
+
+    for (int i = 0; i < world->bodyCount; ++i)
+    {
+        if (world->bodies[i].id != id)
+        {
+            continue;
+        }
+
+        if (b3Body_IsValid(world->bodies[i].bodyId))
+        {
+            b3DestroyBody(world->bodies[i].bodyId);
+        }
+        world->bodies[i] = world->bodies[world->bodyCount - 1];
+        world->bodyCount -= 1;
+        return;
+    }
+>>>>>>> Stashed changes
 }
 
 void sop_box3d_step(SopBox3dWorld* world, float timeStep, int subStepCount)

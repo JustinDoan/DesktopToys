@@ -375,6 +375,7 @@ unsafe extern "C" {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TrayAction {
+    ShowControlUi,
     ToggleDebug,
     SpawnObject,
     SpawnCrystal,
@@ -382,12 +383,23 @@ pub enum TrayAction {
     SpawnStressCubes,
     Reset,
     ToggleSettings,
+<<<<<<< Updated upstream
+=======
+    ToggleWeather,
+    ToggleSand,
+    ToggleMeasureTool,
+    ToggleSpotlight,
+    ToggleLassoTool,
+    ToggleShatterGun,
+    ShatterScreen,
+>>>>>>> Stashed changes
     ImportModel,
     Exit,
 }
 
 pub struct TrayController {
     _tray_icon: TrayIcon,
+    show_control_ui: MenuItem,
     toggle_debug: MenuItem,
     spawn_object: MenuItem,
     spawn_crystal: MenuItem,
@@ -395,6 +407,15 @@ pub struct TrayController {
     spawn_stress_cubes: MenuItem,
     reset: MenuItem,
     toggle_settings: MenuItem,
+<<<<<<< Updated upstream
+=======
+    toggle_weather: MenuItem,
+    toggle_sand: MenuItem,
+    toggle_measure_tool: MenuItem,
+    toggle_spotlight: MenuItem,
+    toggle_lasso_tool: MenuItem,
+    toggle_shatter_gun: MenuItem,
+>>>>>>> Stashed changes
     import_model: MenuItem,
     exit: MenuItem,
 }
@@ -402,6 +423,7 @@ pub struct TrayController {
 impl TrayController {
     pub fn new() -> Result<Self> {
         let menu = Menu::new();
+        let show_control_ui = MenuItem::new("Show Control UI", true, None);
         let toggle_debug = MenuItem::new("Toggle Debug (F1)", true, None);
         let spawn_object = MenuItem::new("Spawn Object (F2)", true, None);
         let spawn_crystal = MenuItem::new("Spawn Crystal (F7)", true, None);
@@ -409,10 +431,22 @@ impl TrayController {
         let spawn_stress_cubes = MenuItem::new("Spawn Stress Cubes (F9)", true, None);
         let reset = MenuItem::new("Reset (F3)", true, None);
         let toggle_settings = MenuItem::new("Settings (F4)", true, None);
+<<<<<<< Updated upstream
         let import_model = MenuItem::new("Import Model (F6)", true, None);
+=======
+        let toggle_weather = MenuItem::new("Toggle Rain (F5)", true, None);
+        let toggle_sand = MenuItem::new("Toggle Sand (F6)", true, None);
+        let toggle_measure_tool = MenuItem::new("Measure Tool", true, None);
+        let toggle_spotlight = MenuItem::new("Spotlight", true, None);
+        let toggle_lasso_tool = MenuItem::new("Rope Lasso", true, None);
+        let toggle_shatter_gun = MenuItem::new("Equip 🔫 Shatter Gun (B)", true, None);
+        let import_model = MenuItem::new("Import Model", true, None);
+>>>>>>> Stashed changes
         let exit = MenuItem::new("Exit", true, None);
 
         menu.append_items(&[
+            &show_control_ui,
+            &PredefinedMenuItem::separator(),
             &toggle_debug,
             &spawn_object,
             &spawn_crystal,
@@ -420,6 +454,15 @@ impl TrayController {
             &spawn_stress_cubes,
             &reset,
             &toggle_settings,
+<<<<<<< Updated upstream
+=======
+            &toggle_weather,
+            &toggle_sand,
+            &toggle_measure_tool,
+            &toggle_spotlight,
+            &toggle_lasso_tool,
+            &toggle_shatter_gun,
+>>>>>>> Stashed changes
             &import_model,
             &PredefinedMenuItem::separator(),
             &exit,
@@ -433,6 +476,7 @@ impl TrayController {
 
         Ok(Self {
             _tray_icon: tray_icon,
+            show_control_ui,
             toggle_debug,
             spawn_object,
             spawn_crystal,
@@ -440,6 +484,15 @@ impl TrayController {
             spawn_stress_cubes,
             reset,
             toggle_settings,
+<<<<<<< Updated upstream
+=======
+            toggle_weather,
+            toggle_sand,
+            toggle_measure_tool,
+            toggle_spotlight,
+            toggle_lasso_tool,
+            toggle_shatter_gun,
+>>>>>>> Stashed changes
             import_model,
             exit,
         })
@@ -450,7 +503,9 @@ impl TrayController {
             return None;
         };
 
-        if event.id == self.toggle_debug.id() {
+        if event.id == self.show_control_ui.id() {
+            Some(TrayAction::ShowControlUi)
+        } else if event.id == self.toggle_debug.id() {
             Some(TrayAction::ToggleDebug)
         } else if event.id == self.spawn_object.id() {
             Some(TrayAction::SpawnObject)
@@ -464,6 +519,21 @@ impl TrayController {
             Some(TrayAction::Reset)
         } else if event.id == self.toggle_settings.id() {
             Some(TrayAction::ToggleSettings)
+<<<<<<< Updated upstream
+=======
+        } else if event.id == self.toggle_weather.id() {
+            Some(TrayAction::ToggleWeather)
+        } else if event.id == self.toggle_sand.id() {
+            Some(TrayAction::ToggleSand)
+        } else if event.id == self.toggle_measure_tool.id() {
+            Some(TrayAction::ToggleMeasureTool)
+        } else if event.id == self.toggle_spotlight.id() {
+            Some(TrayAction::ToggleSpotlight)
+        } else if event.id == self.toggle_lasso_tool.id() {
+            Some(TrayAction::ToggleLassoTool)
+        } else if event.id == self.toggle_shatter_gun.id() {
+            Some(TrayAction::ToggleShatterGun)
+>>>>>>> Stashed changes
         } else if event.id == self.import_model.id() {
             Some(TrayAction::ImportModel)
         } else if event.id == self.exit.id() {
