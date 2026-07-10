@@ -31,11 +31,18 @@ struct SopBox3dBodyDef {
     velocity_y: f32,
     mass: f32,
     restitution: f32,
+    friction: f32,
     linear_damping: f32,
     gravity_scale: f32,
+    motor_enabled: bool,
+    motor_velocity_x: f32,
+    lock_rotation: bool,
     collision_scale: f32,
     shape: i32,
     is_dragging: bool,
+    z: f32,
+    velocity_z: f32,
+    depth_unlocked: bool,
 }
 
 #[repr(C)]
@@ -51,6 +58,8 @@ struct SopBox3dSnapshot {
     rotation_z: f32,
     rotation_w: f32,
     is_awake: bool,
+    z: f32,
+    velocity_z: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -59,11 +68,16 @@ struct BodySyncState {
     height: f32,
     mass: f32,
     restitution: f32,
+    friction: f32,
     linear_damping: f32,
     gravity_scale: f32,
+    motor_enabled: bool,
+    motor_velocity_x: f32,
+    lock_rotation: bool,
     collision_scale: f32,
     shape: i32,
     is_dragging: bool,
+    depth_unlocked: bool,
 }
 
 impl BodySyncState {
@@ -72,10 +86,15 @@ impl BodySyncState {
             || self.height != next.height
             || self.mass != next.mass
             || self.restitution != next.restitution
+            || self.friction != next.friction
             || self.linear_damping != next.linear_damping
             || self.gravity_scale != next.gravity_scale
+            || self.motor_enabled != next.motor_enabled
+            || self.motor_velocity_x != next.motor_velocity_x
+            || self.lock_rotation != next.lock_rotation
             || self.collision_scale != next.collision_scale
             || self.shape != next.shape
+            || self.depth_unlocked != next.depth_unlocked
     }
 }
 
@@ -90,8 +109,6 @@ unsafe extern "C" {
     fn sop_box3d_reset(world: *mut c_void, gravity_y: f32, bounds_width: f32, bounds_height: f32);
     fn sop_box3d_set_gravity(world: *mut c_void, gravity_y: f32);
     fn sop_box3d_sync_body(world: *mut c_void, def: *const SopBox3dBodyDef);
-<<<<<<< Updated upstream
-=======
     fn sop_box3d_add_velocity(world: *mut c_void, id: u64, delta_x: f32, delta_y: f32, delta_z: f32) -> bool;
     fn sop_box3d_remove_body(world: *mut c_void, id: u64);
     fn sop_box3d_add_static_box(
@@ -114,7 +131,6 @@ unsafe extern "C" {
         friction: f32,
         restitution: f32,
     );
->>>>>>> Stashed changes
     fn sop_box3d_step(world: *mut c_void, time_step: f32, sub_step_count: i32);
     fn sop_box3d_snapshot_count(world: *const c_void) -> i32;
     fn sop_box3d_get_snapshots(
@@ -175,6 +191,10 @@ impl Box3dBackend {
 
     fn sync_body_if_needed(&mut self, object: &ObjectState) {
         let body = &object.body;
+        if !body.collidable {
+            self.synced_bodies.remove(&object.id);
+            return;
+        }
         let shape = match body.shape {
             CollisionShape::Box => 0,
             CollisionShape::Circle => 1,
@@ -186,15 +206,22 @@ impl Box3dBackend {
             height: body.height.max(1.0),
             mass: body.mass,
             restitution: body.restitution,
+            friction: body.friction,
             linear_damping: body.linear_damping,
             gravity_scale: body.gravity_scale,
+            motor_enabled: body.motor_enabled,
+            motor_velocity_x: body.motor_velocity_x,
+            lock_rotation: body.lock_rotation,
             collision_scale: body.collision_scale,
             shape,
             is_dragging,
+            depth_unlocked: object.depth_unlocked,
         };
         let should_sync = match self.synced_bodies.get(&object.id) {
             None => true,
-            Some(previous) => is_dragging || previous.is_dragging || previous.static_fields_changed(next_state),
+            Some(previous) => {
+                is_dragging || previous.is_dragging || next_state.motor_enabled || previous.static_fields_changed(next_state)
+            },
         };
         if !should_sync {
             return;
@@ -210,22 +237,49 @@ impl Box3dBackend {
             velocity_y: body.velocity.y,
             mass: body.mass,
             restitution: body.restitution,
+            friction: body.friction,
             linear_damping: body.linear_damping,
             gravity_scale: body.gravity_scale,
+            motor_enabled: body.motor_enabled,
+            motor_velocity_x: body.motor_velocity_x,
+            lock_rotation: body.lock_rotation,
             collision_scale: body.collision_scale,
             shape,
             is_dragging,
+            z: object.depth_z,
+            velocity_z: object.depth_velocity,
+            depth_unlocked: object.depth_unlocked,
         };
         unsafe { sop_box3d_sync_body(self.raw.as_ptr(), &def) };
         self.synced_bodies.insert(object.id, next_state);
+    }
+
+    fn add_static_box(&mut self, center: (f32, f32, f32), half_extents: (f32, f32, f32), friction: f32, restitution: f32) {
+        unsafe {
+            sop_box3d_add_static_box(
+                self.raw.as_ptr(),
+                center.0,
+                center.1,
+                center.2,
+                half_extents.0,
+                half_extents.1,
+                half_extents.2,
+                friction,
+                restitution,
+            )
+        };
+    }
+
+    fn add_static_sphere(&mut self, center: (f32, f32, f32), radius: f32, friction: f32, restitution: f32) {
+        unsafe {
+            sop_box3d_add_static_sphere(self.raw.as_ptr(), center.0, center.1, center.2, radius, friction, restitution)
+        };
     }
 
     fn step(&mut self, dt: f32) {
         unsafe { sop_box3d_step(self.raw.as_ptr(), dt, BOX3D_SUB_STEPS) };
     }
 
-<<<<<<< Updated upstream
-=======
     fn add_velocity(&mut self, id: u64, delta: Vector2, delta_z: f32) -> bool {
         unsafe { sop_box3d_add_velocity(self.raw.as_ptr(), id, delta.x, delta.y, delta_z) }
     }
@@ -235,7 +289,6 @@ impl Box3dBackend {
         self.synced_bodies.remove(&id);
     }
 
->>>>>>> Stashed changes
     fn snapshots(&mut self) -> &[SopBox3dSnapshot] {
         let count = unsafe { sop_box3d_snapshot_count(self.raw.as_ptr()) }.max(0);
         if count == 0 {
@@ -254,6 +307,8 @@ impl Box3dBackend {
                 rotation_z: 0.0,
                 rotation_w: 1.0,
                 is_awake: false,
+                z: 0.0,
+                velocity_z: 0.0,
         };
         self.snapshot_buffer.resize(count as usize, empty_snapshot);
         let filled =
@@ -334,6 +389,9 @@ impl BroadphaseGrid {
     fn fill_cells(&mut self, objects: &[ObjectState]) {
         for (object_index, object) in objects.iter().enumerate() {
             let body = &object.body;
+            if !body.collidable {
+                continue;
+            }
             let min_cell_x = self.to_cell_index(body.position.x);
             let max_cell_x = self.to_cell_index(body.position.x + body.width);
             let min_cell_y = self.to_cell_index(body.position.y);
@@ -392,6 +450,20 @@ impl BroadphaseGrid {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum StaticColliderShape {
+    Box { half_extents: (f32, f32, f32) },
+    Sphere { radius: f32 },
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StaticCollider {
+    center: (f32, f32, f32),
+    shape: StaticColliderShape,
+    friction: f32,
+    restitution: f32,
+}
+
 #[derive(Debug)]
 pub struct PhysicsWorld {
     objects: Vec<ObjectState>,
@@ -399,12 +471,9 @@ pub struct PhysicsWorld {
     box3d: Option<Box3dBackend>,
     box3d_bounds: Option<(u32, u32)>,
     object_indices: HashMap<u64, usize>,
-<<<<<<< Updated upstream
-=======
     static_colliders: Vec<StaticCollider>,
     static_colliders_synced: bool,
     pending_velocity_deltas: Vec<(u64, Vector2, f32)>,
->>>>>>> Stashed changes
 }
 
 impl PhysicsWorld {
@@ -415,8 +484,6 @@ impl PhysicsWorld {
             box3d: None,
             box3d_bounds: None,
             object_indices: HashMap::new(),
-<<<<<<< Updated upstream
-=======
             static_colliders: Vec::new(),
             static_colliders_synced: true,
             pending_velocity_deltas: Vec::new(),
@@ -462,8 +529,8 @@ impl PhysicsWorld {
         if let (Some(box3d), Some((width, height))) = (&mut self.box3d, self.box3d_bounds) {
             let bounds = RectF::new(0.0, 0.0, width as f32, height as f32);
             box3d.reset(self.gravity.y, bounds);
->>>>>>> Stashed changes
         }
+        self.static_colliders_synced = true;
     }
 
     pub fn objects(&self) -> &[ObjectState] {
@@ -482,8 +549,6 @@ impl PhysicsWorld {
         self.objects.push(state);
     }
 
-<<<<<<< Updated upstream
-=======
     pub fn add_velocity(&mut self, id: u64, delta: Vector2) {
         if delta.length_squared() <= f32::EPSILON {
             return;
@@ -523,13 +588,13 @@ impl PhysicsWorld {
         Some(removed)
     }
 
->>>>>>> Stashed changes
     pub fn clear(&mut self) {
         self.objects.clear();
         self.pending_velocity_deltas.clear();
         if let (Some(box3d), Some((width, height))) = (&mut self.box3d, self.box3d_bounds) {
             let bounds = RectF::new(0.0, 0.0, width as f32, height as f32);
             box3d.reset(self.gravity.y, bounds);
+            self.static_colliders_synced = self.static_colliders.is_empty();
         }
     }
 
@@ -542,7 +607,23 @@ impl PhysicsWorld {
         };
 
         box3d.set_gravity(self.gravity.y);
+        if !self.static_colliders_synced {
+            for collider in &self.static_colliders {
+                match collider.shape {
+                    StaticColliderShape::Box { half_extents } => {
+                        box3d.add_static_box(collider.center, half_extents, collider.friction, collider.restitution);
+                    },
+                    StaticColliderShape::Sphere { radius } => {
+                        box3d.add_static_sphere(collider.center, radius, collider.friction, collider.restitution);
+                    },
+                }
+            }
+            self.static_colliders_synced = true;
+        }
         for object in &self.objects {
+            if !object.body.collidable {
+                continue;
+            }
             box3d.sync_body_if_needed(object);
         }
 
@@ -569,6 +650,10 @@ impl PhysicsWorld {
 
             object.body.position = Vector2::new(snapshot.x, snapshot.y);
             object.body.velocity = Vector2::new(snapshot.velocity_x, snapshot.velocity_y);
+            if object.depth_unlocked {
+                object.depth_z = snapshot.z;
+                object.depth_velocity = snapshot.velocity_z;
+            }
             object.body.is_sleeping = !snapshot.is_awake;
             object.body.sleep_timer_seconds = if snapshot.is_awake {
                 0.0
@@ -606,6 +691,7 @@ impl PhysicsWorld {
 
         if let Some(box3d) = &mut self.box3d {
             box3d.reset(self.gravity.y, bounds);
+            self.static_colliders_synced = self.static_colliders.is_empty();
         }
         self.box3d_bounds = Some(key);
     }

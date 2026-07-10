@@ -20,11 +20,18 @@ typedef struct SopBox3dBodyDef
     float velocityY;
     float mass;
     float restitution;
+    float friction;
     float linearDamping;
     float gravityScale;
+    bool motorEnabled;
+    float motorVelocityX;
+    bool lockRotation;
     float collisionScale;
     int shape;
     bool isDragging;
+    float z;
+    float velocityZ;
+    bool depthUnlocked;
 } SopBox3dBodyDef;
 
 typedef struct SopBox3dSnapshot
@@ -39,6 +46,8 @@ typedef struct SopBox3dSnapshot
     float rotationZ;
     float rotationW;
     bool isAwake;
+    float z;
+    float velocityZ;
 } SopBox3dSnapshot;
 
 SopBox3dWorld* sop_box3d_create(float gravityY, float boundsWidth, float boundsHeight, float pixelsPerMeter);
@@ -46,12 +55,14 @@ void sop_box3d_destroy(SopBox3dWorld* world);
 void sop_box3d_reset(SopBox3dWorld* world, float gravityY, float boundsWidth, float boundsHeight);
 void sop_box3d_set_gravity(SopBox3dWorld* world, float gravityY);
 void sop_box3d_add_body(SopBox3dWorld* world, const SopBox3dBodyDef* def);
+void sop_box3d_add_static_box(SopBox3dWorld* world, float centerX, float centerY, float centerZ,
+                              float halfWidth, float halfHeight, float halfDepth,
+                              float friction, float restitution);
+void sop_box3d_add_static_sphere(SopBox3dWorld* world, float centerX, float centerY, float centerZ,
+                                 float radius, float friction, float restitution);
 void sop_box3d_sync_body(SopBox3dWorld* world, const SopBox3dBodyDef* def);
-<<<<<<< Updated upstream
-=======
 bool sop_box3d_add_velocity(SopBox3dWorld* world, uint64_t id, float deltaX, float deltaY, float deltaZ);
 void sop_box3d_remove_body(SopBox3dWorld* world, uint64_t id);
->>>>>>> Stashed changes
 void sop_box3d_step(SopBox3dWorld* world, float timeStep, int subStepCount);
 int sop_box3d_snapshot_count(const SopBox3dWorld* world);
 bool sop_box3d_get_snapshot(const SopBox3dWorld* world, int index, SopBox3dSnapshot* snapshot);

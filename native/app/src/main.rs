@@ -1,8 +1,5 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
-<<<<<<< Updated upstream
-use std::{borrow::Cow, error::Error, sync::Arc, time::{Duration, Instant}};
-=======
 use std::{
     borrow::Cow,
     collections::HashMap,
@@ -17,33 +14,27 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
->>>>>>> Stashed changes
 
 #[cfg(target_os = "windows")]
 use std::{ffi::CString, os::windows::process::CommandExt};
 
 use anyhow::{Context, Result};
-use core_types::{AppColor, AppConfig, RectF, Vector2};
+use core_types::{AppColor, AppConfig, CollisionShape, ObjectState, ObjectVisualKind, RectF, Vector2};
 use native_shell::{
     configure_overlay_window, overlay_window_attributes, pick_model_file, set_overlay_input_mode, show_error_dialog,
     sync_window_to_monitor,
-    GlobalInputPoller, OverlayInputMode, TrayAction, TrayController,
+    GlobalImportKeys, GlobalInputPoller, OverlayInputMode, TrayAction, TrayController,
 };
-<<<<<<< Updated upstream
-use renderer::{GpuVertex, HudState, OverlayPanel, PanelLine, RenderScene, SceneRenderer};
-use scene_logic::{DragController, FrameClock, HitTester, SceneController};
-=======
 use renderer::{hoop_geometry, GpuVertex, HudState, OverlayPanel, PanelLine, RenderScene, SandRenderCell, SceneRenderer};
 use scene_logic::{DragController, FrameClock, HitTester, MouseTracker, SceneController};
 use serde::Deserialize;
->>>>>>> Stashed changes
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalPosition,
     event::{ElementState, MouseButton, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop},
-    keyboard::{KeyCode, PhysicalKey},
-    window::{Window, WindowId},
+    keyboard::{KeyCode, ModifiersState, PhysicalKey},
+    window::{CursorIcon, Window, WindowId},
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::{
@@ -56,17 +47,6 @@ use windows::Win32::{
         Direct3D11::{
             D3D11CreateDevice, ID3D11BlendState, ID3D11Buffer, ID3D11DepthStencilState, ID3D11DepthStencilView,
             ID3D11Device, ID3D11DeviceContext, ID3D11InputLayout, ID3D11PixelShader, ID3D11RasterizerState,
-<<<<<<< Updated upstream
-            ID3D11RenderTargetView, ID3D11Texture2D, ID3D11VertexShader, D3D11_BIND_CONSTANT_BUFFER,
-            D3D11_BIND_DEPTH_STENCIL, D3D11_BIND_VERTEX_BUFFER, D3D11_BLEND_DESC, D3D11_BLEND_INV_SRC_ALPHA,
-            D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_BUFFER_DESC, D3D11_CLEAR_DEPTH,
-            D3D11_COLOR_WRITE_ENABLE_ALL, D3D11_COMPARISON_LESS_EQUAL, D3D11_CPU_ACCESS_WRITE,
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_SINGLETHREADED, D3D11_CULL_NONE,
-            D3D11_DEPTH_STENCIL_DESC, D3D11_DEPTH_WRITE_MASK_ALL, D3D11_FILL_SOLID, D3D11_INPUT_ELEMENT_DESC,
-            D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAP_WRITE_DISCARD, D3D11_MAPPED_SUBRESOURCE,
-            D3D11_RASTERIZER_DESC, D3D11_RENDER_TARGET_BLEND_DESC, D3D11_SDK_VERSION, D3D11_TEXTURE2D_DESC,
-            D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
-=======
             ID3D11RenderTargetView, ID3D11SamplerState, ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
             D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_DEPTH_STENCIL, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_VERTEX_BUFFER,
             D3D11_BLEND_DESC, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD,
@@ -80,7 +60,6 @@ use windows::Win32::{
             D3D11_SAMPLER_DESC, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
             D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC, D3D11_USAGE_IMMUTABLE,
             D3D11_VIEWPORT,
->>>>>>> Stashed changes
         },
         DirectComposition::{DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual},
         Dxgi::{
@@ -194,7 +173,15 @@ struct NativeApp {
     debug_right_down: bool,
     was_left_down: bool,
     was_right_down: bool,
+    was_spawn_object_down: bool,
+    was_spawn_crystal_down: bool,
+    was_reset_down: bool,
+    was_weather_toggle_down: bool,
+    was_sand_toggle_down: bool,
     was_stress_spawn_down: bool,
+    was_slingshot_toggle_down: bool,
+    was_robot_buddy_down: bool,
+    was_basketball_toggle_down: bool,
     force_interactive_for_debug: bool,
     is_rotation_dragging: bool,
     last_drag_attempt: String,
@@ -204,8 +191,6 @@ struct NativeApp {
     next_input_retry_seconds: f64,
     settings_panel: SettingsPanel,
     import_panel: Option<ImportPanel>,
-<<<<<<< Updated upstream
-=======
     slingshot_game: SlingshotGame,
     basketball_game: BasketballGame,
     basketball_tracker: MouseTracker,
@@ -226,18 +211,18 @@ struct NativeApp {
     drone_drop_cooldowns: HashMap<u64, DroneDropCooldown>,
     snail_death_until_seconds: f64,
     snail_respawn_grace_until_seconds: f64,
->>>>>>> Stashed changes
     fallback_left_down: bool,
     fallback_right_down: bool,
+    previous_global_import_keys: GlobalImportKeys,
+    keyboard_modifiers: ModifiersState,
+    current_cursor_icon: CursorIcon,
     target_frame_duration: Duration,
     next_frame_at: Instant,
     fps_counter: FpsCounter,
 }
 
-const FLOOR_MARGIN_PIXELS: f32 = 18.0;
+const FLOOR_MARGIN_PIXELS: f32 = 0.0;
 const STRESS_SPAWN_COUNT: usize = 25;
-<<<<<<< Updated upstream
-=======
 const ROBOT_STACK_DROP_COOLDOWN_SECONDS: f64 = 1.8;
 const ROBOT_THROW_HOLD_SECONDS: f64 = 0.55;
 const ROBOT_BIN_WIDTH: f32 = 118.0;
@@ -282,7 +267,6 @@ const BASKETBALL_COLLISION_SCALE: f32 = 0.92;
 const BASKETBALL_RIM_COLLIDER_RADIUS: f32 = 9.0;
 const BASKETBALL_RIM_COLLIDER_COUNT: usize = 14;
 const BASKETBALL_CONFETTI_LIFETIME_SECONDS: f64 = 2.4;
->>>>>>> Stashed changes
 
 impl Default for NativeApp {
     fn default() -> Self {
@@ -316,7 +300,15 @@ impl Default for NativeApp {
             debug_right_down: false,
             was_left_down: false,
             was_right_down: false,
+            was_spawn_object_down: false,
+            was_spawn_crystal_down: false,
+            was_reset_down: false,
+            was_weather_toggle_down: false,
+            was_sand_toggle_down: false,
             was_stress_spawn_down: false,
+            was_slingshot_toggle_down: false,
+            was_robot_buddy_down: false,
+            was_basketball_toggle_down: false,
             force_interactive_for_debug: false,
             is_rotation_dragging: false,
             last_drag_attempt: "none".to_string(),
@@ -326,8 +318,6 @@ impl Default for NativeApp {
             next_input_retry_seconds: 0.0,
             settings_panel: SettingsPanel::default(),
             import_panel: None,
-<<<<<<< Updated upstream
-=======
             slingshot_game: SlingshotGame::default(),
             basketball_game: BasketballGame::default(),
             basketball_tracker: MouseTracker::new(12),
@@ -348,9 +338,11 @@ impl Default for NativeApp {
             drone_drop_cooldowns: HashMap::new(),
             snail_death_until_seconds: 0.0,
             snail_respawn_grace_until_seconds: 0.0,
->>>>>>> Stashed changes
             fallback_left_down: false,
             fallback_right_down: false,
+            previous_global_import_keys: GlobalImportKeys::default(),
+            keyboard_modifiers: ModifiersState::default(),
+            current_cursor_icon: CursorIcon::Default,
             target_frame_duration: Duration::ZERO,
             next_frame_at: now,
             fps_counter: FpsCounter::default(),
@@ -499,7 +491,16 @@ impl NativeApp {
                         local_position: self.cursor_local,
                         left_down: self.fallback_left_down,
                         right_down: self.fallback_right_down,
+                        spawn_object_down: false,
+                        spawn_crystal_down: false,
+                        reset_down: false,
+                        weather_toggle_down: false,
+                        sand_toggle_down: false,
                         spawn_stress_down: false,
+                        slingshot_toggle_down: false,
+                        robot_buddy_down: false,
+                        basketball_toggle_down: false,
+                        import_keys: GlobalImportKeys::default(),
                     }
                 },
             }
@@ -509,7 +510,16 @@ impl NativeApp {
                 local_position: self.cursor_local,
                 left_down: self.fallback_left_down,
                 right_down: self.fallback_right_down,
+                spawn_object_down: false,
+                spawn_crystal_down: false,
+                reset_down: false,
+                weather_toggle_down: false,
+                sand_toggle_down: false,
                 spawn_stress_down: false,
+                slingshot_toggle_down: false,
+                robot_buddy_down: false,
+                basketball_toggle_down: false,
+                import_keys: GlobalImportKeys::default(),
             }
         };
         self.debug_left_down = pointer.left_down;
@@ -520,18 +530,15 @@ impl NativeApp {
 
         self.drain_control_commands();
         self.update_click_through_mode(now, &window);
+        self.update_cursor_icon(&window);
 
         if self.drag_controller.is_dragging() {
             self.drag_controller
                 .update_drag(self.scene.objects_mut(), self.cursor_local, now);
-            self.update_rotation_drag(pointer.right_down);
+            self.update_held_object_rotation(pointer.right_down);
         }
 
         self.handle_global_mouse_buttons(now, pointer.left_down, pointer.right_down);
-<<<<<<< Updated upstream
-        self.handle_global_stress_spawn(pointer.spawn_stress_down);
-        self.scene.step(dt, self.scene_bounds());
-=======
         self.handle_global_spawn_object(pointer.spawn_object_down);
         self.handle_global_spawn_crystal(pointer.spawn_crystal_down);
         self.handle_global_reset(pointer.reset_down);
@@ -562,7 +569,6 @@ impl NativeApp {
         self.stabilize_robot_buddies();
         self.stabilize_quad_drones();
         self.restore_fan_yaws();
->>>>>>> Stashed changes
         self.sync_panels();
         window.request_redraw();
     }
@@ -572,13 +578,10 @@ impl NativeApp {
             || self.input_poller.is_none()
             || self.drag_controller.is_dragging()
             || self.debug_hit_primary_cursor
-<<<<<<< Updated upstream
-=======
             || self.sand_world.active
             || self.lasso_tool.needs_interactive()
             || self.portal_pair_tool.needs_interactive()
             || self.basketball_game.aiming
->>>>>>> Stashed changes
             || self.settings_panel.visible
             || self.import_panel.is_some();
         let desired_mode = if should_be_interactive {
@@ -625,8 +628,6 @@ impl NativeApp {
             return;
         }
 
-<<<<<<< Updated upstream
-=======
         if self.portal_pair_tool.needs_interactive() {
             self.drag_controller.cancel_drag(self.scene.objects_mut());
             if let Some(message) = self.portal_pair_tool.update_input(
@@ -724,16 +725,20 @@ impl NativeApp {
             return;
         }
 
->>>>>>> Stashed changes
         if is_left_down && !self.was_left_down {
-            let began = self.drag_controller.begin_drag(
-                self.scene.objects_mut(),
-                self.cursor_local,
-                now_seconds,
-                &self.hit_tester,
-            );
+            let began = if self.cursor_is_over_robot_bin() {
+                None
+            } else {
+                self.drag_controller.begin_drag(
+                    self.scene.objects_mut(),
+                    self.cursor_local,
+                    now_seconds,
+                    &self.hit_tester,
+                )
+            };
             self.last_drag_attempt = if let Some(id) = began {
                 self.selected_id = Some(id);
+                self.last_rotation_cursor = self.cursor_local;
                 "begin:primary".to_string()
             } else {
                 "miss:primary".to_string()
@@ -751,8 +756,6 @@ impl NativeApp {
         self.was_right_down = is_right_down;
     }
 
-<<<<<<< Updated upstream
-=======
     fn update_cursor_icon(&mut self, window: &Window) {
         let desired = if self.drag_controller.is_dragging()
             || self.slingshot_game.aiming
@@ -797,7 +800,6 @@ impl NativeApp {
         false
     }
 
->>>>>>> Stashed changes
     fn handle_global_stress_spawn(&mut self, is_down: bool) {
         if is_down && !self.was_stress_spawn_down {
             self.spawn_stress_cubes();
@@ -805,8 +807,6 @@ impl NativeApp {
         self.was_stress_spawn_down = is_down;
     }
 
-<<<<<<< Updated upstream
-=======
     fn handle_global_spawn_object(&mut self, is_down: bool) {
         if is_down && !self.was_spawn_object_down {
             let id = self.scene.spawn_next_object(self.default_spawn_position());
@@ -1080,7 +1080,6 @@ impl NativeApp {
         self.previous_global_import_keys = keys;
     }
 
->>>>>>> Stashed changes
     fn spawn_stress_cubes(&mut self) {
         let id = self
             .scene
@@ -1089,8 +1088,6 @@ impl NativeApp {
         self.push_status_message(format!("Spawned {STRESS_SPAWN_COUNT} stress cubes."));
     }
 
-<<<<<<< Updated upstream
-=======
     fn spawn_control_visual_kind(&mut self, payload: Option<&serde_json::Value>) {
         let kind = payload
             .and_then(|payload| payload.get("kind"))
@@ -2894,8 +2891,8 @@ impl NativeApp {
         self.basketball_game.ready = true;
     }
 
->>>>>>> Stashed changes
     fn end_drag_and_apply_spin(&mut self, now_seconds: f64) {
+        let rotated_while_held = self.is_rotation_dragging;
         let throw_sensitivity = self.scene.config().throw_sensitivity;
         let max_throw_speed = self.scene.config().max_throw_speed;
         let throw_velocity = self.drag_controller.end_drag(
@@ -2917,13 +2914,19 @@ impl NativeApp {
             return;
         };
 
-        object.angular_velocity_y += throw_velocity.x as f64 * 0.22;
-        object.angular_velocity_x += throw_velocity.y as f64 * 0.16;
-        object.angular_velocity_z += throw_velocity.x as f64 * 0.08;
+        if rotated_while_held {
+            object.angular_velocity_y += throw_velocity.x as f64 * 0.18;
+            object.angular_velocity_x += throw_velocity.y as f64 * 0.12;
+            object.angular_velocity_z += throw_velocity.x as f64 * 0.06;
+        } else {
+            object.angular_velocity_x = 0.0;
+            object.angular_velocity_y = 0.0;
+            object.angular_velocity_z = 0.0;
+        }
         self.is_rotation_dragging = false;
     }
 
-    fn update_rotation_drag(&mut self, is_right_down: bool) {
+    fn update_held_object_rotation(&mut self, is_right_down: bool) {
         let Some(selected_id) = self.selected_id else {
             self.is_rotation_dragging = false;
             return;
@@ -2935,6 +2938,9 @@ impl NativeApp {
         };
 
         if self.drag_controller.dragged_id() != Some(selected_id) || !is_right_down {
+            object.angular_velocity_x = 0.0;
+            object.angular_velocity_y = 0.0;
+            object.angular_velocity_z = 0.0;
             self.is_rotation_dragging = false;
             return;
         }
@@ -2947,40 +2953,63 @@ impl NativeApp {
 
         let delta = self.cursor_local - self.last_rotation_cursor;
         self.last_rotation_cursor = self.cursor_local;
-        let rotation_sensitivity = 0.72f64;
-        object.rotation_y += delta.x as f64 * rotation_sensitivity;
-        object.rotation_x += delta.y as f64 * rotation_sensitivity;
-        object.angular_velocity_y = delta.x as f64 * rotation_sensitivity * 40.0;
-        object.angular_velocity_x = delta.y as f64 * rotation_sensitivity * 40.0;
-        object.angular_velocity_z = delta.x as f64 * rotation_sensitivity * 8.0;
+        if delta.length_squared() <= 0.01 {
+            return;
+        }
+
+        let size = object.body.width.max(object.body.height).max(1.0) as f64;
+        let center = Vector2::new(
+            object.body.position.x + object.body.width * 0.5,
+            object.body.position.y + object.body.height * 0.5,
+        );
+        let grab = self.cursor_local - center;
+        let torque = ((grab.x * delta.y) - (grab.y * delta.x)) as f64 / size;
+        let tumble = 1.18;
+        let roll = 0.32;
+
+        object.rotation_y += (delta.x as f64 / size) * tumble;
+        object.rotation_x += (delta.y as f64 / size) * tumble;
+        object.rotation_z += torque * roll;
+        object.angular_velocity_y = (delta.x as f64 / size) * tumble * 48.0;
+        object.angular_velocity_x = (delta.y as f64 / size) * tumble * 48.0;
+        object.angular_velocity_z = torque * roll * 56.0;
         self.last_drag_attempt = format!("rotate:{:.1},{:.1}", delta.x, delta.y);
     }
 
     fn sync_panels(&mut self) {
         let mut panels = Vec::new();
-        panels.push(OverlayPanel {
-            title: "Perf".to_string(),
-            lines: vec![
-                PanelLine {
-                    text: format!("FPS: {:.0}", self.fps_counter.fps()),
-                    selected: false,
-                },
-                PanelLine {
-                    text: format!("Objects: {}", self.scene.objects().len()),
-                    selected: false,
-                },
-                PanelLine {
-                    text: format!("F9: +{} cubes", STRESS_SPAWN_COUNT),
-                    selected: false,
-                },
-            ],
-            footer: Vec::new(),
-        });
 
         if self.debug_visible {
+            panels.push(OverlayPanel {
+                title: "Perf".to_string(),
+                lines: vec![
+                    PanelLine {
+                        text: format!("FPS: {:.0}", self.fps_counter.fps()),
+                        selected: false,
+                    },
+                    PanelLine {
+                        text: format!("Objects: {}", self.scene.objects().len()),
+                        selected: false,
+                    },
+                    PanelLine {
+                        text: format!("F9: +{} cubes", STRESS_SPAWN_COUNT),
+                        selected: false,
+                    },
+                    PanelLine {
+                        text: "F11: robot buddy".to_string(),
+                        selected: false,
+                    },
+                    PanelLine {
+                        text: "F12: basketball".to_string(),
+                        selected: false,
+                    },
+                ],
+                footer: Vec::new(),
+            });
+
             let lines = vec![
                 PanelLine {
-                    text: format!("ForceInteractive(F5): {}", if self.force_interactive_for_debug { "ON" } else { "off" }),
+                    text: format!("ForceInteractive: {}", if self.force_interactive_for_debug { "ON" } else { "off" }),
                     selected: false,
                 },
                 PanelLine {
@@ -3016,8 +3045,6 @@ impl NativeApp {
             });
         }
 
-<<<<<<< Updated upstream
-=======
         if self.slingshot_game.active {
             panels.push(OverlayPanel {
                 title: "Slingshot".to_string(),
@@ -3221,7 +3248,6 @@ impl NativeApp {
             });
         }
 
->>>>>>> Stashed changes
         if self.settings_panel.visible {
             panels.push(self.settings_panel.to_panel(self.scene.config()));
         }
@@ -3252,9 +3278,6 @@ impl NativeApp {
             bounds: scene_bounds,
             elapsed_seconds: self.frame_clock.elapsed_seconds,
             objects: self.scene.objects(),
-<<<<<<< Updated upstream
-            cursor: self.cursor_local,
-=======
             shatter_backdrop_active: self.shatter_backdrop_active,
             sand_cells: self.sand_world.render_cells(),
             weather_cells: self.weather_world.render_cells(),
@@ -3263,7 +3286,6 @@ impl NativeApp {
             lasso_cells: self.lasso_tool.render_cells(),
             portal_cells: self.portal_pair_tool.render_cells(),
             shatter_gun_cells: self.shatter_gun.render_cells(),
->>>>>>> Stashed changes
             hud: &self.hud,
         };
         let vertices = self.renderer.build_vertices(size.width, size.height, &scene)?;
@@ -3387,9 +3409,17 @@ impl NativeApp {
             AppAction::SpawnStressCubes => {
                 self.spawn_stress_cubes();
             },
+            AppAction::SpawnRobotBuddy => {
+                self.spawn_robot_buddy();
+            },
+            AppAction::ToggleSlingshotGame => {
+                self.toggle_slingshot_game();
+            },
+            AppAction::ToggleBasketballGame => {
+                self.toggle_basketball_game();
+            },
             AppAction::Reset => {
-                self.scene.reset(self.scene_bounds());
-                self.selected_id = self.scene.objects().last().map(|object| object.id);
+                self.reset_everything();
             },
             AppAction::ToggleSettings => {
                 self.settings_panel.visible = !self.settings_panel.visible;
@@ -3397,13 +3427,14 @@ impl NativeApp {
                     self.import_panel = None;
                 }
             },
-            AppAction::ToggleForceInteractive => {
-                self.force_interactive_for_debug = !self.force_interactive_for_debug;
-                self.last_drag_attempt = if self.force_interactive_for_debug {
-                    "force-input:on".to_string()
-                } else {
-                    "force-input:off".to_string()
-                };
+            AppAction::ToggleWeather => {
+                self.toggle_weather_world();
+            },
+            AppAction::ToggleSand => {
+                self.toggle_sand_world();
+            },
+            AppAction::ToggleMeasureTool => {
+                self.toggle_measure_tool();
             },
             AppAction::ToggleSpotlight => {
                 self.toggle_spotlight();
@@ -3427,8 +3458,6 @@ impl NativeApp {
         }
     }
 
-<<<<<<< Updated upstream
-=======
     fn reset_everything(&mut self) {
         self.drag_controller.cancel_drag(self.scene.objects_mut());
         self.scene.clear_static_colliders();
@@ -3459,33 +3488,18 @@ impl NativeApp {
         self.push_status_message("Reset everything.".to_string());
     }
 
->>>>>>> Stashed changes
     fn handle_keyboard(&mut self, key_code: KeyCode, state: ElementState, event_loop: &ActiveEventLoop) {
         if state != ElementState::Pressed {
             return;
         }
 
-        if let Some(import_panel) = &mut self.import_panel {
-            if import_panel.handle_key(key_code) {
-                return;
-            }
-            if key_code == KeyCode::Enter {
-                let default_spawn = self.default_spawn_position();
-                let panel = self.import_panel.take().unwrap();
-                let id = self.scene.spawn_imported_model(
-                    default_spawn,
-                    panel.path.clone(),
-                    panel.scale_multiplier,
-                    AppColor::from_rgb(panel.tint_r, panel.tint_g, panel.tint_b),
-                );
-                self.selected_id = Some(id);
-                self.status_message = Some(format!("Imported model: {}", panel.path));
-                return;
-            }
-            if key_code == KeyCode::Escape {
-                self.import_panel = None;
-                return;
-            }
+        if self.keyboard_modifiers.control_key() && matches!(key_code, KeyCode::KeyC | KeyCode::KeyQ) {
+            self.handle_action(AppAction::Exit, event_loop);
+            return;
+        }
+
+        if self.import_panel.is_some() && self.handle_import_key(key_code) {
+            return;
         }
 
         if self.settings_panel.visible {
@@ -3504,13 +3518,11 @@ impl NativeApp {
             KeyCode::F2 => self.handle_action(AppAction::SpawnObject, event_loop),
             KeyCode::F3 => self.handle_action(AppAction::Reset, event_loop),
             KeyCode::F4 => self.handle_action(AppAction::ToggleSettings, event_loop),
-            KeyCode::F5 => self.handle_action(AppAction::ToggleForceInteractive, event_loop),
-            KeyCode::F6 => self.handle_action(AppAction::RequestImport, event_loop),
+            KeyCode::F5 => self.handle_action(AppAction::ToggleWeather, event_loop),
+            KeyCode::F6 => self.handle_action(AppAction::ToggleSand, event_loop),
             KeyCode::F7 => self.handle_action(AppAction::SpawnCrystal, event_loop),
             KeyCode::F8 => self.handle_action(AppAction::SpawnDvdLogo, event_loop),
             KeyCode::F9 => self.handle_action(AppAction::SpawnStressCubes, event_loop),
-<<<<<<< Updated upstream
-=======
             KeyCode::F10 => self.handle_action(AppAction::ToggleSlingshotGame, event_loop),
             KeyCode::F11 => self.handle_action(AppAction::SpawnRobotBuddy, event_loop),
             KeyCode::F12 => self.handle_action(AppAction::ToggleBasketballGame, event_loop),
@@ -3518,9 +3530,37 @@ impl NativeApp {
             KeyCode::KeyL => self.handle_action(AppAction::ToggleSpotlight, event_loop),
             KeyCode::KeyR => self.handle_action(AppAction::ToggleLassoTool, event_loop),
             KeyCode::KeyB => self.handle_action(AppAction::ToggleShatterGun, event_loop),
->>>>>>> Stashed changes
             KeyCode::Escape => self.handle_action(AppAction::Exit, event_loop),
             _ => {},
+        }
+    }
+
+    fn handle_import_key(&mut self, key_code: KeyCode) -> bool {
+        if let Some(import_panel) = &mut self.import_panel {
+            if import_panel.handle_key(key_code) {
+                return true;
+            }
+        }
+
+        match key_code {
+            KeyCode::Enter => {
+                let default_spawn = self.default_spawn_position();
+                let panel = self.import_panel.take().expect("import panel should exist");
+                let id = self.scene.spawn_imported_model(
+                    default_spawn,
+                    panel.path.clone(),
+                    panel.scale_multiplier,
+                    AppColor::from_rgb(panel.tint_r, panel.tint_g, panel.tint_b),
+                );
+                self.selected_id = Some(id);
+                self.status_message = Some(format!("Imported model: {}", panel.path));
+                true
+            },
+            KeyCode::Escape => {
+                self.import_panel = None;
+                true
+            },
+            _ => false,
         }
     }
 
@@ -5868,6 +5908,9 @@ impl ApplicationHandler for NativeApp {
                     self.handle_keyboard(code, event.state, event_loop);
                 }
             },
+            WindowEvent::ModifiersChanged(modifiers) => {
+                self.keyboard_modifiers = modifiers.state();
+            },
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_local = Vector2::new(position.x as f32, position.y as f32);
             },
@@ -5913,8 +5956,6 @@ impl ApplicationHandler for NativeApp {
                     TrayAction::SpawnStressCubes => AppAction::SpawnStressCubes,
                     TrayAction::Reset => AppAction::Reset,
                     TrayAction::ToggleSettings => AppAction::ToggleSettings,
-<<<<<<< Updated upstream
-=======
                     TrayAction::ToggleWeather => AppAction::ToggleWeather,
                     TrayAction::ToggleSand => AppAction::ToggleSand,
                     TrayAction::ToggleMeasureTool => AppAction::ToggleMeasureTool,
@@ -5922,7 +5963,6 @@ impl ApplicationHandler for NativeApp {
                     TrayAction::ToggleLassoTool => AppAction::ToggleLassoTool,
                     TrayAction::ToggleShatterGun => AppAction::ToggleShatterGun,
                     TrayAction::ShatterScreen => AppAction::ShatterScreen,
->>>>>>> Stashed changes
                     TrayAction::ImportModel => AppAction::RequestImport,
                     TrayAction::Exit => AppAction::Exit,
                 };
@@ -5952,11 +5992,11 @@ enum AppAction {
     SpawnCrystal,
     SpawnDvdLogo,
     SpawnStressCubes,
+    SpawnRobotBuddy,
+    ToggleSlingshotGame,
+    ToggleBasketballGame,
     Reset,
     ToggleSettings,
-<<<<<<< Updated upstream
-    ToggleForceInteractive,
-=======
     ToggleWeather,
     ToggleSand,
     ToggleMeasureTool,
@@ -5964,13 +6004,10 @@ enum AppAction {
     ToggleLassoTool,
     ToggleShatterGun,
     ShatterScreen,
->>>>>>> Stashed changes
     RequestImport,
     Exit,
 }
 
-<<<<<<< Updated upstream
-=======
 #[derive(Debug)]
 struct ShatterGunTool {
     active: bool,
@@ -7935,7 +7972,6 @@ fn sand_color(grain: u8) -> AppColor {
     }
 }
 
->>>>>>> Stashed changes
 #[derive(Default)]
 struct SettingsPanel {
     visible: bool,

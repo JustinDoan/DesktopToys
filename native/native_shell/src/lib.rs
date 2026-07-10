@@ -58,12 +58,31 @@ pub enum OverlayInputMode {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+pub struct GlobalImportKeys {
+    pub up: bool,
+    pub down: bool,
+    pub left: bool,
+    pub right: bool,
+    pub enter: bool,
+    pub escape: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
 pub struct GlobalPointerState {
     pub screen_position: (i32, i32),
     pub local_position: Vector2,
     pub left_down: bool,
     pub right_down: bool,
+    pub spawn_object_down: bool,
+    pub spawn_crystal_down: bool,
+    pub reset_down: bool,
+    pub weather_toggle_down: bool,
+    pub sand_toggle_down: bool,
     pub spawn_stress_down: bool,
+    pub slingshot_toggle_down: bool,
+    pub robot_buddy_down: bool,
+    pub basketball_toggle_down: bool,
+    pub import_keys: GlobalImportKeys,
 }
 
 pub fn overlay_window_attributes(title: &str, bounds: RectF) -> WindowAttributes {
@@ -251,7 +270,16 @@ impl GlobalInputPoller {
                 local_position: Vector2::new(cursor.2, cursor.3),
                 left_down: Mouse::Left.is_pressed(),
                 right_down: Mouse::Right.is_pressed(),
+                spawn_object_down: false,
+                spawn_crystal_down: false,
+                reset_down: false,
+                weather_toggle_down: false,
+                sand_toggle_down: false,
                 spawn_stress_down: false,
+                slingshot_toggle_down: false,
+                robot_buddy_down: false,
+                basketball_toggle_down: false,
+                import_keys: GlobalImportKeys::default(),
             });
         }
 
@@ -268,8 +296,24 @@ impl GlobalInputPoller {
                 screen_position: mouse.coords,
                 local_position: Vector2::new(local_x, local_y),
                 left_down: *mouse.button_pressed.get(1).unwrap_or(&false),
-                right_down: *mouse.button_pressed.get(3).unwrap_or(&false),
+                right_down: *mouse.button_pressed.get(2).unwrap_or(&false),
+                spawn_object_down: keys.contains(&Keycode::F2),
+                spawn_crystal_down: keys.contains(&Keycode::F7),
+                reset_down: keys.contains(&Keycode::F3),
+                weather_toggle_down: keys.contains(&Keycode::F5),
+                sand_toggle_down: keys.contains(&Keycode::F6),
                 spawn_stress_down: keys.contains(&Keycode::F9),
+                slingshot_toggle_down: keys.contains(&Keycode::F10),
+                robot_buddy_down: keys.contains(&Keycode::F11),
+                basketball_toggle_down: keys.contains(&Keycode::F12),
+                import_keys: GlobalImportKeys {
+                    up: keys.contains(&Keycode::Up),
+                    down: keys.contains(&Keycode::Down),
+                    left: keys.contains(&Keycode::Left),
+                    right: keys.contains(&Keycode::Right),
+                    enter: keys.contains(&Keycode::Enter),
+                    escape: keys.contains(&Keycode::Escape),
+                },
             })
         }
     }
@@ -383,8 +427,6 @@ pub enum TrayAction {
     SpawnStressCubes,
     Reset,
     ToggleSettings,
-<<<<<<< Updated upstream
-=======
     ToggleWeather,
     ToggleSand,
     ToggleMeasureTool,
@@ -392,7 +434,6 @@ pub enum TrayAction {
     ToggleLassoTool,
     ToggleShatterGun,
     ShatterScreen,
->>>>>>> Stashed changes
     ImportModel,
     Exit,
 }
@@ -407,15 +448,12 @@ pub struct TrayController {
     spawn_stress_cubes: MenuItem,
     reset: MenuItem,
     toggle_settings: MenuItem,
-<<<<<<< Updated upstream
-=======
     toggle_weather: MenuItem,
     toggle_sand: MenuItem,
     toggle_measure_tool: MenuItem,
     toggle_spotlight: MenuItem,
     toggle_lasso_tool: MenuItem,
     toggle_shatter_gun: MenuItem,
->>>>>>> Stashed changes
     import_model: MenuItem,
     exit: MenuItem,
 }
@@ -431,9 +469,6 @@ impl TrayController {
         let spawn_stress_cubes = MenuItem::new("Spawn Stress Cubes (F9)", true, None);
         let reset = MenuItem::new("Reset (F3)", true, None);
         let toggle_settings = MenuItem::new("Settings (F4)", true, None);
-<<<<<<< Updated upstream
-        let import_model = MenuItem::new("Import Model (F6)", true, None);
-=======
         let toggle_weather = MenuItem::new("Toggle Rain (F5)", true, None);
         let toggle_sand = MenuItem::new("Toggle Sand (F6)", true, None);
         let toggle_measure_tool = MenuItem::new("Measure Tool", true, None);
@@ -441,7 +476,6 @@ impl TrayController {
         let toggle_lasso_tool = MenuItem::new("Rope Lasso", true, None);
         let toggle_shatter_gun = MenuItem::new("Equip 🔫 Shatter Gun (B)", true, None);
         let import_model = MenuItem::new("Import Model", true, None);
->>>>>>> Stashed changes
         let exit = MenuItem::new("Exit", true, None);
 
         menu.append_items(&[
@@ -454,15 +488,12 @@ impl TrayController {
             &spawn_stress_cubes,
             &reset,
             &toggle_settings,
-<<<<<<< Updated upstream
-=======
             &toggle_weather,
             &toggle_sand,
             &toggle_measure_tool,
             &toggle_spotlight,
             &toggle_lasso_tool,
             &toggle_shatter_gun,
->>>>>>> Stashed changes
             &import_model,
             &PredefinedMenuItem::separator(),
             &exit,
@@ -484,15 +515,12 @@ impl TrayController {
             spawn_stress_cubes,
             reset,
             toggle_settings,
-<<<<<<< Updated upstream
-=======
             toggle_weather,
             toggle_sand,
             toggle_measure_tool,
             toggle_spotlight,
             toggle_lasso_tool,
             toggle_shatter_gun,
->>>>>>> Stashed changes
             import_model,
             exit,
         })
@@ -519,8 +547,6 @@ impl TrayController {
             Some(TrayAction::Reset)
         } else if event.id == self.toggle_settings.id() {
             Some(TrayAction::ToggleSettings)
-<<<<<<< Updated upstream
-=======
         } else if event.id == self.toggle_weather.id() {
             Some(TrayAction::ToggleWeather)
         } else if event.id == self.toggle_sand.id() {
@@ -533,7 +559,6 @@ impl TrayController {
             Some(TrayAction::ToggleLassoTool)
         } else if event.id == self.toggle_shatter_gun.id() {
             Some(TrayAction::ToggleShatterGun)
->>>>>>> Stashed changes
         } else if event.id == self.import_model.id() {
             Some(TrayAction::ImportModel)
         } else if event.id == self.exit.id() {
@@ -547,7 +572,7 @@ impl TrayController {
 pub fn pick_model_file() -> Option<PathBuf> {
     FileDialog::new()
         .set_title("Import 3D Model")
-        .add_filter("3D Models", &["obj", "stl", "fbx"])
+        .add_filter("3D Models", &["obj", "stl"])
         .pick_file()
 }
 

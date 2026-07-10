@@ -16,18 +16,12 @@ const CUBE_PALETTE: [AppColor; 5] = [
 ];
 
 const DEFAULT_OBJECT_SIZE: f32 = 132.0;
-const STARTUP_CUBE_COUNT: usize = 100;
-const STARTUP_CUBE_COLUMNS: usize = 10;
 const STARTUP_CUBE_SIZE: f32 = DEFAULT_OBJECT_SIZE * 0.2;
 const SHATTER_WEDGE_COUNT: usize = 30;
 const SHATTER_RING_FACTORS: [f32; 5] = [0.0, 0.24, 0.48, 0.72, 1.08];
 const SHATTER_MIN_AREA: f32 = 260.0;
 const SHARD_THICKNESS: f32 = 18.0;
 
-<<<<<<< Updated upstream
-const SPAWN_CATALOG: [SpawnSpec; 6] = [
-    SpawnSpec::new(ObjectVisualKind::Cube, None),
-=======
 const SPAWN_CATALOG: [SpawnSpec; 22] = [
     SpawnSpec::new(ObjectVisualKind::Cube, None),
     SpawnSpec::new(ObjectVisualKind::Ball, Some(AppColor::from_rgb(90, 205, 255))),
@@ -46,7 +40,6 @@ const SPAWN_CATALOG: [SpawnSpec; 22] = [
     SpawnSpec::new(ObjectVisualKind::Barrel, Some(AppColor::from_rgb(126, 226, 168))),
     SpawnSpec::new(ObjectVisualKind::Ring, Some(AppColor::from_rgb(255, 118, 210))),
     SpawnSpec::new(ObjectVisualKind::Star, Some(AppColor::from_rgb(255, 224, 92))),
->>>>>>> Stashed changes
     SpawnSpec::new(ObjectVisualKind::Crystal, Some(AppColor::from_rgb(108, 241, 255))),
     SpawnSpec::new(ObjectVisualKind::Satellite, Some(AppColor::from_rgb(88, 160, 255))),
     SpawnSpec::new(ObjectVisualKind::DvdLogo, Some(AppColor::from_rgb(244, 78, 255))),
@@ -185,6 +178,12 @@ impl HitTester {
         let mut best_z = i32::MIN;
 
         for candidate in objects {
+            // Objects pushed back in 3D space render offset by perspective, so
+            // screen-space hit testing no longer lines up with them.
+            if candidate.depth_z < -1.0 {
+                continue;
+            }
+
             if !contains_point(&candidate.body, point) {
                 continue;
             }
@@ -199,7 +198,9 @@ impl HitTester {
     }
 
     pub fn is_point_over_any_object(&self, objects: &[ObjectState], point: Vector2) -> bool {
-        objects.iter().any(|object| contains_point(&object.body, point))
+        objects
+            .iter()
+            .any(|object| object.depth_z >= -1.0 && contains_point(&object.body, point))
     }
 }
 
@@ -250,6 +251,17 @@ impl DragController {
 
     pub fn dragged_id(&self) -> Option<u64> {
         self.dragged_id
+    }
+
+    pub fn cancel_drag(&mut self, objects: &mut [ObjectState]) {
+        if let Some(dragged_id) = self.dragged_id {
+            if let Some(object) = objects.iter_mut().find(|object| object.id == dragged_id) {
+                object.body.is_dragging = false;
+                object.is_dragging = false;
+            }
+        }
+        self.dragged_id = None;
+        self.mouse_tracker.clear();
     }
 
     pub fn begin_drag(
@@ -367,9 +379,6 @@ impl SceneController {
         self.physics_world.objects_mut()
     }
 
-<<<<<<< Updated upstream
-    pub fn initialize(&mut self, bounds: RectF) {
-=======
     pub fn add_object_velocity(&mut self, id: u64, delta: Vector2) {
         self.physics_world.add_velocity(id, delta);
     }
@@ -379,10 +388,8 @@ impl SceneController {
     }
 
     pub fn initialize(&mut self, _bounds: RectF) {
->>>>>>> Stashed changes
         self.next_cube_color_index = 0;
         self.next_spawn_catalog_index = 0;
-        self.spawn_initial_objects(bounds);
     }
 
     pub fn set_gravity(&mut self, gravity_y: f32) {
@@ -455,8 +462,6 @@ impl SceneController {
         self.spawn_object_with_size(position, color, visual_kind, DEFAULT_OBJECT_SIZE)
     }
 
-<<<<<<< Updated upstream
-=======
     pub fn spawn_custom_object(
         &mut self,
         position: Vector2,
@@ -558,7 +563,6 @@ impl SceneController {
         self.physics_world.remove_object(id)
     }
 
->>>>>>> Stashed changes
     fn spawn_object_with_size(
         &mut self,
         position: Vector2,
@@ -580,8 +584,6 @@ impl SceneController {
         if visual_kind == ObjectVisualKind::DvdLogo {
             state.body.width = base_size * 1.7;
             state.body.height = base_size * 0.78;
-<<<<<<< Updated upstream
-=======
         } else if visual_kind == ObjectVisualKind::RobotBuddy {
             state.body.width = base_size * 0.68;
             state.body.height = base_size * 0.52;
@@ -594,7 +596,6 @@ impl SceneController {
         } else if visual_kind == ObjectVisualKind::QuadDrone {
             state.body.width = base_size * 0.92;
             state.body.height = base_size * 0.54;
->>>>>>> Stashed changes
         } else {
             state.body.width = base_size;
             state.body.height = base_size;
@@ -603,20 +604,19 @@ impl SceneController {
         state.body.mass = 1.0;
         state.body.restitution = if visual_kind == ObjectVisualKind::DvdLogo {
             1.0
+        } else if visual_kind == ObjectVisualKind::SoftBall {
+            0.52
         } else {
             self.config.restitution
         };
         state.body.linear_damping = if visual_kind == ObjectVisualKind::DvdLogo {
             1.0
-<<<<<<< Updated upstream
-=======
         } else if matches!(visual_kind, ObjectVisualKind::FoxBuddy | ObjectVisualKind::RobotBuddy) {
             0.982
         } else if matches!(visual_kind, ObjectVisualKind::Snail | ObjectVisualKind::QuadDrone) {
             1.0
         } else if visual_kind == ObjectVisualKind::Fan {
             0.992
->>>>>>> Stashed changes
         } else {
             self.config.linear_damping
         };
@@ -632,14 +632,6 @@ impl SceneController {
         } else {
             1.0
         };
-<<<<<<< Updated upstream
-        state.body.shape = if visual_kind == ObjectVisualKind::Crystal {
-            CollisionShape::Diamond
-        } else {
-            CollisionShape::Box
-        };
-        state.body.collision_scale = 1.0;
-=======
         state.body.shape = match visual_kind {
             ObjectVisualKind::Ball
             | ObjectVisualKind::SoftBall
@@ -710,7 +702,6 @@ impl SceneController {
             state.body.collision_scale = 0.88;
             state.body.lock_rotation = true;
         }
->>>>>>> Stashed changes
         if visual_kind == ObjectVisualKind::DvdLogo {
             state.body.velocity = Vector2::new(420.0, 260.0);
         }
@@ -752,35 +743,16 @@ impl SceneController {
         id
     }
 
-    pub fn reset(&mut self, bounds: RectF) {
+    pub fn reset(&mut self, _bounds: RectF) {
         self.physics_world.clear();
         self.next_cube_color_index = 0;
         self.next_spawn_catalog_index = 0;
-        self.spawn_initial_objects(bounds);
     }
 
     pub fn apply_runtime_physics_config(&mut self) {
         for object in self.physics_world.objects_mut() {
             object.body.restitution = self.config.restitution;
             object.body.linear_damping = self.config.linear_damping;
-        }
-    }
-
-    fn spawn_initial_objects(&mut self, bounds: RectF) {
-        let spacing = STARTUP_CUBE_SIZE * 1.35;
-        let total_width = (STARTUP_CUBE_COLUMNS as f32 - 1.0) * spacing + STARTUP_CUBE_SIZE;
-        let start_x = ((bounds.width - total_width) * 0.5).max(12.0);
-        let start_y = (bounds.height * 0.10).max(12.0);
-
-        for index in 0..STARTUP_CUBE_COUNT {
-            let column = index % STARTUP_CUBE_COLUMNS;
-            let row = index / STARTUP_CUBE_COLUMNS;
-            let stagger = if row % 2 == 0 { 0.0 } else { spacing * 0.5 };
-            let position = Vector2::new(
-                start_x + (column as f32 * spacing) + stagger,
-                start_y + (row as f32 * spacing),
-            );
-            self.spawn_object_with_size(position, None, ObjectVisualKind::Cube, STARTUP_CUBE_SIZE);
         }
     }
 

@@ -1,6 +1,10 @@
 bin/
 obj/
 buildcheck-*/
+out/
+.venv-sam2/
+Sam2/
+docs/
 .vs/
 *.user
 *.suo
