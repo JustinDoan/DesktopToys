@@ -2038,8 +2038,8 @@ impl NativeApp {
 
             if let Some((object_id, object_center, distance, _)) = nearest {
                 let target = object_center + Vector2::new(0.0, -80.0);
-                self.fly_drone_toward(drone_id, target, dt);
-                if distance <= DRONE_PICKUP_RADIUS_PIXELS * DRONE_PICKUP_RADIUS_PIXELS {
+                let reached_pickup_hover = self.fly_drone_toward(drone_id, target, dt);
+                if reached_pickup_hover || distance <= DRONE_PICKUP_RADIUS_PIXELS * DRONE_PICKUP_RADIUS_PIXELS {
                     self.drone_carries.insert(
                         drone_id,
                         DroneCarry {
@@ -2172,7 +2172,7 @@ impl NativeApp {
 
     fn drone_drop_target(&self) -> Vector2 {
         let bin = self.robot_bin_rect();
-        Vector2::new(bin.x + bin.width * 0.5, bin.y - 165.0)
+        Vector2::new(bin.x + bin.width * 0.5, bin.y - 225.0)
     }
 
     fn stabilize_quad_drones(&mut self) {
