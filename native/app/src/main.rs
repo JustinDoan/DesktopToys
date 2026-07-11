@@ -281,6 +281,7 @@ const FAN_PUSH_ACCELERATION: f32 = 1850.0;
 const DRONE_SPEED_PIXELS_PER_SECOND: f32 = 230.0;
 const DRONE_PICKUP_RADIUS_PIXELS: f32 = 58.0;
 const DRONE_DROP_RADIUS_PIXELS: f32 = 52.0;
+const DRONE_BIN_RELEASE_RADIUS_PIXELS: f32 = 8.0;
 const DRONE_DROP_COOLDOWN_SECONDS: f64 = 1.25;
 const PORTAL_COOLDOWN_SECONDS: f64 = 0.30;
 const PORTAL_HALF_LENGTH_PIXELS: f32 = 86.0;
@@ -2007,7 +2008,7 @@ impl NativeApp {
                     continue;
                 }
                 let target = self.drone_drop_target();
-                let reached = self.fly_drone_toward(drone_id, target, dt);
+                self.fly_drone_toward(drone_id, target, dt);
                 if let Some(updated_drone) = self.scene.objects().iter().find(|object| object.id == drone_id).cloned() {
                     self.position_drone_carry(&updated_drone, carry.object_id);
                 }
@@ -2018,7 +2019,9 @@ impl NativeApp {
                     .find(|object| object.id == drone_id)
                     .map(object_center)
                     .unwrap_or_else(|| object_center(drone_snapshot));
-                if reached || (drone_center - target).length_squared() <= DRONE_DROP_RADIUS_PIXELS * DRONE_DROP_RADIUS_PIXELS {
+                if (drone_center - target).length_squared()
+                    <= DRONE_BIN_RELEASE_RADIUS_PIXELS * DRONE_BIN_RELEASE_RADIUS_PIXELS
+                {
                     self.drop_drone_carry(drone_id, Vector2::new(0.0, 115.0));
                 }
                 continue;
