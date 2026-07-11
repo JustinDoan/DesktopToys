@@ -1317,8 +1317,9 @@ fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds
             // Present the X-frame as a three-quarter side profile so the
             // fuselage, landing rails, camera, and cargo claw remain visible.
             rotation_x += 58.0;
-            rotation_x += (object.body.velocity.y as f64 * 0.018).clamp(-9.0, 9.0);
-            rotation_y += (-object.body.velocity.x as f64 * 0.018).clamp(-9.0, 9.0);
+            rotation_x += (object.body.velocity.y as f64 * 0.025).clamp(-9.0, 9.0);
+            rotation_y += (-object.body.velocity.x as f64 * 0.035).clamp(-10.0, 10.0);
+            rotation_z += (object.body.velocity.x as f64 * 0.012).clamp(-3.5, 3.5);
         },
         ObjectVisualKind::ImportedModel => {
             center_z += 12.0;

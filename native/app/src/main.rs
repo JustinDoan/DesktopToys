@@ -279,6 +279,7 @@ const FAN_RANGE_PIXELS: f32 = 560.0;
 const FAN_HALF_ANGLE_RADIANS: f32 = 0.58;
 const FAN_PUSH_ACCELERATION: f32 = 1850.0;
 const DRONE_SPEED_PIXELS_PER_SECOND: f32 = 230.0;
+const DRONE_ACCELERATION_PIXELS_PER_SECOND_SQUARED: f32 = 680.0;
 const DRONE_PICKUP_RADIUS_PIXELS: f32 = 58.0;
 const DRONE_DROP_RADIUS_PIXELS: f32 = 52.0;
 const DRONE_BIN_RELEASE_RADIUS_PIXELS: f32 = 8.0;
@@ -2116,14 +2117,24 @@ impl NativeApp {
         } else {
             Vector2::ZERO
         };
-        let step = (DRONE_SPEED_PIXELS_PER_SECOND * dt).min(distance);
-        let next_center = center + direction * step;
-        let previous = drone.body.position;
+        let braking_speed = (2.0 * DRONE_ACCELERATION_PIXELS_PER_SECOND_SQUARED * distance).sqrt();
+        let desired_speed = DRONE_SPEED_PIXELS_PER_SECOND.min(braking_speed);
+        let desired_velocity = direction * desired_speed;
+        let velocity_delta = clamp_vector(
+            desired_velocity - drone.body.velocity,
+            DRONE_ACCELERATION_PIXELS_PER_SECOND_SQUARED * dt,
+        );
+        let mut flight_velocity = drone.body.velocity + velocity_delta;
+        let movement = clamp_vector(flight_velocity * dt, distance);
+        let next_center = center + movement;
+        if distance < 2.0 {
+            flight_velocity = Vector2::ZERO;
+        }
         drone.body.position = Vector2::new(
             next_center.x - drone.body.width * 0.5,
             next_center.y - drone.body.height * 0.5,
         );
-        drone.body.velocity = (drone.body.position - previous) / dt.max(1.0 / 240.0);
+        drone.body.velocity = flight_velocity;
         drone.body.gravity_scale = 0.0;
         drone.body.is_dragging = true;
         drone.is_dragging = false;
@@ -2143,9 +2154,16 @@ impl NativeApp {
             object.body.is_dragging = true;
             object.body.is_sleeping = false;
             object.body.velocity = Vector2::ZERO;
-            object.rotation_z *= 0.9;
             let drone_center = object_center(drone);
-            let cargo_center = drone_center + Vector2::new(0.0, drone.body.height * 0.42 + object.body.height * 0.34);
+            let swing_x = -drone.body.velocity.x * 0.075;
+            let swing_drop = drone.body.velocity.x.abs() * 0.018;
+            let cargo_center = drone_center
+                + Vector2::new(
+                    swing_x,
+                    drone.body.height * 0.42 + object.body.height * 0.34 + swing_drop,
+                );
+            let target_rotation = (drone.body.velocity.x * -0.045).clamp(-12.0, 12.0) as f64;
+            object.rotation_z = object.rotation_z * 0.84 + target_rotation * 0.16;
             object.body.position = Vector2::new(
                 cargo_center.x - object.body.width * 0.5,
                 cargo_center.y - object.body.height * 0.5,
