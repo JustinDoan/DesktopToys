@@ -185,6 +185,29 @@ struct PendingCheerDrop {
     emission_seconds: f64,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct BitCrystalLifecycle {
+    spawned_at: f64,
+    expires_at: f64,
+    cracked: bool,
+    shatter_at: Option<f64>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BitPointerPress {
+    object_id: u64,
+    position: Vector2,
+    started_at: f64,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BitBurstEffect {
+    center: Vector2,
+    color: AppColor,
+    started_at: f64,
+    ends_at: f64,
+}
+
 struct NativeApp {
     window: Option<Arc<Window>>,
     window_id: Option<WindowId>,
@@ -214,6 +237,10 @@ struct NativeApp {
     pending_cheer_drops: Vec<PendingCheerDrop>,
     cheer_portals: Vec<CheerPortalVisual>,
     cheer_labels: Vec<ScreenLabel>,
+    bit_crystals: HashMap<u64, BitCrystalLifecycle>,
+    bit_pointer_press: Option<BitPointerPress>,
+    bit_bursts: Vec<BitBurstEffect>,
+    last_bit_cleanup_at: f64,
     debug_visible: bool,
     debug_hit_primary_cursor: bool,
     debug_left_down: bool,
@@ -284,6 +311,17 @@ const DRONE_PICKUP_RADIUS_PIXELS: f32 = 58.0;
 const DRONE_DROP_RADIUS_PIXELS: f32 = 52.0;
 const DRONE_BIN_RELEASE_RADIUS_PIXELS: f32 = 8.0;
 const DRONE_DROP_COOLDOWN_SECONDS: f64 = 1.25;
+const BIT_GLOBAL_LIMIT: usize = 450;
+const BIT_MIN_LIFETIME_SECONDS: f64 = 120.0;
+const BIT_VALUE_LIFETIME_BONUS_SECONDS: f64 = 18.0;
+const BIT_MAX_VALUE_LIFETIME_BONUS_SECONDS: f64 = 120.0;
+const BIT_CLEANUP_INTERVAL_SECONDS: f64 = 0.18;
+const BIT_OVER_LIMIT_CLEANUP_INTERVAL_SECONDS: f64 = 0.035;
+const BIT_CLICK_MAX_SECONDS: f64 = 0.30;
+const BIT_CLICK_MAX_TRAVEL_PIXELS: f32 = 9.0;
+const BIT_THROW_SHATTER_SPEED: f32 = 1_050.0;
+const BIT_THROW_FLIGHT_SECONDS: f64 = 0.55;
+const BIT_TOUGH_VALUE: u32 = 100;
 const PORTAL_COOLDOWN_SECONDS: f64 = 0.30;
 const PORTAL_HALF_LENGTH_PIXELS: f32 = 86.0;
 const PORTAL_EDGE_MARGIN_PIXELS: f32 = 14.0;
@@ -350,6 +388,10 @@ impl Default for NativeApp {
             pending_cheer_drops: Vec::new(),
             cheer_portals: Vec::new(),
             cheer_labels: Vec::new(),
+            bit_crystals: HashMap::new(),
+            bit_pointer_press: None,
+            bit_bursts: Vec::new(),
+            last_bit_cleanup_at: 0.0,
             debug_visible: false,
             debug_hit_primary_cursor: false,
             debug_left_down: false,
@@ -637,6 +679,7 @@ impl NativeApp {
         self.update_snails(dt, &window);
         self.update_portals(dt);
         self.update_cheer_drop_effects(now);
+        self.update_bit_crystal_lifecycle(now);
         if !self.physics_paused {
             self.scene.step(dt, self.scene_bounds());
         }
@@ -815,8 +858,19 @@ impl NativeApp {
             self.last_drag_attempt = if let Some(id) = began {
                 self.selected_id = Some(id);
                 self.last_rotation_cursor = self.cursor_local;
+                self.bit_pointer_press = self
+                    .scene
+                    .objects()
+                    .iter()
+                    .find(|object| object.id == id && object.visual_kind == ObjectVisualKind::BitCrystal)
+                    .map(|_| BitPointerPress {
+                        object_id: id,
+                        position: self.cursor_local,
+                        started_at: now_seconds,
+                    });
                 "begin:primary".to_string()
             } else {
+                self.bit_pointer_press = None;
                 "miss:primary".to_string()
             };
         } else if !is_left_down && self.was_left_down && self.drag_controller.is_dragging() {
@@ -1025,6 +1079,7 @@ impl NativeApp {
     }
 
     fn trigger_screen_shatter_at(&mut self, impact: Vector2) {
+        let now = self.frame_clock.elapsed_seconds;
         #[cfg(target_os = "windows")]
         if let Some(d3d_renderer) = &mut self.d3d_renderer {
             if let Err(error) = d3d_renderer.capture_screen_texture(self.bounds) {
@@ -1044,6 +1099,10 @@ impl NativeApp {
         self.cheer_drop_effects.clear();
         self.cheer_portals.clear();
         self.cheer_labels.clear();
+        self.bit_crystals.clear();
+        self.bit_pointer_press = None;
+        self.bit_bursts.clear();
+        self.last_bit_cleanup_at = now;
         self.weather_world.clear();
         self.sand_world.clear();
         self.measure_tool.clear();
@@ -2996,6 +3055,11 @@ impl NativeApp {
 
     fn end_drag_and_apply_spin(&mut self, now_seconds: f64) {
         let rotated_while_held = self.is_rotation_dragging;
+        let selected_id = self.selected_id;
+        let quick_bit_click = self
+            .bit_pointer_press
+            .take()
+            .is_some_and(|press| is_quick_bit_click(press, selected_id, self.cursor_local, now_seconds));
         let throw_sensitivity = self.scene.config().throw_sensitivity;
         let max_throw_speed = self.scene.config().max_throw_speed;
         let throw_velocity = self.drag_controller.end_drag(
@@ -3005,9 +3069,17 @@ impl NativeApp {
             max_throw_speed,
         );
 
-        let Some(selected_id) = self.selected_id else {
+        let Some(selected_id) = selected_id else {
             return;
         };
+
+        if quick_bit_click {
+            self.window_capture_candidate = None;
+            self.handle_bit_crystal_click(selected_id, now_seconds);
+            self.is_rotation_dragging = false;
+            return;
+        }
+
         let Some(object) = self
             .scene
             .objects_mut()
@@ -3016,6 +3088,7 @@ impl NativeApp {
         else {
             return;
         };
+        let is_bit_crystal = object.visual_kind == ObjectVisualKind::BitCrystal;
 
         if rotated_while_held {
             object.angular_velocity_y += throw_velocity.x as f64 * 0.18;
@@ -3025,6 +3098,13 @@ impl NativeApp {
             object.angular_velocity_x = 0.0;
             object.angular_velocity_y = 0.0;
             object.angular_velocity_z = 0.0;
+        }
+        if is_bit_crystal
+            && throw_velocity.length_squared() >= BIT_THROW_SHATTER_SPEED * BIT_THROW_SHATTER_SPEED
+        {
+            if let Some(lifecycle) = self.bit_crystals.get_mut(&selected_id) {
+                lifecycle.shatter_at = Some(now_seconds + BIT_THROW_FLIGHT_SECONDS);
+            }
         }
         self.is_rotation_dragging = false;
         self.finish_window_capture(selected_id);
@@ -3123,6 +3203,7 @@ impl NativeApp {
         }
 
         self.cheer_drop_effects.retain(|effect| now < effect.ends_at);
+        self.bit_bursts.retain(|effect| now < effect.ends_at);
         self.cheer_portals.clear();
         self.cheer_labels.clear();
         for effect in &self.cheer_drop_effects {
@@ -3152,6 +3233,17 @@ impl NativeApp {
                 });
             }
         }
+        for burst in &self.bit_bursts {
+            let duration = (burst.ends_at - burst.started_at).max(0.001);
+            let progress = ((now - burst.started_at) / duration).clamp(0.0, 1.0) as f32;
+            let intensity = (1.0 - progress).powf(0.65);
+            self.cheer_portals.push(CheerPortalVisual {
+                center: burst.center,
+                radius: 10.0 + progress * 44.0,
+                color: burst.color,
+                intensity,
+            });
+        }
     }
 
     fn emit_cheer_crystal(&mut self, drop: &PendingCheerDrop, index: usize) {
@@ -3172,6 +3264,7 @@ impl NativeApp {
             ObjectVisualKind::BitCrystal,
             CollisionShape::Diamond,
         );
+        let source_value = drop.base_value + u32::from((index as u32) < drop.remainder);
         if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == id) {
             object.body.mass = drop.mass_per_crystal;
             object.body.restitution = (0.48 + drop.tier as f32 * 0.055).clamp(0.48, 0.82);
@@ -3185,9 +3278,173 @@ impl NativeApp {
             object.angular_velocity_y = phase.sin() as f64 * 240.0;
             object.angular_velocity_z = fan as f64 * 280.0;
             object.source_owner = Some(drop.donor.clone());
-            object.source_value = Some(drop.base_value + u32::from((index as u32) < drop.remainder));
+            object.source_value = Some(source_value);
         }
+        let spawned_at = self.frame_clock.elapsed_seconds;
+        self.bit_crystals.insert(
+            id,
+            BitCrystalLifecycle {
+                spawned_at,
+                expires_at: bit_crystal_expiry(spawned_at, source_value, id),
+                cracked: false,
+                shatter_at: None,
+            },
+        );
         self.selected_id = Some(id);
+    }
+
+    fn update_bit_crystal_lifecycle(&mut self, now: f64) {
+        let existing_ids: Vec<u64> = self.scene.objects().iter().map(|object| object.id).collect();
+        self.bit_crystals.retain(|id, _| existing_ids.contains(id));
+
+        let thrown_shatters: Vec<u64> = self
+            .bit_crystals
+            .iter()
+            .filter(|(_, lifecycle)| {
+                lifecycle
+                    .shatter_at
+                    .is_some_and(|shatter_at| now >= shatter_at)
+            })
+            .filter_map(|(&id, _)| {
+                self.scene
+                    .objects()
+                    .iter()
+                    .find(|object| object.id == id)
+                    .filter(|object| !object.is_dragging && !object.body.is_dragging)
+                    .map(|_| id)
+            })
+            .collect();
+        for id in thrown_shatters {
+            self.remove_bit_crystal(id, now, true);
+        }
+
+        let over_limit = self.bit_crystals.len() > BIT_GLOBAL_LIMIT;
+        let interval = if over_limit {
+            BIT_OVER_LIMIT_CLEANUP_INTERVAL_SECONDS
+        } else {
+            BIT_CLEANUP_INTERVAL_SECONDS
+        };
+        if now - self.last_bit_cleanup_at < interval {
+            return;
+        }
+
+        let candidate = self
+            .bit_cleanup_candidate(now, true, over_limit)
+            .or_else(|| {
+                if over_limit {
+                    self.bit_cleanup_candidate(now, false, true)
+                } else {
+                    None
+                }
+            });
+        if let Some(id) = candidate {
+            self.remove_bit_crystal(id, now, true);
+            self.last_bit_cleanup_at = now;
+        }
+    }
+
+    fn bit_cleanup_candidate(
+        &self,
+        now: f64,
+        require_sleeping: bool,
+        ignore_expiry: bool,
+    ) -> Option<u64> {
+        self.bit_crystals
+            .iter()
+            .filter(|(_, lifecycle)| ignore_expiry || now >= lifecycle.expires_at)
+            .filter_map(|(&id, lifecycle)| {
+                let object = self.scene.objects().iter().find(|object| object.id == id)?;
+                if object.is_dragging
+                    || object.body.is_dragging
+                    || (require_sleeping && !object.body.is_sleeping)
+                {
+                    return None;
+                }
+                Some((id, lifecycle.spawned_at))
+            })
+            .min_by(|left, right| left.1.partial_cmp(&right.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(id, _)| id)
+    }
+
+    fn handle_bit_crystal_click(&mut self, id: u64, now: f64) {
+        let Some(object) = self.scene.objects().iter().find(|object| object.id == id) else {
+            return;
+        };
+        let value = object.source_value.unwrap_or(1);
+        let owner = object
+            .source_owner
+            .clone()
+            .unwrap_or_else(|| "viewer".to_string());
+        let center = object_center(object);
+        let color = object.base_color;
+        let should_crack = value >= BIT_TOUGH_VALUE
+            && self
+                .bit_crystals
+                .get(&id)
+                .is_some_and(|lifecycle| !lifecycle.cracked);
+
+        if should_crack {
+            if let Some(lifecycle) = self.bit_crystals.get_mut(&id) {
+                lifecycle.cracked = true;
+                lifecycle.shatter_at = None;
+            }
+            if let Some(object) = self
+                .scene
+                .objects_mut()
+                .iter_mut()
+                .find(|object| object.id == id)
+            {
+                object.base_color = brighten_color(object.base_color, 52);
+                object.angular_velocity_z += 220.0;
+                object.body.velocity.y -= 120.0;
+            }
+            self.bit_bursts.push(BitBurstEffect {
+                center,
+                color,
+                started_at: now,
+                ends_at: now + 0.24,
+            });
+            self.push_status_message(format!(
+                "Cracked {owner}'s {value}-Bit crystal. Click it once more to pop it."
+            ));
+            return;
+        }
+
+        self.remove_bit_crystal(id, now, true);
+        self.push_status_message(format!("Popped {owner}'s {value}-Bit crystal."));
+    }
+
+    fn remove_bit_crystal(&mut self, id: u64, now: f64, burst: bool) {
+        let Some(object) = self.scene.objects().iter().find(|object| object.id == id) else {
+            self.bit_crystals.remove(&id);
+            return;
+        };
+        if object.visual_kind != ObjectVisualKind::BitCrystal {
+            return;
+        }
+        let center = object_center(object);
+        let color = object.base_color;
+
+        let _ = self.scene.remove_object(id);
+        self.bit_crystals.remove(&id);
+        self.window_captures.remove(&id);
+        self.robot_carries.retain(|_, carry| carry.object_id != id);
+        self.robot_drop_cooldowns
+            .retain(|_, cooldown| cooldown.object_id != id);
+        self.drone_carries.retain(|_, carry| carry.object_id != id);
+        self.drone_drop_cooldowns
+            .retain(|_, cooldown| cooldown.object_id != id);
+        if self.selected_id == Some(id) {
+            self.selected_id = None;
+        }
+        if burst {
+            self.bit_bursts.push(BitBurstEffect {
+                center,
+                color,
+                started_at: now,
+                ends_at: now + 0.42,
+            });
+        }
     }
 
     fn finish_window_capture(&mut self, object_id: u64) {
@@ -3855,6 +4112,7 @@ impl NativeApp {
     }
 
     fn reset_everything(&mut self) {
+        let now = self.frame_clock.elapsed_seconds;
         self.drag_controller.cancel_drag(self.scene.objects_mut());
         self.scene.clear_static_colliders();
         self.scene.reset(self.scene_bounds());
@@ -3863,6 +4121,14 @@ impl NativeApp {
         self.basketball_game = BasketballGame::default();
         self.basketball_tracker.clear();
         self.basketball_confetti.clear();
+        self.pending_cheer_drops.clear();
+        self.cheer_drop_effects.clear();
+        self.cheer_portals.clear();
+        self.cheer_labels.clear();
+        self.bit_crystals.clear();
+        self.bit_pointer_press = None;
+        self.bit_bursts.clear();
+        self.last_bit_cleanup_at = now;
         self.weather_world.clear();
         self.sand_world.clear();
         self.measure_tool.clear();
@@ -4081,6 +4347,34 @@ fn cheer_tier_color(tier: u32, anonymous: bool) -> AppColor {
         3 => AppColor::from_rgb(255, 78, 112),
         _ => AppColor::from_rgb(255, 204, 72),
     }
+}
+
+fn bit_crystal_expiry(spawned_at: f64, value: u32, id: u64) -> f64 {
+    let value_bonus = (value.max(1) as f64).log2() * BIT_VALUE_LIFETIME_BONUS_SECONDS;
+    let value_bonus = value_bonus.min(BIT_MAX_VALUE_LIFETIME_BONUS_SECONDS);
+    let stagger = (id % 31) as f64;
+    spawned_at + BIT_MIN_LIFETIME_SECONDS + value_bonus + stagger
+}
+
+fn brighten_color(color: AppColor, amount: u8) -> AppColor {
+    AppColor::from_argb(
+        color.a,
+        color.r.saturating_add(amount),
+        color.g.saturating_add(amount),
+        color.b.saturating_add(amount),
+    )
+}
+
+fn is_quick_bit_click(
+    press: BitPointerPress,
+    selected_id: Option<u64>,
+    cursor: Vector2,
+    now: f64,
+) -> bool {
+    selected_id == Some(press.object_id)
+        && now - press.started_at <= BIT_CLICK_MAX_SECONDS
+        && (cursor - press.position).length_squared()
+            <= BIT_CLICK_MAX_TRAVEL_PIXELS * BIT_CLICK_MAX_TRAVEL_PIXELS
 }
 
 #[derive(Debug, Deserialize)]
@@ -8606,5 +8900,50 @@ impl ImportPanel {
                 "Enter imports. Esc cancels.".to_string(),
             ],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn quick_bit_click_rejects_long_or_moving_drags() {
+        let press = BitPointerPress {
+            object_id: 7,
+            position: Vector2::new(100.0, 100.0),
+            started_at: 5.0,
+        };
+
+        assert!(is_quick_bit_click(
+            press,
+            Some(7),
+            Vector2::new(105.0, 104.0),
+            5.2
+        ));
+        assert!(!is_quick_bit_click(
+            press,
+            Some(7),
+            Vector2::new(120.0, 100.0),
+            5.2
+        ));
+        assert!(!is_quick_bit_click(
+            press,
+            Some(7),
+            Vector2::new(100.0, 100.0),
+            5.5
+        ));
+    }
+
+    #[test]
+    fn valuable_bit_crystals_live_longer() {
+        let ordinary = bit_crystal_expiry(10.0, 1, 31);
+        let valuable = bit_crystal_expiry(10.0, 1_000, 31);
+
+        assert!(valuable > ordinary);
+        assert!(ordinary >= 10.0 + BIT_MIN_LIFETIME_SECONDS);
+        assert!(
+            valuable <= 10.0 + BIT_MIN_LIFETIME_SECONDS + BIT_MAX_VALUE_LIFETIME_BONUS_SECONDS
+        );
     }
 }
