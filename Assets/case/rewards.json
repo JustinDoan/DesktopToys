@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 2,
+  "activeProfileId": "viewer_rewards",
+  "globalSettings": {
+    "currencyName": "channel points",
+    "gambleCommand": "!roll",
+    "rollCost": 1000,
+    "showOdds": true,
+    "showProfileName": true,
+    "extendedResultHold": false
+  },
+  "profiles": [
+    {
+      "id": "viewer_rewards",
+      "name": "Viewer Reward Case",
+      "caseName": "VIEWER REWARD CASE",
+      "legendaryWheelEnabled": true,
+      "hypeMessages": {
+        "opening": "rolling the case",
+        "common": "clean little hit",
+        "rare": "that one has some shine",
+        "legendary": "legendary hit"
+      },
+      "legendaryWheel": {
+        "title": "Legendary Wheel",
+        "spinDurationMs": 8200,
+        "prizes": [
+          { "name": "Golden VIP Day", "description": "VIP for the whole day.", "asset": { "type": "generated", "value": "vip" } },
+          { "name": "1000 Tokens", "description": "Adds 1000 stream tokens.", "asset": { "type": "generated", "value": "tokens" } },
+          { "name": "Play With Streamer", "description": "A scheduled game slot.", "asset": { "type": "generated", "value": "party" } },
+          { "name": "Double Legendary", "description": "This prize plus another spin.", "asset": { "type": "generated", "value": "double" } },
+          { "name": "Stream Takeover", "description": "Pick a major stream moment.", "asset": { "type": "generated", "value": "crown" } }
+        ]
+      },
+      "rarities": [
+        {
+          "id": "mil_spec",
+          "name": "Mil-Spec",
+          "odds": 79.92,
+          "color": "#4b69ff",
+          "rewards": [
+            { "name": "25 Tokens", "description": "Adds 25 stream tokens.", "asset": { "type": "generated", "value": "tokens" } },
+            { "name": "50 Tokens", "description": "Adds 50 stream tokens.", "asset": { "type": "generated", "value": "tokens" } },
+            { "name": "Free Spin", "description": "One extra case opening.", "asset": { "type": "generated", "value": "spin" } },
+            { "name": "Reroll", "description": "Reroll this prize once.", "asset": { "type": "generated", "value": "reroll" } },
+            { "name": "Shoutout", "description": "A shoutout on stream.", "asset": { "type": "generated", "value": "voice" } }
+          ]
+        },
+        {
+          "id": "restricted",
+          "name": "Restricted",
+          "odds": 15.98,
+          "color": "#8847ff",
+          "rewards": [
+            { "name": "250 Tokens", "description": "Adds 250 stream tokens.", "asset": { "type": "generated", "value": "tokens" } },
+            { "name": "VIP Time", "description": "Temporary VIP in chat.", "asset": { "type": "generated", "value": "vip" } },
+            { "name": "Song Request", "description": "Queue one track.", "asset": { "type": "generated", "value": "queue" } },
+            { "name": "Loadout Pick", "description": "Choose the next loadout.", "asset": { "type": "generated", "value": "loadout" } }
+          ]
+        },
+        {
+          "id": "classified",
+          "name": "Classified",
+          "odds": 3.2,
+          "color": "#d32ce6",
+          "rewards": [
+            { "name": "Modifier", "description": "Add a run modifier.", "asset": { "type": "generated", "value": "modifier" } },
+            { "name": "Challenge", "description": "Set a stream challenge.", "asset": { "type": "generated", "value": "challenge" } },
+            { "name": "Name A Thing", "description": "Name something in game.", "asset": { "type": "generated", "value": "name" } }
+          ]
+        },
+        {
+          "id": "covert",
+          "name": "Covert",
+          "odds": 0.64,
+          "color": "#eb4b4b",
+          "rewards": [
+            { "name": "Play With Streamer", "description": "A scheduled game slot.", "asset": { "type": "generated", "value": "party" } },
+            { "name": "Scene Takeover", "description": "Pick the next scene.", "asset": { "type": "generated", "value": "scene" } }
+          ]
+        },
+        {
+          "id": "rare_special",
+          "name": "Rare Special",
+          "odds": 0.26,
+          "color": "#ffd700",
+          "rewards": [
+            { "name": "Legendary Drop", "description": "Spin the legendary wheel.", "asset": { "type": "generated", "value": "legendary" } }
+          ]
+        }
+      ]
+    }
+  ]
+}

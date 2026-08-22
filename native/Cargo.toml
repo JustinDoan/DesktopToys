@@ -2,8 +2,10 @@
 members = [
     "app",
     "box3d_spike",
+    "case_sim",
     "core_types",
     "native_shell",
+    "network_protocol",
     "physics_core",
     "renderer",
     "scene_logic",

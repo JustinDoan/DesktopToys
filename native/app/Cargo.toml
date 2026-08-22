@@ -5,18 +5,26 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.102"
+case_sim = { version = "0.1.0", path = "../case_sim" }
 core_types = { version = "0.1.0", path = "../core_types" }
+getrandom = "0.3"
 native_shell = { version = "0.1.0", path = "../native_shell" }
+network_protocol = { version = "0.1.0", path = "../network_protocol" }
 physics_core = { version = "0.1.0", path = "../physics_core" }
 pollster = "0.4.0"
 renderer = { version = "0.1.0", path = "../renderer" }
 scene_logic = { version = "0.1.0", path = "../scene_logic" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
+unicode-segmentation = "1.12"
 wgpu = "0.19.4"
 winit = "0.30.13"
 
 [target.'cfg(target_os = "windows")'.dependencies]
+image = { version = "0.25", default-features = false, features = ["gif", "png"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls-native-roots"] }
+spout2-rs = { version = "0.1.1", default-features = false, features = ["dx"] }
 windows = { version = "0.52.0", features = [
     "Win32_Foundation",
     "Win32_Graphics_Direct3D",
@@ -29,3 +37,6 @@ windows = { version = "0.52.0", features = [
     "Win32_System_LibraryLoader",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+[dev-dependencies]
+naga = { version = "0.19.2", features = ["wgsl-in"] }

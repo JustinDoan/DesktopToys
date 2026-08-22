@@ -1,8 +1,11 @@
 use std::{collections::HashMap, fs::File, io::BufReader, mem, path::Path, sync::OnceLock};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
+use case_sim::CaseSession;
 use core_types::{AppColor, ObjectState, ObjectVisualKind, RectF, ScreenShardGeometry, Vector2};
 use font8x8::UnicodeFonts;
+
+mod case_opening;
 use gltf::{
     animation::util::ReadOutputs,
     mesh::util::{ReadIndices, ReadJoints, ReadWeights},
@@ -52,7 +55,46 @@ pub struct RenderScene<'a> {
     pub window_capture_guide: Option<RectF>,
     pub cheer_portals: &'a [CheerPortalVisual],
     pub screen_labels: &'a [ScreenLabel],
+    pub chat_messages: &'a [ChatMessageVisual],
+    /// An in-flight case opening. Drawn above the scene and below the HUD, with
+    /// its own CPU-side camera and painter's-order blending.
+    pub case_opening: Option<CaseView<'a>>,
     pub hud: &'a HudState,
+}
+
+/// A case opening and the screen area it plays inside.
+#[derive(Clone, Copy)]
+pub struct CaseView<'a> {
+    pub session: &'a CaseSession,
+    /// Surface-local rectangle to centre the sequence on, normally the monitor
+    /// the stream captures. An empty rectangle falls back to the whole surface.
+    pub stage: RectF,
+}
+
+impl CaseView<'_> {
+    fn stage_or(&self, width: u32, height: u32) -> RectF {
+        if self.stage.width >= 1.0 && self.stage.height >= 1.0 {
+            self.stage
+        } else {
+            RectF::new(0.0, 0.0, width as f32, height as f32)
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ChatMessageVisual {
+    pub id: u64,
+    pub center: Vector2,
+    pub username: String,
+    pub message: String,
+    pub inline_image_slots: Vec<u16>,
+    pub username_color: AppColor,
+    pub pixel_size: f32,
+    pub opacity: f32,
+    pub scale: f32,
+    pub rotation_x: f64,
+    pub rotation_y: f64,
+    pub rotation_z: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -84,6 +126,7 @@ pub struct GpuVertex {
 pub struct SceneRenderer {
     generated_models: HashMap<MeshCacheKey, Mesh>,
     imported_models: HashMap<String, Mesh>,
+    chat_layouts: HashMap<u64, ChatGlyphLayout>,
     vertices: Vec<GpuVertex>,
 }
 
@@ -99,6 +142,27 @@ struct MeshCacheKey {
 #[derive(Clone, Debug)]
 struct Mesh {
     triangles: Vec<SourceTriangle>,
+}
+
+#[derive(Clone, Debug)]
+struct ChatGlyphLayout {
+    glyphs: Box<[ChatGlyph]>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ChatGlyph {
+    origin_x: f32,
+    origin_y: f32,
+    packed_rows: [u16; 4],
+    is_username: bool,
+    inline_image_slot: Option<u16>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ChatRotationBasis {
+    x: Vec3,
+    y: Vec3,
+    z: Vec3,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -256,9 +320,24 @@ impl Mat4 {
 
         Self {
             values: [
-                [(1.0 - (yy + zz)) * scale.x, (xy - wz) * scale.y, (xz + wy) * scale.z, translation.x],
-                [(xy + wz) * scale.x, (1.0 - (xx + zz)) * scale.y, (yz - wx) * scale.z, translation.y],
-                [(xz - wy) * scale.x, (yz + wx) * scale.y, (1.0 - (xx + yy)) * scale.z, translation.z],
+                [
+                    (1.0 - (yy + zz)) * scale.x,
+                    (xy - wz) * scale.y,
+                    (xz + wy) * scale.z,
+                    translation.x,
+                ],
+                [
+                    (xy + wz) * scale.x,
+                    (1.0 - (xx + zz)) * scale.y,
+                    (yz - wx) * scale.z,
+                    translation.y,
+                ],
+                [
+                    (xz - wy) * scale.x,
+                    (yz + wx) * scale.y,
+                    (1.0 - (xx + yy)) * scale.z,
+                    translation.z,
+                ],
                 [0.0, 0.0, 0.0, 1.0],
             ],
         }
@@ -279,9 +358,18 @@ impl Mat4 {
 
     fn transform_point(self, point: Vec3) -> Vec3 {
         Vec3::new(
-            self.values[0][0] * point.x + self.values[0][1] * point.y + self.values[0][2] * point.z + self.values[0][3],
-            self.values[1][0] * point.x + self.values[1][1] * point.y + self.values[1][2] * point.z + self.values[1][3],
-            self.values[2][0] * point.x + self.values[2][1] * point.y + self.values[2][2] * point.z + self.values[2][3],
+            self.values[0][0] * point.x
+                + self.values[0][1] * point.y
+                + self.values[0][2] * point.z
+                + self.values[0][3],
+            self.values[1][0] * point.x
+                + self.values[1][1] * point.y
+                + self.values[1][2] * point.z
+                + self.values[1][3],
+            self.values[2][0] * point.x
+                + self.values[2][1] * point.y
+                + self.values[2][2] * point.z
+                + self.values[2][3],
         )
     }
 }
@@ -300,7 +388,12 @@ impl Quat {
         if length <= f32::EPSILON {
             return Self::identity();
         }
-        Self::new(self.x / length, self.y / length, self.z / length, self.w / length)
+        Self::new(
+            self.x / length,
+            self.y / length,
+            self.z / length,
+            self.w / length,
+        )
     }
 
     fn slerp(self, mut rhs: Self, t: f32) -> Self {
@@ -343,6 +436,7 @@ struct VisualTransform {
     rotation_z: f64,
     scale_x: f32,
     scale_y: f32,
+    scale_z: f32,
 }
 
 impl SceneRenderer {
@@ -350,7 +444,12 @@ impl SceneRenderer {
         Self::default()
     }
 
-    pub fn build_vertices(&mut self, width: u32, height: u32, scene: &RenderScene<'_>) -> Result<&[GpuVertex]> {
+    pub fn build_vertices(
+        &mut self,
+        width: u32,
+        height: u32,
+        scene: &RenderScene<'_>,
+    ) -> Result<&[GpuVertex]> {
         let mut vertices = mem::take(&mut self.vertices);
         vertices.clear();
         vertices.reserve(
@@ -372,9 +471,13 @@ impl SceneRenderer {
             if !object.is_visible {
                 continue;
             }
+            if object.visual_kind == ObjectVisualKind::Text {
+                continue;
+            }
             if object.visual_kind == ObjectVisualKind::ScreenShard {
                 if let Some(shard) = &object.screen_shard {
-                    let transform = compute_visual_transform(object, scene.bounds, scene.elapsed_seconds);
+                    let transform =
+                        compute_visual_transform(object, scene.bounds, scene.elapsed_seconds);
                     emit_screen_shard(&mut vertices, shard, transform);
                 }
                 continue;
@@ -386,11 +489,16 @@ impl SceneRenderer {
                     scene.elapsed_seconds,
                     object.body.velocity,
                 );
-                let transform = compute_visual_transform(object, scene.bounds, scene.elapsed_seconds);
+                let transform =
+                    compute_visual_transform(object, scene.bounds, scene.elapsed_seconds);
                 for triangle in &mesh.triangles {
                     emit_draw_triangle(
                         &mut vertices,
-                        transform_triangle(*triangle, transform, scene.elapsed_seconds),
+                        transform_triangle(
+                            with_opacity(*triangle, object.visual_opacity),
+                            transform,
+                            scene.elapsed_seconds,
+                        ),
                     );
                 }
                 continue;
@@ -398,19 +506,33 @@ impl SceneRenderer {
 
             if is_shader_sphere(object.visual_kind) {
                 let mesh = self.mesh_for_object(object)?;
-                let transform = compute_visual_transform(object, scene.bounds, scene.elapsed_seconds);
+                let transform =
+                    compute_visual_transform(object, scene.bounds, scene.elapsed_seconds);
                 let material_id = shader_sphere_material_id(object.visual_kind);
                 for triangle in &mesh.triangles {
-                    emit_shader_sphere_triangle(&mut vertices, *triangle, transform, material_id, scene.elapsed_seconds as f32);
+                    emit_shader_sphere_triangle(
+                        &mut vertices,
+                        with_opacity(*triangle, object.visual_opacity),
+                        transform,
+                        material_id,
+                        scene.elapsed_seconds as f32,
+                    );
                 }
                 continue;
             }
 
             if is_shader_cube(object.visual_kind) {
                 let mesh = self.mesh_for_object(object)?;
-                let transform = compute_visual_transform(object, scene.bounds, scene.elapsed_seconds);
+                let transform =
+                    compute_visual_transform(object, scene.bounds, scene.elapsed_seconds);
                 for triangle in &mesh.triangles {
-                    emit_shader_cube_triangle(&mut vertices, *triangle, transform, 6.0, scene.elapsed_seconds as f32);
+                    emit_shader_cube_triangle(
+                        &mut vertices,
+                        with_opacity(*triangle, object.visual_opacity),
+                        transform,
+                        6.0,
+                        scene.elapsed_seconds as f32,
+                    );
                 }
                 continue;
             }
@@ -420,9 +542,61 @@ impl SceneRenderer {
             for triangle in &mesh.triangles {
                 emit_draw_triangle(
                     &mut vertices,
-                    transform_triangle(*triangle, transform, scene.elapsed_seconds),
+                    transform_triangle(
+                        with_opacity(*triangle, object.visual_opacity),
+                        transform,
+                        scene.elapsed_seconds,
+                    ),
                 );
             }
+        }
+
+        self.chat_layouts.retain(|id, _| {
+            scene.chat_messages.iter().any(|message| message.id == *id)
+                || scene.objects.iter().any(|object| {
+                    object.visual_kind == ObjectVisualKind::Text
+                        && text_object_layout_id(object.id) == *id
+                })
+        });
+        for message in scene.chat_messages {
+            let layout = self
+                .chat_layouts
+                .entry(message.id)
+                .or_insert_with(|| chat_message_layout(message));
+            vertices.reserve(layout.glyphs.len() * CHAT_VERTICES_PER_GLYPH);
+            emit_chat_message_3d(&mut vertices, message, layout, false);
+        }
+        for object in scene
+            .objects
+            .iter()
+            .filter(|object| object.is_visible && object.visual_kind == ObjectVisualKind::Text)
+        {
+            let message = ChatMessageVisual {
+                id: text_object_layout_id(object.id),
+                center: Vector2::new(
+                    object.body.position.x + object.body.width * 0.5,
+                    object.body.position.y + object.body.height * 0.5,
+                ),
+                username: String::new(),
+                message: object
+                    .custom_text
+                    .clone()
+                    .unwrap_or_else(|| "Text".to_string()),
+                inline_image_slots: Vec::new(),
+                username_color: object.base_color,
+                pixel_size: 2.5 * (object.body.height / 72.0).clamp(0.5, 3.0),
+                opacity: object.visual_opacity,
+                scale: object.visual_scale,
+                rotation_x: object.rotation_x,
+                rotation_y: object.rotation_y,
+                rotation_z: object.rotation_z,
+            };
+            let layout = self
+                .chat_layouts
+                .entry(message.id)
+                .or_insert_with(|| chat_message_layout(&message));
+            vertices.reserve(layout.glyphs.len() * CHAT_VERTICES_PER_GLYPH);
+            emit_chat_message_3d(&mut vertices, &message, layout, true);
         }
 
         emit_sand(&mut vertices, width, height, scene.sand_cells);
@@ -492,6 +666,11 @@ impl SceneRenderer {
                 0.004,
             );
         }
+        if let Some(view) = scene.case_opening {
+            let stage = view.stage_or(width, height);
+            case_opening::emit_case_opening(&mut vertices, stage, view.session);
+        }
+
         emit_panels(&mut vertices, width, height, scene.hud);
         self.vertices = vertices;
         Ok(&self.vertices)
@@ -502,53 +681,114 @@ impl SceneRenderer {
         if object.visual_kind == ObjectVisualKind::ImportedModel {
             return match object.model_source_path.as_deref() {
                 Some(path) => self.imported_model_mesh(path, size, object.base_color),
-                None => self.generated_mesh(MeshCacheKey::for_object(object), || cube_mesh(size, object.base_color)),
+                None => self.generated_mesh(MeshCacheKey::for_object(object), || {
+                    cube_mesh(size, object.base_color)
+                }),
             };
         }
 
         let key = MeshCacheKey::for_object(object);
         match object.visual_kind {
-            ObjectVisualKind::Cube => self.generated_mesh(key, || cube_mesh(size, object.base_color)),
+            ObjectVisualKind::Cube => {
+                self.generated_mesh(key, || cube_mesh(size, object.base_color))
+            }
             ObjectVisualKind::Dice => self.generated_mesh(key, || dice_mesh(size)),
-            ObjectVisualKind::Crystal => self.generated_mesh(key, || crystal_mesh(size, object.base_color)),
-            ObjectVisualKind::BitCrystal => self.generated_mesh(key, || bit_crystal_mesh(size, object.base_color)),
-            ObjectVisualKind::Satellite => self.generated_mesh(key, || satellite_mesh(size, object.base_color)),
-            ObjectVisualKind::Ball => self.generated_mesh(key, || ball_mesh(size, object.base_color)),
-            ObjectVisualKind::SoftBall => self.generated_mesh(key, || soft_ball_mesh(size, object.base_color)),
-            ObjectVisualKind::GlassMarble => self.generated_mesh(key, || glass_marble_mesh(size, object.base_color)),
-            ObjectVisualKind::PlasmaOrb => self.generated_mesh(key, || glass_marble_mesh(size, object.base_color)),
-            ObjectVisualKind::PortalOrb => self.generated_mesh(key, || glass_marble_mesh(size, object.base_color)),
-            ObjectVisualKind::SoapBubble => self.generated_mesh(key, || glass_marble_mesh(size, object.base_color)),
-            ObjectVisualKind::ForcefieldOrb => self.generated_mesh(key, || glass_marble_mesh(size, object.base_color)),
-            ObjectVisualKind::RaymarchCube => self.generated_mesh(key, || cube_mesh(size, object.base_color)),
-            ObjectVisualKind::Pyramid => self.generated_mesh(key, || pyramid_mesh(size, object.base_color)),
-            ObjectVisualKind::Barrel => self.generated_mesh(key, || barrel_mesh(size, object.base_color)),
-            ObjectVisualKind::Ring => self.generated_mesh(key, || ring_mesh(size, object.base_color)),
-            ObjectVisualKind::Star => self.generated_mesh(key, || star_mesh(size, object.base_color)),
+            ObjectVisualKind::Crystal => {
+                self.generated_mesh(key, || crystal_mesh(size, object.base_color))
+            }
+            ObjectVisualKind::BitCrystal => {
+                self.generated_mesh(key, || bit_crystal_mesh(size, object.base_color))
+            }
+            ObjectVisualKind::Satellite => {
+                self.generated_mesh(key, || satellite_mesh(size, object.base_color))
+            }
+            ObjectVisualKind::Ball => {
+                self.generated_mesh(key, || ball_mesh(size, object.base_color))
+            }
+            ObjectVisualKind::SoftBall => {
+                self.generated_mesh(key, || soft_ball_mesh(size, object.base_color))
+            }
+            ObjectVisualKind::GlassMarble => {
+                self.generated_mesh(key, || glass_marble_mesh(size, object.base_color))
+            }
+            ObjectVisualKind::PlasmaOrb => {
+                self.generated_mesh(key, || glass_marble_mesh(size, object.base_color))
+            }
+            ObjectVisualKind::PortalOrb => {
+                self.generated_mesh(key, || glass_marble_mesh(size, object.base_color))
+            }
+            ObjectVisualKind::SoapBubble => {
+                self.generated_mesh(key, || glass_marble_mesh(size, object.base_color))
+            }
+            ObjectVisualKind::ForcefieldOrb => {
+                self.generated_mesh(key, || glass_marble_mesh(size, object.base_color))
+            }
+            ObjectVisualKind::RaymarchCube => {
+                self.generated_mesh(key, || cube_mesh(size, object.base_color))
+            }
+            ObjectVisualKind::Pyramid => {
+                self.generated_mesh(key, || pyramid_mesh(size, object.base_color))
+            }
+            ObjectVisualKind::Barrel => {
+                self.generated_mesh(key, || barrel_mesh(size, object.base_color))
+            }
+            ObjectVisualKind::Ring => {
+                self.generated_mesh(key, || ring_mesh(size, object.base_color))
+            }
+            ObjectVisualKind::Star => {
+                self.generated_mesh(key, || star_mesh(size, object.base_color))
+            }
             ObjectVisualKind::GamePlank => self.generated_mesh(key, || {
-                rectangular_prism_mesh(object.body.width.max(1.0), object.body.height.max(1.0), size * 0.42, object.base_color)
+                rectangular_prism_mesh(
+                    object.body.width.max(1.0),
+                    object.body.height.max(1.0),
+                    size * 0.42,
+                    object.base_color,
+                )
             }),
-            ObjectVisualKind::GameTarget => self.generated_mesh(key, || target_mesh(size, object.base_color)),
+            ObjectVisualKind::GameTarget => {
+                self.generated_mesh(key, || target_mesh(size, object.base_color))
+            }
             ObjectVisualKind::FoxBuddy => self.generated_mesh(key, || fox_buddy_mesh(size)),
-            ObjectVisualKind::RobotBuddy => self.generated_mesh(key, || robot_buddy_mesh(size, object.base_color)),
-            ObjectVisualKind::Snail => self.generated_mesh(key, || snail_mesh(size, object.base_color)),
+            ObjectVisualKind::RobotBuddy => {
+                self.generated_mesh(key, || robot_buddy_mesh(size, object.base_color))
+            }
+            ObjectVisualKind::Snail => {
+                self.generated_mesh(key, || snail_mesh(size, object.base_color))
+            }
             ObjectVisualKind::Fan => self.generated_mesh(key, || fan_mesh(size, object.base_color)),
-            ObjectVisualKind::QuadDrone => self.generated_mesh(key, || quad_drone_mesh(size, object.base_color)),
+            ObjectVisualKind::QuadDrone => {
+                self.generated_mesh(key, || quad_drone_mesh(size, object.base_color))
+            }
             ObjectVisualKind::Basketball => self.generated_mesh(key, || basketball_mesh(size)),
             ObjectVisualKind::BasketballHoop => self.generated_mesh(key, || {
                 basketball_hoop_mesh(object.body.width.max(1.0), object.body.height.max(1.0))
             }),
+            ObjectVisualKind::Text => unreachable!("text objects use the glyph renderer"),
             ObjectVisualKind::ScreenShard => self.generated_mesh(key, || {
-                rectangular_prism_mesh(object.body.width.max(1.0), object.body.height.max(1.0), 18.0, object.base_color)
+                rectangular_prism_mesh(
+                    object.body.width.max(1.0),
+                    object.body.height.max(1.0),
+                    18.0,
+                    object.base_color,
+                )
             }),
             ObjectVisualKind::DvdLogo => self.generated_mesh(key, || {
-                dvd_logo_mesh(object.body.width.max(1.0), object.body.height.max(1.0), object.base_color)
+                dvd_logo_mesh(
+                    object.body.width.max(1.0),
+                    object.body.height.max(1.0),
+                    object.base_color,
+                )
             }),
             ObjectVisualKind::ImportedModel => unreachable!(),
         }
     }
 
-    fn generated_mesh(&mut self, key: MeshCacheKey, create: impl FnOnce() -> Mesh) -> Result<&Mesh> {
+    fn generated_mesh(
+        &mut self,
+        key: MeshCacheKey,
+        create: impl FnOnce() -> Mesh,
+    ) -> Result<&Mesh> {
         if !self.generated_models.contains_key(&key) {
             self.generated_models.insert(key, create());
         }
@@ -559,14 +799,20 @@ impl SceneRenderer {
             .expect("generated mesh cache should contain inserted key"))
     }
 
-    fn imported_model_mesh(&mut self, path: &str, target_size: f32, tint: AppColor) -> Result<&Mesh> {
+    fn imported_model_mesh(
+        &mut self,
+        path: &str,
+        target_size: f32,
+        tint: AppColor,
+    ) -> Result<&Mesh> {
         let cache_key = format!(
             "{path}|{target_size:.3}|{:02x}{:02x}{:02x}{:02x}",
             tint.a, tint.r, tint.g, tint.b
         );
         if !self.imported_models.contains_key(&cache_key) {
             let imported = load_mesh(path, target_size)?;
-            self.imported_models.insert(cache_key.clone(), tint_mesh(imported, tint));
+            self.imported_models
+                .insert(cache_key.clone(), tint_mesh(imported, tint));
         }
 
         Ok(self
@@ -610,6 +856,7 @@ impl MeshCacheKey {
                 ObjectVisualKind::BasketballHoop => 26,
                 ObjectVisualKind::ScreenShard => 27,
                 ObjectVisualKind::BitCrystal => 28,
+                ObjectVisualKind::Text => 29,
             },
             width_milli: quantize_size(object.body.width.max(1.0)),
             height_milli: quantize_size(object.body.height.max(1.0)),
@@ -617,6 +864,10 @@ impl MeshCacheKey {
             color: object.base_color,
         }
     }
+}
+
+fn text_object_layout_id(object_id: u64) -> u64 {
+    object_id | (1_u64 << 63)
 }
 
 fn is_shader_sphere(visual_kind: ObjectVisualKind) -> bool {
@@ -661,7 +912,16 @@ fn emit_panels(vertices: &mut Vec<GpuVertex>, width: u32, height: u32, hud: &Hud
     let _ = &hud.status_message;
 
     for panel in &hud.panels {
-        emit_panel(vertices, width, height, 12, top, &panel.title, &panel.lines, &panel.footer);
+        emit_panel(
+            vertices,
+            width,
+            height,
+            12,
+            top,
+            &panel.title,
+            &panel.lines,
+            &panel.footer,
+        );
         top += ((panel.lines.len() + panel.footer.len() + 2) as i32 * 12).max(72) + 10;
     }
 
@@ -672,7 +932,17 @@ fn emit_panels(vertices: &mut Vec<GpuVertex>, width: u32, height: u32, hud: &Hud
 
 fn emit_sand(vertices: &mut Vec<GpuVertex>, width: u32, height: u32, cells: &[SandRenderCell]) {
     for cell in cells {
-        emit_rect(vertices, width, height, cell.x, cell.y, cell.width, cell.height, cell.color, 0.028);
+        emit_rect(
+            vertices,
+            width,
+            height,
+            cell.x,
+            cell.y,
+            cell.width,
+            cell.height,
+            cell.color,
+            0.028,
+        );
     }
 }
 
@@ -849,7 +1119,9 @@ fn emit_shader_sphere_triangle(
     material_id: f32,
     elapsed_seconds: f32,
 ) {
-    let points = triangle.vertices.map(|vertex| project_vertex(vertex, transform));
+    let points = triangle
+        .vertices
+        .map(|vertex| project_vertex(vertex, transform));
     let color = color_to_f32(triangle.color, triangle.alpha);
     for (index, point) in points.into_iter().enumerate() {
         let marble_point = triangle.vertices[index].normalized();
@@ -870,7 +1142,9 @@ fn emit_shader_cube_triangle(
     material_id: f32,
     elapsed_seconds: f32,
 ) {
-    let points = triangle.vertices.map(|vertex| project_vertex(vertex, transform));
+    let points = triangle
+        .vertices
+        .map(|vertex| project_vertex(vertex, transform));
     let color = color_to_f32(triangle.color, triangle.alpha);
     let edge_a = Vec3::new(
         triangle.vertices[1].x - triangle.vertices[0].x,
@@ -940,7 +1214,11 @@ fn emit_center_message(vertices: &mut Vec<GpuVertex>, width: u32, height: u32, m
 
 const SCREEN_SHARD_MATERIAL_ID: f32 = 7.0;
 
-fn emit_screen_shard(vertices: &mut Vec<GpuVertex>, shard: &ScreenShardGeometry, transform: VisualTransform) {
+fn emit_screen_shard(
+    vertices: &mut Vec<GpuVertex>,
+    shard: &ScreenShardGeometry,
+    transform: VisualTransform,
+) {
     let point_count = shard.local_points.len().min(shard.texture_uvs.len());
     if point_count < 3 {
         return;
@@ -1186,6 +1464,282 @@ fn emit_text(
     }
 }
 
+const CHAT_TEXT_MATERIAL_ID: f32 = 8.0;
+const CHAT_VERTICES_PER_GLYPH: usize = 6;
+const CHAT_GLYPH_OUTLINE_CELLS: f32 = 0.42;
+const CHAT_GLYPH_DEPTH_CELLS: f32 = 4.6;
+
+fn emit_chat_message_3d(
+    vertices: &mut Vec<GpuVertex>,
+    message: &ChatMessageVisual,
+    layout: &ChatGlyphLayout,
+    emphasize_depth: bool,
+) {
+    if message.opacity <= 0.0 || message.scale <= 0.0 || layout.glyphs.is_empty() {
+        return;
+    }
+
+    let rotation = ChatRotationBasis::from_euler(
+        message.rotation_x as f32,
+        message.rotation_y as f32,
+        message.rotation_z as f32,
+    );
+    let pixel_scale = message.pixel_size.max(1.0) * message.scale;
+    let center = Vec3::new(message.center.x, message.center.y, 58.0);
+    let basis_x = scale_vec3(rotation.x, pixel_scale);
+    let basis_y = scale_vec3(rotation.y, pixel_scale);
+    let mut extrusion = Vector2::new(
+        -rotation.z.x * CHAT_GLYPH_DEPTH_CELLS,
+        -rotation.z.y * CHAT_GLYPH_DEPTH_CELLS,
+    );
+    if emphasize_depth {
+        let front_facing = rotation.z.z.abs();
+        extrusion.x += 2.8 * front_facing;
+        extrusion.y += 3.4 * front_facing;
+    }
+    let packed_extrusion = pack_chat_extrusion(extrusion);
+    let alpha = (message.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let username_color = apply_directional_light(message.username_color, rotation.z);
+    let message_color = apply_directional_light(AppColor::from_rgb(248, 248, 252), rotation.z);
+
+    for glyph in &layout.glyphs {
+        let glyph_origin =
+            chat_vertex_position(center, basis_x, basis_y, glyph.origin_x, glyph.origin_y);
+        if let Some(slot) = glyph.inline_image_slot {
+            emit_chat_image_quad(vertices, glyph_origin, basis_x, basis_y, slot, alpha);
+            continue;
+        }
+        emit_chat_glyph_quad(
+            vertices,
+            glyph_origin,
+            basis_x,
+            basis_y,
+            extrusion,
+            packed_extrusion,
+            glyph.packed_rows,
+            if glyph.is_username {
+                username_color
+            } else {
+                message_color
+            },
+            alpha,
+        );
+    }
+}
+
+fn chat_message_layout(message: &ChatMessageVisual) -> ChatGlyphLayout {
+    let message_lines = message.message.lines().collect::<Vec<_>>();
+    let line_count = message_lines.len().max(1) + 1;
+    let widest_line = message.username.chars().count().max(
+        message_lines
+            .iter()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or(0),
+    ) as f32;
+    let origin_x = -widest_line * 4.0;
+    let origin_y = -(line_count as f32 * 9.0) * 0.5 + 0.5;
+    let mut glyphs = Vec::with_capacity(message.username.len() + message.message.len());
+    let mut no_images = std::iter::empty();
+    append_chat_glyph_layout(
+        &mut glyphs,
+        &message.username,
+        origin_x,
+        origin_y,
+        true,
+        &mut no_images,
+    );
+    let mut image_slots = message.inline_image_slots.iter().copied();
+    for (line_index, line) in message_lines.iter().enumerate() {
+        append_chat_glyph_layout(
+            &mut glyphs,
+            line,
+            origin_x,
+            origin_y + (line_index + 1) as f32 * 9.0,
+            false,
+            &mut image_slots,
+        );
+    }
+    ChatGlyphLayout {
+        glyphs: glyphs.into_boxed_slice(),
+    }
+}
+
+fn append_chat_glyph_layout(
+    glyphs: &mut Vec<ChatGlyph>,
+    text: &str,
+    origin_x: f32,
+    origin_y: f32,
+    is_username: bool,
+    image_slots: &mut impl Iterator<Item = u16>,
+) {
+    for (character_index, character) in text.chars().enumerate() {
+        if character == '\u{fffc}' {
+            if let Some(slot) = image_slots.next() {
+                glyphs.push(ChatGlyph {
+                    origin_x: origin_x + character_index as f32 * 8.0,
+                    origin_y,
+                    packed_rows: [0; 4],
+                    is_username: false,
+                    inline_image_slot: Some(slot),
+                });
+            }
+            continue;
+        }
+        let Some(rows) = font8x8::BASIC_FONTS.get(character) else {
+            continue;
+        };
+        if rows.iter().all(|row| *row == 0) {
+            continue;
+        }
+        glyphs.push(ChatGlyph {
+            origin_x: origin_x + character_index as f32 * 8.0,
+            origin_y,
+            packed_rows: [
+                rows[0] as u16 | ((rows[1] as u16) << 8),
+                rows[2] as u16 | ((rows[3] as u16) << 8),
+                rows[4] as u16 | ((rows[5] as u16) << 8),
+                rows[6] as u16 | ((rows[7] as u16) << 8),
+            ],
+            is_username,
+            inline_image_slot: None,
+        });
+    }
+}
+
+const CHAT_IMAGE_MATERIAL_ID: f32 = 9.0;
+const CHAT_IMAGE_ATLAS_COLUMNS: u16 = 16;
+const CHAT_IMAGE_SIZE_CELLS: f32 = 12.0;
+
+fn emit_chat_image_quad(
+    vertices: &mut Vec<GpuVertex>,
+    origin: Vec3,
+    basis_x: Vec3,
+    basis_y: Vec3,
+    slot: u16,
+    alpha: u8,
+) {
+    let inset = (CHAT_IMAGE_SIZE_CELLS - 8.0) * 0.5;
+    let positions = [
+        (-inset, -inset),
+        (8.0 + inset, -inset),
+        (8.0 + inset, 8.0 + inset),
+        (-inset, 8.0 + inset),
+    ];
+    let column = slot % CHAT_IMAGE_ATLAS_COLUMNS;
+    let row = slot / CHAT_IMAGE_ATLAS_COLUMNS;
+    let cell = 1.0 / CHAT_IMAGE_ATLAS_COLUMNS as f32;
+    let half_texel = 0.5 / (CHAT_IMAGE_ATLAS_COLUMNS as f32 * 64.0);
+    let uvs = [
+        (
+            column as f32 * cell + half_texel,
+            row as f32 * cell + half_texel,
+        ),
+        (
+            (column + 1) as f32 * cell - half_texel,
+            row as f32 * cell + half_texel,
+        ),
+        (
+            (column + 1) as f32 * cell - half_texel,
+            (row + 1) as f32 * cell - half_texel,
+        ),
+        (
+            column as f32 * cell + half_texel,
+            (row + 1) as f32 * cell - half_texel,
+        ),
+    ];
+    for index in [0usize, 1, 2, 0, 2, 3] {
+        let (x, y) = positions[index];
+        let point = chat_vertex_position(origin, basis_x, basis_y, x, y);
+        vertices.push(GpuVertex {
+            position: [point.x, point.y, point.z],
+            color: color_to_f32(AppColor::from_rgb(255, 255, 255), alpha),
+            material: [CHAT_IMAGE_MATERIAL_ID, uvs[index].0, uvs[index].1, 0.0],
+            material_extra: [0.0; 4],
+        });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_chat_glyph_quad(
+    vertices: &mut Vec<GpuVertex>,
+    origin: Vec3,
+    basis_x: Vec3,
+    basis_y: Vec3,
+    extrusion: Vector2,
+    packed_extrusion: f32,
+    packed_rows: [u16; 4],
+    color: AppColor,
+    alpha: u8,
+) {
+    let min_x = -CHAT_GLYPH_OUTLINE_CELLS + extrusion.x.min(0.0);
+    let min_y = -CHAT_GLYPH_OUTLINE_CELLS + extrusion.y.min(0.0);
+    let max_x = 8.0 + CHAT_GLYPH_OUTLINE_CELLS + extrusion.x.max(0.0);
+    let max_y = 8.0 + CHAT_GLYPH_OUTLINE_CELLS + extrusion.y.max(0.0);
+    let corners = [
+        (min_x, min_y),
+        (max_x, min_y),
+        (max_x, max_y),
+        (min_x, max_y),
+    ];
+    let positions = corners.map(|(x, y)| chat_vertex_position(origin, basis_x, basis_y, x, y));
+    let color = color_to_f32(color, alpha);
+    let packed_rows = packed_rows.map(|rows| rows as f32);
+    for index in [0usize, 1, 2, 0, 2, 3] {
+        let (glyph_x, glyph_y) = corners[index];
+        let point = positions[index];
+        vertices.push(GpuVertex {
+            position: [point.x, point.y, point.z],
+            color,
+            material: [
+                CHAT_TEXT_MATERIAL_ID,
+                packed_rows[0],
+                packed_rows[1],
+                packed_rows[2],
+            ],
+            material_extra: [packed_rows[3], glyph_x, glyph_y, packed_extrusion],
+        });
+    }
+}
+
+fn chat_vertex_position(origin: Vec3, basis_x: Vec3, basis_y: Vec3, x: f32, y: f32) -> Vec3 {
+    Vec3::new(
+        origin.x + basis_x.x * x + basis_y.x * y,
+        origin.y + basis_x.y * x + basis_y.y * y,
+        origin.z + basis_x.z * x + basis_y.z * y,
+    )
+}
+
+fn scale_vec3(vector: Vec3, scale: f32) -> Vec3 {
+    Vec3::new(vector.x * scale, vector.y * scale, vector.z * scale)
+}
+
+fn pack_chat_extrusion(extrusion: Vector2) -> f32 {
+    let encode = |value: f32| ((value.clamp(-7.5, 7.5) * 16.0).round() as i16 + 128) as u16;
+    (encode(extrusion.x) | (encode(extrusion.y) << 8)) as f32
+}
+
+impl ChatRotationBasis {
+    fn from_euler(rotation_x: f32, rotation_y: f32, rotation_z: f32) -> Self {
+        let (sin_x, cos_x) = rotation_x.to_radians().sin_cos();
+        let (sin_y, cos_y) = rotation_y.to_radians().sin_cos();
+        let (sin_z, cos_z) = rotation_z.to_radians().sin_cos();
+        Self {
+            x: Vec3::new(cos_z * cos_y, sin_z * cos_y, -sin_y),
+            y: Vec3::new(
+                cos_z * sin_y * sin_x - sin_z * cos_x,
+                sin_z * sin_y * sin_x + cos_z * cos_x,
+                cos_y * sin_x,
+            ),
+            z: Vec3::new(
+                cos_z * sin_y * cos_x + sin_z * sin_x,
+                sin_z * sin_y * cos_x - cos_z * sin_x,
+                cos_y * cos_x,
+            ),
+        }
+    }
+}
+
 fn color_to_f32(color: AppColor, alpha_override: u8) -> [f32; 4] {
     [
         color.r as f32 / 255.0,
@@ -1195,15 +1749,20 @@ fn color_to_f32(color: AppColor, alpha_override: u8) -> [f32; 4] {
     ]
 }
 
-fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds: f64) -> VisualTransform {
+fn compute_visual_transform(
+    object: &ObjectState,
+    bounds: RectF,
+    elapsed_seconds: f64,
+) -> VisualTransform {
     let center_x = object.body.position.x + (object.body.width * 0.5);
     let center_y = object.body.position.y + (object.body.height * 0.5);
     let mut center_z = 0.0f32;
     let mut rotation_x = object.rotation_x;
     let mut rotation_y = object.rotation_y;
     let mut rotation_z = object.rotation_z;
-    let mut scale_x = compute_stretch_x(object);
-    let mut scale_y = compute_impact_scale(object, bounds);
+    let visual_scale = object.visual_scale.max(0.0);
+    let mut scale_x = compute_stretch_x(object) * visual_scale;
+    let mut scale_y = compute_impact_scale(object, bounds) * visual_scale;
     let phase = get_phase(object.id);
 
     match object.visual_kind {
@@ -1213,23 +1772,23 @@ fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds
             scale_x *= 1.0 + (shimmer as f32 * 0.035);
             scale_y *= 1.0 + (((elapsed_seconds * 3.1) + phase).cos() as f32 * 0.055);
             rotation_y += ((elapsed_seconds * 1.1) + phase).sin() * 7.0;
-        },
+        }
         ObjectVisualKind::BitCrystal => {
             center_z += 12.0;
             rotation_y += ((elapsed_seconds * 0.9) + phase).sin() * 4.0;
-        },
+        }
         ObjectVisualKind::Satellite => {
             let wobble = ((elapsed_seconds * 2.2) + phase).sin();
             center_z += 30.0 + (wobble as f32 * 7.0);
             rotation_z += wobble * 11.0;
             rotation_y += ((elapsed_seconds * 1.4) + phase).cos() * 9.0;
-        },
+        }
         ObjectVisualKind::Dice => {
             center_z += 8.0;
-        },
+        }
         ObjectVisualKind::Ball => {
             center_z += 10.0;
-        },
+        }
         ObjectVisualKind::SoftBall => {
             let speed = object.body.velocity.length_squared().sqrt();
             let wobble = ((elapsed_seconds * 10.5) + phase).sin() as f32;
@@ -1239,7 +1798,7 @@ fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds
             scale_x *= 1.0 + stretch * 0.13 + impact * 0.18 + wobble * 0.025;
             scale_y *= 1.0 - stretch * 0.05 - impact * 0.22 - wobble * 0.018;
             rotation_z += (object.body.velocity.x as f64 * 0.012).clamp(-8.0, 8.0);
-        },
+        }
         ObjectVisualKind::GlassMarble
         | ObjectVisualKind::PlasmaOrb
         | ObjectVisualKind::PortalOrb
@@ -1248,30 +1807,30 @@ fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds
             center_z += 12.0;
             rotation_z += object.body.velocity.x as f64 * 0.009;
             rotation_x += object.body.velocity.y as f64 * 0.004;
-        },
+        }
         ObjectVisualKind::RaymarchCube => {
             center_z += 8.0;
-        },
+        }
         ObjectVisualKind::Pyramid => {
             center_z += 6.0;
-        },
+        }
         ObjectVisualKind::Barrel => {
             center_z += 8.0;
-        },
+        }
         ObjectVisualKind::Ring => {
             center_z += 14.0;
             rotation_y += ((elapsed_seconds * 0.8) + phase).sin() * 6.0;
-        },
+        }
         ObjectVisualKind::Star => {
             center_z += 12.0;
             rotation_z += ((elapsed_seconds * 1.2) + phase).sin() * 5.0;
-        },
+        }
         ObjectVisualKind::GamePlank => {
             center_z += 4.0;
-        },
+        }
         ObjectVisualKind::GameTarget => {
             center_z += 12.0;
-        },
+        }
         ObjectVisualKind::FoxBuddy => {
             center_z += 18.0;
             let facing_velocity = if object.body.motor_enabled {
@@ -1282,7 +1841,7 @@ fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds
             if facing_velocity > 1.0 {
                 scale_x *= -1.0;
             }
-        },
+        }
         ObjectVisualKind::RobotBuddy => {
             center_z += 14.0;
             let facing_velocity = if object.body.motor_enabled {
@@ -1294,23 +1853,28 @@ fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds
                 scale_x *= -1.0;
             }
             rotation_z += (object.body.velocity.x as f64 * 0.01).clamp(-4.0, 4.0);
-        },
+        }
         ObjectVisualKind::Snail => {
             let speed_sq = object.body.velocity.length_squared();
             if speed_sq > 1.0 {
-                rotation_z += object.body.velocity.y.atan2(object.body.velocity.x).to_degrees() as f64;
+                rotation_z += object
+                    .body
+                    .velocity
+                    .y
+                    .atan2(object.body.velocity.x)
+                    .to_degrees() as f64;
             }
             let crawl = ((elapsed_seconds * 5.2) + phase).sin() as f32;
             center_z += 8.0 + crawl * 1.8;
             scale_x *= 1.0 + crawl * 0.018;
             scale_y *= 1.0 - crawl * 0.012;
-        },
+        }
         ObjectVisualKind::Fan => {
             let pulse = ((elapsed_seconds * 8.0) + phase).sin() as f32;
             center_z += 15.0 + pulse.max(0.0) * 2.0;
             scale_x *= 1.0 + pulse * 0.01;
             scale_y *= 1.0 - pulse * 0.006;
-        },
+        }
         ObjectVisualKind::QuadDrone => {
             let hover = ((elapsed_seconds * 4.2) + phase).sin() as f32;
             center_z += 38.0 + hover * 5.0;
@@ -1320,17 +1884,18 @@ fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds
             rotation_x += (object.body.velocity.y as f64 * 0.025).clamp(-9.0, 9.0);
             rotation_y += (-object.body.velocity.x as f64 * 0.035).clamp(-10.0, 10.0);
             rotation_z += (object.body.velocity.x as f64 * 0.012).clamp(-3.5, 3.5);
-        },
+        }
         ObjectVisualKind::ImportedModel => {
             center_z += 12.0;
-        },
+        }
         ObjectVisualKind::Basketball => {
             center_z += 10.0;
-        },
-        ObjectVisualKind::BasketballHoop => {},
-        ObjectVisualKind::ScreenShard => {},
-        ObjectVisualKind::DvdLogo => {},
-        ObjectVisualKind::Cube => {},
+        }
+        ObjectVisualKind::BasketballHoop => {}
+        ObjectVisualKind::Text => {}
+        ObjectVisualKind::ScreenShard => {}
+        ObjectVisualKind::DvdLogo => {}
+        ObjectVisualKind::Cube => {}
     }
 
     center_z += object.depth_z;
@@ -1344,11 +1909,14 @@ fn compute_visual_transform(object: &ObjectState, bounds: RectF, elapsed_seconds
         rotation_z,
         scale_x,
         scale_y,
+        scale_z: visual_scale,
     }
 }
 
 fn compute_impact_scale(object: &ObjectState, bounds: RectF) -> f32 {
-    if object.body.position.y + object.body.height >= bounds.bottom() - 1.0 && object.body.velocity.y.abs() > 300.0 {
+    if object.body.position.y + object.body.height >= bounds.bottom() - 1.0
+        && object.body.velocity.y.abs() > 300.0
+    {
         0.96
     } else {
         1.0
@@ -1371,9 +1939,20 @@ fn get_phase(id: u64) -> f64 {
     ((id as u32 as f64) / u32::MAX as f64) * std::f64::consts::TAU
 }
 
-fn transform_triangle(source: SourceTriangle, transform: VisualTransform, elapsed_seconds: f64) -> DrawTriangle {
+fn with_opacity(mut triangle: SourceTriangle, opacity: f32) -> SourceTriangle {
+    triangle.alpha = (triangle.alpha as f32 * opacity.clamp(0.0, 1.0)).round() as u8;
+    triangle
+}
+
+fn transform_triangle(
+    source: SourceTriangle,
+    transform: VisualTransform,
+    elapsed_seconds: f64,
+) -> DrawTriangle {
     let _ = elapsed_seconds;
-    let points = source.vertices.map(|vertex| project_vertex(vertex, transform));
+    let points = source
+        .vertices
+        .map(|vertex| project_vertex(vertex, transform));
     let color = apply_natural_light(source.color, &points);
 
     DrawTriangle {
@@ -1384,7 +1963,11 @@ fn transform_triangle(source: SourceTriangle, transform: VisualTransform, elapse
 }
 
 fn project_vertex(vertex: Vec3, transform: VisualTransform) -> Vec3 {
-    let mut point = Vec3::new(vertex.x * transform.scale_x, vertex.y * transform.scale_y, vertex.z);
+    let mut point = Vec3::new(
+        vertex.x * transform.scale_x,
+        vertex.y * transform.scale_y,
+        vertex.z * transform.scale_z,
+    );
     point = rotate_x(point, transform.rotation_x as f32);
     point = rotate_y(point, transform.rotation_y as f32);
     point = rotate_z(point, transform.rotation_z as f32);
@@ -1404,19 +1987,31 @@ fn rotate_normal(normal: Vec3, transform: VisualTransform) -> Vec3 {
 fn rotate_x(point: Vec3, angle_degrees: f32) -> Vec3 {
     let radians = angle_degrees.to_radians();
     let (sin, cos) = radians.sin_cos();
-    Vec3::new(point.x, point.y * cos - point.z * sin, point.y * sin + point.z * cos)
+    Vec3::new(
+        point.x,
+        point.y * cos - point.z * sin,
+        point.y * sin + point.z * cos,
+    )
 }
 
 fn rotate_y(point: Vec3, angle_degrees: f32) -> Vec3 {
     let radians = angle_degrees.to_radians();
     let (sin, cos) = radians.sin_cos();
-    Vec3::new(point.x * cos + point.z * sin, point.y, -point.x * sin + point.z * cos)
+    Vec3::new(
+        point.x * cos + point.z * sin,
+        point.y,
+        -point.x * sin + point.z * cos,
+    )
 }
 
 fn rotate_z(point: Vec3, angle_degrees: f32) -> Vec3 {
     let radians = angle_degrees.to_radians();
     let (sin, cos) = radians.sin_cos();
-    Vec3::new(point.x * cos - point.y * sin, point.x * sin + point.y * cos, point.z)
+    Vec3::new(
+        point.x * cos - point.y * sin,
+        point.x * sin + point.y * cos,
+        point.z,
+    )
 }
 
 fn apply_natural_light(color: AppColor, points: &[Vec3; 3]) -> AppColor {
@@ -1430,7 +2025,10 @@ fn apply_natural_light(color: AppColor, points: &[Vec3; 3]) -> AppColor {
         points[2].y - points[0].y,
         points[2].z - points[0].z,
     );
-    let normal = edge_a.cross(edge_b).normalized();
+    apply_directional_light(color, edge_a.cross(edge_b).normalized())
+}
+
+fn apply_directional_light(color: AppColor, normal: Vec3) -> AppColor {
     let light_dir = Vec3::new(-0.36, -0.58, 0.73).normalized();
     let fill_dir = Vec3::new(0.55, 0.28, 0.30).normalized();
     let key = normal.dot(light_dir).max(0.0);
@@ -1464,12 +2062,60 @@ fn rectangular_prism_mesh(width: f32, height: f32, depth: f32, base_color: AppCo
     let hy = height * 0.5;
     let hz = depth.max(2.0) * 0.5;
     let faces = [
-        (quad(Vec3::new(-hx, -hy, hz), Vec3::new(hx, -hy, hz), Vec3::new(hx, hy, hz), Vec3::new(-hx, hy, hz)), scale_color(base_color, 1.10)),
-        (quad(Vec3::new(-hx, -hy, -hz), Vec3::new(-hx, hy, -hz), Vec3::new(hx, hy, -hz), Vec3::new(hx, -hy, -hz)), scale_color(base_color, 0.62)),
-        (quad(Vec3::new(-hx, -hy, -hz), Vec3::new(-hx, -hy, hz), Vec3::new(-hx, hy, hz), Vec3::new(-hx, hy, -hz)), scale_color(base_color, 0.78)),
-        (quad(Vec3::new(hx, -hy, -hz), Vec3::new(hx, hy, -hz), Vec3::new(hx, hy, hz), Vec3::new(hx, -hy, hz)), scale_color(base_color, 0.56)),
-        (quad(Vec3::new(-hx, -hy, -hz), Vec3::new(hx, -hy, -hz), Vec3::new(hx, -hy, hz), Vec3::new(-hx, -hy, hz)), scale_color(base_color, 0.96)),
-        (quad(Vec3::new(-hx, hy, -hz), Vec3::new(-hx, hy, hz), Vec3::new(hx, hy, hz), Vec3::new(hx, hy, -hz)), scale_color(base_color, 0.70)),
+        (
+            quad(
+                Vec3::new(-hx, -hy, hz),
+                Vec3::new(hx, -hy, hz),
+                Vec3::new(hx, hy, hz),
+                Vec3::new(-hx, hy, hz),
+            ),
+            scale_color(base_color, 1.10),
+        ),
+        (
+            quad(
+                Vec3::new(-hx, -hy, -hz),
+                Vec3::new(-hx, hy, -hz),
+                Vec3::new(hx, hy, -hz),
+                Vec3::new(hx, -hy, -hz),
+            ),
+            scale_color(base_color, 0.62),
+        ),
+        (
+            quad(
+                Vec3::new(-hx, -hy, -hz),
+                Vec3::new(-hx, -hy, hz),
+                Vec3::new(-hx, hy, hz),
+                Vec3::new(-hx, hy, -hz),
+            ),
+            scale_color(base_color, 0.78),
+        ),
+        (
+            quad(
+                Vec3::new(hx, -hy, -hz),
+                Vec3::new(hx, hy, -hz),
+                Vec3::new(hx, hy, hz),
+                Vec3::new(hx, -hy, hz),
+            ),
+            scale_color(base_color, 0.56),
+        ),
+        (
+            quad(
+                Vec3::new(-hx, -hy, -hz),
+                Vec3::new(hx, -hy, -hz),
+                Vec3::new(hx, -hy, hz),
+                Vec3::new(-hx, -hy, hz),
+            ),
+            scale_color(base_color, 0.96),
+        ),
+        (
+            quad(
+                Vec3::new(-hx, hy, -hz),
+                Vec3::new(-hx, hy, hz),
+                Vec3::new(hx, hy, hz),
+                Vec3::new(hx, hy, -hz),
+            ),
+            scale_color(base_color, 0.70),
+        ),
     ];
 
     let mut triangles = Vec::new();
@@ -1504,21 +2150,36 @@ fn dice_mesh(size: f32) -> Mesh {
         -hs - pip_surface_offset,
         pip_radius,
         pip_color,
-        &[(-pip_offset, -pip_offset), (pip_offset, -pip_offset), (0.0, 0.0), (-pip_offset, pip_offset), (pip_offset, pip_offset)],
+        &[
+            (-pip_offset, -pip_offset),
+            (pip_offset, -pip_offset),
+            (0.0, 0.0),
+            (-pip_offset, pip_offset),
+            (pip_offset, pip_offset),
+        ],
     );
     add_x_face_pips(
         &mut mesh.triangles,
         hs + pip_surface_offset,
         pip_radius,
         pip_color,
-        &[(-pip_offset, -pip_offset), (pip_offset, 0.0), (-pip_offset, pip_offset)],
+        &[
+            (-pip_offset, -pip_offset),
+            (pip_offset, 0.0),
+            (-pip_offset, pip_offset),
+        ],
     );
     add_x_face_pips(
         &mut mesh.triangles,
         -hs - pip_surface_offset,
         pip_radius,
         pip_color,
-        &[(-pip_offset, -pip_offset), (pip_offset, -pip_offset), (-pip_offset, pip_offset), (pip_offset, pip_offset)],
+        &[
+            (-pip_offset, -pip_offset),
+            (pip_offset, -pip_offset),
+            (-pip_offset, pip_offset),
+            (pip_offset, pip_offset),
+        ],
     );
     add_y_face_pips(
         &mut mesh.triangles,
@@ -1532,7 +2193,14 @@ fn dice_mesh(size: f32) -> Mesh {
         hs + pip_surface_offset,
         pip_radius,
         pip_color,
-        &[(-pip_offset, -pip_offset), (pip_offset, -pip_offset), (-pip_offset, 0.0), (pip_offset, 0.0), (-pip_offset, pip_offset), (pip_offset, pip_offset)],
+        &[
+            (-pip_offset, -pip_offset),
+            (pip_offset, -pip_offset),
+            (-pip_offset, 0.0),
+            (pip_offset, 0.0),
+            (-pip_offset, pip_offset),
+            (pip_offset, pip_offset),
+        ],
     );
 
     mesh
@@ -1613,7 +2281,11 @@ fn add_disk(
         let a1 = ((index + 1) as f32 / SEGMENTS as f32) * std::f32::consts::TAU;
         let p0 = offset_disk_point(center, axis_u, axis_v, radius, a0);
         let p1 = offset_disk_point(center, axis_u, axis_v, radius, a1);
-        let vertices = if outward_winding { [center, p0, p1] } else { [center, p1, p0] };
+        let vertices = if outward_winding {
+            [center, p0, p1]
+        } else {
+            [center, p1, p0]
+        };
         triangles.push(SourceTriangle {
             vertices,
             color,
@@ -1897,7 +2569,12 @@ fn glass_marble_mesh(size: f32, base_color: AppColor) -> Mesh {
     Mesh { triangles }
 }
 
-fn push_glass_marble_triangle(triangles: &mut Vec<SourceTriangle>, vertices: [Vec3; 3], _radius: f32, base_color: AppColor) {
+fn push_glass_marble_triangle(
+    triangles: &mut Vec<SourceTriangle>,
+    vertices: [Vec3; 3],
+    _radius: f32,
+    base_color: AppColor,
+) {
     triangles.push(SourceTriangle {
         vertices,
         color: base_color,
@@ -2007,9 +2684,21 @@ fn basketball_mesh(size: f32) -> Mesh {
 
     // Equator seam plus two vertical seams through the poles.
     let seams = [
-        (Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 1.0, 0.0)),
-        (Vec3::new(0.0, 1.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0)),
-        (Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 0.0, 0.0)),
+        (
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ),
+        (
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+        ),
+        (
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(1.0, 0.0, 0.0),
+        ),
     ];
     for (axis_u, axis_v, normal) in seams {
         add_seam_band(
@@ -2052,8 +2741,16 @@ fn add_seam_band(
         let p01 = circle_point(a0, 1.0);
         let p10 = circle_point(a1, -1.0);
         let p11 = circle_point(a1, 1.0);
-        triangles.push(SourceTriangle { vertices: [p00, p10, p11], color, alpha: 255 });
-        triangles.push(SourceTriangle { vertices: [p00, p11, p01], color, alpha: 255 });
+        triangles.push(SourceTriangle {
+            vertices: [p00, p10, p11],
+            color,
+            alpha: 255,
+        });
+        triangles.push(SourceTriangle {
+            vertices: [p00, p11, p01],
+            color,
+            alpha: 255,
+        });
     }
 }
 
@@ -2076,7 +2773,11 @@ fn basketball_hoop_mesh(width: f32, height: f32) -> Mesh {
             board_thickness,
             board_color,
         ),
-        Vec3::new(0.0, geometry.backboard_center_y, geometry.backboard_front_z - board_thickness * 0.5),
+        Vec3::new(
+            0.0,
+            geometry.backboard_center_y,
+            geometry.backboard_front_z - board_thickness * 0.5,
+        ),
     );
 
     // Outer frame and shooter square painted as thin slabs on the front face.
@@ -2096,7 +2797,11 @@ fn basketball_hoop_mesh(width: f32, height: f32) -> Mesh {
         &mut triangles,
         square_width,
         square_height,
-        Vec3::new(0.0, geometry.rim_center_y - square_height * 0.62, face_z + 1.5),
+        Vec3::new(
+            0.0,
+            geometry.rim_center_y - square_height * 0.62,
+            face_z + 1.5,
+        ),
         frame_thickness * 0.8,
         square_color,
     );
@@ -2134,7 +2839,12 @@ fn basketball_hoop_mesh(width: f32, height: f32) -> Mesh {
     // Mount bracket connecting rim to the board.
     append_mesh_offset(
         &mut triangles,
-        rectangular_prism_mesh(geometry.rim_radius * 0.5, 8.0, geometry.rim_center_z - geometry.backboard_front_z, rim_color),
+        rectangular_prism_mesh(
+            geometry.rim_radius * 0.5,
+            8.0,
+            geometry.rim_center_z - geometry.backboard_front_z,
+            rim_color,
+        ),
         Vec3::new(
             0.0,
             geometry.rim_center_y,
@@ -2150,7 +2860,11 @@ fn basketball_hoop_mesh(width: f32, height: f32) -> Mesh {
     let net_bottom_y = geometry.rim_center_y + height * 0.20;
     let strand_arc = 0.085f32;
     let net_point = |angle: f32, radius: f32, y: f32| {
-        Vec3::new(radius * angle.cos(), y, geometry.rim_center_z + radius * angle.sin())
+        Vec3::new(
+            radius * angle.cos(),
+            y,
+            geometry.rim_center_z + radius * angle.sin(),
+        )
     };
     for k in 0..NET_STRANDS {
         let top_angle = std::f32::consts::TAU * (k as f32 / NET_STRANDS as f32);
@@ -2160,8 +2874,16 @@ fn basketball_hoop_mesh(width: f32, height: f32) -> Mesh {
             let t1 = net_point(top_angle + strand_arc, net_top_radius, net_top_y);
             let b0 = net_point(bottom_angle, net_bottom_radius, net_bottom_y);
             let b1 = net_point(bottom_angle + strand_arc, net_bottom_radius, net_bottom_y);
-            triangles.push(SourceTriangle { vertices: [t0, b0, b1], color: net_color, alpha: 176 });
-            triangles.push(SourceTriangle { vertices: [t0, b1, t1], color: net_color, alpha: 176 });
+            triangles.push(SourceTriangle {
+                vertices: [t0, b0, b1],
+                color: net_color,
+                alpha: 176,
+            });
+            triangles.push(SourceTriangle {
+                vertices: [t0, b1, t1],
+                color: net_color,
+                alpha: 176,
+            });
         }
     }
     // Bottom loop of the net.
@@ -2172,8 +2894,16 @@ fn basketball_hoop_mesh(width: f32, height: f32) -> Mesh {
         let p1 = net_point(a1, net_bottom_radius, net_bottom_y);
         let p2 = net_point(a1, net_bottom_radius * 0.98, net_bottom_y + 5.0);
         let p3 = net_point(a0, net_bottom_radius * 0.98, net_bottom_y + 5.0);
-        triangles.push(SourceTriangle { vertices: [p0, p1, p2], color: net_color, alpha: 190 });
-        triangles.push(SourceTriangle { vertices: [p0, p2, p3], color: net_color, alpha: 190 });
+        triangles.push(SourceTriangle {
+            vertices: [p0, p1, p2],
+            color: net_color,
+            alpha: 190,
+        });
+        triangles.push(SourceTriangle {
+            vertices: [p0, p2, p3],
+            color: net_color,
+            alpha: 190,
+        });
     }
 
     Mesh { triangles }
@@ -2193,8 +2923,18 @@ fn add_rect_outline_slabs(
         (0.0, (height - thickness) * 0.5, width, thickness),
     ];
     let vertical = [
-        (-(width - thickness) * 0.5, 0.0, thickness, height - thickness * 2.0),
-        ((width - thickness) * 0.5, 0.0, thickness, height - thickness * 2.0),
+        (
+            -(width - thickness) * 0.5,
+            0.0,
+            thickness,
+            height - thickness * 2.0,
+        ),
+        (
+            (width - thickness) * 0.5,
+            0.0,
+            thickness,
+            height - thickness * 2.0,
+        ),
     ];
     for (dx, dy, w, h) in horizontal.into_iter().chain(vertical) {
         append_mesh_offset(
@@ -2230,7 +2970,12 @@ fn robot_buddy_mesh(size: f32, base_color: AppColor) -> Mesh {
     );
     append_mesh_offset(
         &mut triangles,
-        rectangular_prism_mesh(size * 0.36, size * 0.1, size * 0.06, AppColor::from_rgb(30, 48, 64)),
+        rectangular_prism_mesh(
+            size * 0.36,
+            size * 0.1,
+            size * 0.06,
+            AppColor::from_rgb(30, 48, 64),
+        ),
         Vec3::new(size * 0.19, -size * 0.36, size * 0.25),
     );
     append_mesh_offset(
@@ -2240,12 +2985,22 @@ fn robot_buddy_mesh(size: f32, base_color: AppColor) -> Mesh {
     );
     append_mesh_offset(
         &mut triangles,
-        rectangular_prism_mesh(size * 0.12, size * 0.25, size * 0.16, scale_color(base_color, 0.72)),
+        rectangular_prism_mesh(
+            size * 0.12,
+            size * 0.25,
+            size * 0.16,
+            scale_color(base_color, 0.72),
+        ),
         Vec3::new(-size * 0.5, size * 0.1, 0.0),
     );
     append_mesh_offset(
         &mut triangles,
-        rectangular_prism_mesh(size * 0.4, size * 0.12, size * 0.16, scale_color(base_color, 0.82)),
+        rectangular_prism_mesh(
+            size * 0.4,
+            size * 0.12,
+            size * 0.16,
+            scale_color(base_color, 0.82),
+        ),
         Vec3::new(size * 0.62, size * 0.02, size * 0.02),
     );
     append_mesh_offset(
@@ -2265,7 +3020,12 @@ fn robot_buddy_mesh(size: f32, base_color: AppColor) -> Mesh {
     );
     append_mesh_offset(
         &mut triangles,
-        rectangular_prism_mesh(size * 0.3, size * 0.14, size * 0.04, AppColor::from_rgb(66, 84, 92)),
+        rectangular_prism_mesh(
+            size * 0.3,
+            size * 0.14,
+            size * 0.04,
+            AppColor::from_rgb(66, 84, 92),
+        ),
         Vec3::new(size * 0.04, size * 0.14, size * 0.24),
     );
     append_mesh_offset(
@@ -2322,7 +3082,12 @@ fn snail_mesh(size: f32, base_color: AppColor) -> Mesh {
     }
     append_mesh_offset(
         &mut triangles,
-        ellipsoid_mesh(size * 0.34, size * 0.28, size * 0.26, scale_color(base_color, 1.08)),
+        ellipsoid_mesh(
+            size * 0.34,
+            size * 0.28,
+            size * 0.26,
+            scale_color(base_color, 1.08),
+        ),
         Vec3::new(size * 0.4, size * 0.06, size * 0.02),
     );
 
@@ -2412,7 +3177,12 @@ fn fan_mesh(size: f32, base_color: AppColor) -> Mesh {
     );
     append_mesh_offset(
         &mut triangles,
-        rectangular_prism_mesh(size * 0.22, size * 0.14, size * 0.12, AppColor::from_rgb(255, 176, 76)),
+        rectangular_prism_mesh(
+            size * 0.22,
+            size * 0.14,
+            size * 0.12,
+            AppColor::from_rgb(255, 176, 76),
+        ),
         Vec3::new(size * 0.66, size * 0.02, size * 0.10),
     );
 
@@ -2564,7 +3334,12 @@ fn append_mesh_offset(triangles: &mut Vec<SourceTriangle>, mesh: Mesh, offset: V
     }));
 }
 
-fn append_mesh_offset_rotated_z(triangles: &mut Vec<SourceTriangle>, mesh: Mesh, offset: Vec3, angle_degrees: f32) {
+fn append_mesh_offset_rotated_z(
+    triangles: &mut Vec<SourceTriangle>,
+    mesh: Mesh,
+    offset: Vec3,
+    angle_degrees: f32,
+) {
     triangles.extend(mesh.triangles.into_iter().map(|mut triangle| {
         for vertex in &mut triangle.vertices {
             *vertex = rotate_z(*vertex, angle_degrees);
@@ -2595,12 +3370,36 @@ fn pyramid_mesh(size: f32, base_color: AppColor) -> Mesh {
     let p3 = Vec3::new(-hs, base_y, hs);
     Mesh {
         triangles: vec![
-            SourceTriangle { vertices: [top, p0, p1], color: scale_color(base_color, 1.14), alpha: 255 },
-            SourceTriangle { vertices: [top, p1, p2], color: scale_color(base_color, 0.88), alpha: 255 },
-            SourceTriangle { vertices: [top, p2, p3], color: scale_color(base_color, 0.68), alpha: 255 },
-            SourceTriangle { vertices: [top, p3, p0], color: scale_color(base_color, 0.98), alpha: 255 },
-            SourceTriangle { vertices: [p0, p2, p1], color: scale_color(base_color, 0.52), alpha: 255 },
-            SourceTriangle { vertices: [p0, p3, p2], color: scale_color(base_color, 0.52), alpha: 255 },
+            SourceTriangle {
+                vertices: [top, p0, p1],
+                color: scale_color(base_color, 1.14),
+                alpha: 255,
+            },
+            SourceTriangle {
+                vertices: [top, p1, p2],
+                color: scale_color(base_color, 0.88),
+                alpha: 255,
+            },
+            SourceTriangle {
+                vertices: [top, p2, p3],
+                color: scale_color(base_color, 0.68),
+                alpha: 255,
+            },
+            SourceTriangle {
+                vertices: [top, p3, p0],
+                color: scale_color(base_color, 0.98),
+                alpha: 255,
+            },
+            SourceTriangle {
+                vertices: [p0, p2, p1],
+                color: scale_color(base_color, 0.52),
+                alpha: 255,
+            },
+            SourceTriangle {
+                vertices: [p0, p3, p2],
+                color: scale_color(base_color, 0.52),
+                alpha: 255,
+            },
         ],
     }
 }
@@ -2622,10 +3421,26 @@ fn barrel_mesh(size: f32, base_color: AppColor) -> Mesh {
         let p3 = Vec3::new(radius * a0.cos(), half_height, radius * a0.sin());
         let shade = if i % 2 == 0 { 1.05 } else { 0.82 };
         let side_color = scale_color(base_color, shade);
-        triangles.push(SourceTriangle { vertices: [p0, p1, p2], color: side_color, alpha: 255 });
-        triangles.push(SourceTriangle { vertices: [p0, p2, p3], color: side_color, alpha: 255 });
-        triangles.push(SourceTriangle { vertices: [top, p1, p0], color: scale_color(base_color, 1.18), alpha: 255 });
-        triangles.push(SourceTriangle { vertices: [bottom, p3, p2], color: scale_color(base_color, 0.58), alpha: 255 });
+        triangles.push(SourceTriangle {
+            vertices: [p0, p1, p2],
+            color: side_color,
+            alpha: 255,
+        });
+        triangles.push(SourceTriangle {
+            vertices: [p0, p2, p3],
+            color: side_color,
+            alpha: 255,
+        });
+        triangles.push(SourceTriangle {
+            vertices: [top, p1, p0],
+            color: scale_color(base_color, 1.18),
+            alpha: 255,
+        });
+        triangles.push(SourceTriangle {
+            vertices: [bottom, p3, p2],
+            color: scale_color(base_color, 0.58),
+            alpha: 255,
+        });
     }
 
     Mesh { triangles }
@@ -2650,8 +3465,16 @@ fn ring_mesh(size: f32, base_color: AppColor) -> Mesh {
             let p11 = torus_point(major, minor, a1, b1);
             let shade = 0.72 + (b0.cos().max(0.0) * 0.36);
             let color = scale_color(base_color, shade);
-            triangles.push(SourceTriangle { vertices: [p00, p10, p11], color, alpha: 255 });
-            triangles.push(SourceTriangle { vertices: [p00, p11, p01], color, alpha: 255 });
+            triangles.push(SourceTriangle {
+                vertices: [p00, p10, p11],
+                color,
+                alpha: 255,
+            });
+            triangles.push(SourceTriangle {
+                vertices: [p00, p11, p01],
+                color,
+                alpha: 255,
+            });
         }
     }
 
@@ -2672,7 +3495,8 @@ fn star_mesh(size: f32, base_color: AppColor) -> Mesh {
     let mut back = [Vec3::default(); POINTS];
     for i in 0..POINTS {
         let radius = if i % 2 == 0 { outer } else { inner };
-        let angle = -std::f32::consts::FRAC_PI_2 + (i as f32 / POINTS as f32) * std::f32::consts::TAU;
+        let angle =
+            -std::f32::consts::FRAC_PI_2 + (i as f32 / POINTS as f32) * std::f32::consts::TAU;
         front[i] = Vec3::new(radius * angle.cos(), radius * angle.sin(), depth);
         back[i] = Vec3::new(radius * angle.cos(), radius * angle.sin(), -depth);
     }
@@ -2682,11 +3506,27 @@ fn star_mesh(size: f32, base_color: AppColor) -> Mesh {
     let center_back = Vec3::new(0.0, 0.0, -depth);
     for i in 0..POINTS {
         let next = (i + 1) % POINTS;
-        triangles.push(SourceTriangle { vertices: [center_front, front[i], front[next]], color: scale_color(base_color, 1.14), alpha: 255 });
-        triangles.push(SourceTriangle { vertices: [center_back, back[next], back[i]], color: scale_color(base_color, 0.58), alpha: 255 });
+        triangles.push(SourceTriangle {
+            vertices: [center_front, front[i], front[next]],
+            color: scale_color(base_color, 1.14),
+            alpha: 255,
+        });
+        triangles.push(SourceTriangle {
+            vertices: [center_back, back[next], back[i]],
+            color: scale_color(base_color, 0.58),
+            alpha: 255,
+        });
         let side_color = scale_color(base_color, if i % 2 == 0 { 0.92 } else { 0.74 });
-        triangles.push(SourceTriangle { vertices: [front[i], back[i], back[next]], color: side_color, alpha: 255 });
-        triangles.push(SourceTriangle { vertices: [front[i], back[next], front[next]], color: side_color, alpha: 255 });
+        triangles.push(SourceTriangle {
+            vertices: [front[i], back[i], back[next]],
+            color: side_color,
+            alpha: 255,
+        });
+        triangles.push(SourceTriangle {
+            vertices: [front[i], back[next], front[next]],
+            color: side_color,
+            alpha: 255,
+        });
     }
 
     Mesh { triangles }
@@ -2695,13 +3535,69 @@ fn star_mesh(size: f32, base_color: AppColor) -> Mesh {
 fn satellite_mesh(size: f32, accent_color: AppColor) -> Mesh {
     let mut triangles = Vec::new();
     let cuboids = [
-        cuboid(-size * 0.18, -size * 0.18, -size * 0.18, size * 0.18, size * 0.18, size * 0.18, AppColor::from_rgb(168, 140, 74)),
-        cuboid(-size * 0.62, -size * 0.12, -size * 0.04, -size * 0.24, size * 0.12, size * 0.04, scale_color(accent_color, 0.82)),
-        cuboid(size * 0.24, -size * 0.12, -size * 0.04, size * 0.62, size * 0.12, size * 0.04, scale_color(accent_color, 0.82)),
-        cuboid(-size * 0.03, -size * 0.42, -size * 0.03, size * 0.03, -size * 0.18, size * 0.03, AppColor::from_rgb(146, 154, 165)),
-        cuboid(-size * 0.18, -size * 0.46, -size * 0.18, size * 0.18, -size * 0.40, size * 0.18, AppColor::from_rgb(210, 215, 223)),
-        cuboid(-size * 0.08, size * 0.21, -size * 0.08, size * 0.08, size * 0.38, size * 0.08, AppColor::from_rgb(66, 76, 92)),
-        cuboid(-size * 0.12, size * 0.34, -size * 0.12, size * 0.12, size * 0.52, size * 0.12, AppColor::from_rgb(210, 72, 72)),
+        cuboid(
+            -size * 0.18,
+            -size * 0.18,
+            -size * 0.18,
+            size * 0.18,
+            size * 0.18,
+            size * 0.18,
+            AppColor::from_rgb(168, 140, 74),
+        ),
+        cuboid(
+            -size * 0.62,
+            -size * 0.12,
+            -size * 0.04,
+            -size * 0.24,
+            size * 0.12,
+            size * 0.04,
+            scale_color(accent_color, 0.82),
+        ),
+        cuboid(
+            size * 0.24,
+            -size * 0.12,
+            -size * 0.04,
+            size * 0.62,
+            size * 0.12,
+            size * 0.04,
+            scale_color(accent_color, 0.82),
+        ),
+        cuboid(
+            -size * 0.03,
+            -size * 0.42,
+            -size * 0.03,
+            size * 0.03,
+            -size * 0.18,
+            size * 0.03,
+            AppColor::from_rgb(146, 154, 165),
+        ),
+        cuboid(
+            -size * 0.18,
+            -size * 0.46,
+            -size * 0.18,
+            size * 0.18,
+            -size * 0.40,
+            size * 0.18,
+            AppColor::from_rgb(210, 215, 223),
+        ),
+        cuboid(
+            -size * 0.08,
+            size * 0.21,
+            -size * 0.08,
+            size * 0.08,
+            size * 0.38,
+            size * 0.08,
+            AppColor::from_rgb(66, 76, 92),
+        ),
+        cuboid(
+            -size * 0.12,
+            size * 0.34,
+            -size * 0.12,
+            size * 0.12,
+            size * 0.52,
+            size * 0.12,
+            AppColor::from_rgb(210, 72, 72),
+        ),
     ];
 
     for cuboid in cuboids {
@@ -2817,7 +3713,15 @@ fn add_front_rect(
     });
 }
 
-fn cuboid(min_x: f32, min_y: f32, min_z: f32, max_x: f32, max_y: f32, max_z: f32, color: AppColor) -> Mesh {
+fn cuboid(
+    min_x: f32,
+    min_y: f32,
+    min_z: f32,
+    max_x: f32,
+    max_y: f32,
+    max_z: f32,
+    color: AppColor,
+) -> Mesh {
     let p000 = Vec3::new(min_x, min_y, min_z);
     let p001 = Vec3::new(min_x, min_y, max_z);
     let p010 = Vec3::new(min_x, max_y, min_z);
@@ -2930,7 +3834,8 @@ fn load_obj_mesh(path: &str) -> Result<Mesh> {
 fn load_stl_mesh(path: &str) -> Result<Mesh> {
     let file = File::open(path).with_context(|| format!("Failed to open STL file: {path}"))?;
     let mut reader = BufReader::new(file);
-    let mesh = stl_io::read_stl(&mut reader).with_context(|| format!("Failed to read STL file: {path}"))?;
+    let mesh = stl_io::read_stl(&mut reader)
+        .with_context(|| format!("Failed to read STL file: {path}"))?;
 
     let mut triangles = Vec::new();
     for face in mesh.faces {
@@ -2968,42 +3873,60 @@ fn fox_buddy_animated_mesh(target_size: f32, elapsed_seconds: f64, velocity: Vec
         .iter()
         .find(|animation| animation.name == preferred_clip)
         .or_else(|| asset.animations.first());
-    let mut local_translations: Vec<Vec3> = asset.nodes.iter().map(|node| node.base_translation).collect();
-    let mut local_rotations: Vec<Quat> = asset.nodes.iter().map(|node| node.base_rotation).collect();
+    let mut local_translations: Vec<Vec3> = asset
+        .nodes
+        .iter()
+        .map(|node| node.base_translation)
+        .collect();
+    let mut local_rotations: Vec<Quat> =
+        asset.nodes.iter().map(|node| node.base_rotation).collect();
     let mut local_scales: Vec<Vec3> = asset.nodes.iter().map(|node| node.base_scale).collect();
 
     if let Some(animation) = animation {
         let time = if animation.duration > 0.0 {
-            (elapsed_seconds as f32 * if preferred_clip == "Survey" { 0.55 } else { 1.0 }) % animation.duration
+            (elapsed_seconds as f32
+                * if preferred_clip == "Survey" {
+                    0.55
+                } else {
+                    1.0
+                })
+                % animation.duration
         } else {
             0.0
         };
         for channel in &animation.channels {
             match (&channel.property, &channel.values) {
                 (FoxAnimatedProperty::Translation, FoxAnimationValues::Vec3(values)) => {
-                    local_translations[channel.node_index] = sample_vec3(&channel.times, values, time);
-                },
+                    local_translations[channel.node_index] =
+                        sample_vec3(&channel.times, values, time);
+                }
                 (FoxAnimatedProperty::Rotation, FoxAnimationValues::Rotation(values)) => {
                     local_rotations[channel.node_index] = sample_quat(&channel.times, values, time);
-                },
+                }
                 (FoxAnimatedProperty::Scale, FoxAnimationValues::Vec3(values)) => {
                     local_scales[channel.node_index] = sample_vec3(&channel.times, values, time);
-                },
-                _ => {},
+                }
+                _ => {}
             }
         }
     }
 
     let mut local_matrices = Vec::with_capacity(asset.nodes.len());
     for index in 0..asset.nodes.len() {
-        local_matrices.push(Mat4::from_trs(local_translations[index], local_rotations[index], local_scales[index]));
+        local_matrices.push(Mat4::from_trs(
+            local_translations[index],
+            local_rotations[index],
+            local_scales[index],
+        ));
     }
     let globals = compute_global_matrices(&asset.nodes, &local_matrices);
     let joint_matrices: Vec<Mat4> = asset
         .skin_joints
         .iter()
         .enumerate()
-        .map(|(joint_index, &node_index)| globals[node_index].mul(asset.inverse_bind_matrices[joint_index]))
+        .map(|(joint_index, &node_index)| {
+            globals[node_index].mul(asset.inverse_bind_matrices[joint_index])
+        })
         .collect();
 
     let mut skinned_positions = Vec::with_capacity(asset.vertices.len());
@@ -3061,15 +3984,14 @@ fn fox_buddy_mesh(target_size: f32) -> Mesh {
 
 fn fox_asset() -> Option<&'static FoxAsset> {
     static FOX_ASSET: OnceLock<Option<FoxAsset>> = OnceLock::new();
-    FOX_ASSET
-        .get_or_init(|| load_fox_asset().ok())
-        .as_ref()
+    FOX_ASSET.get_or_init(|| load_fox_asset().ok()).as_ref()
 }
 
 fn load_fox_asset() -> Result<FoxAsset> {
     static FOX_GLB: &[u8] = include_bytes!("../../../Assets/characters/fox/Fox.glb");
     let (document, buffers, _) = gltf::import_slice(FOX_GLB).context("Failed to import fox GLB")?;
-    let buffer_data = |buffer: gltf::Buffer<'_>| buffers.get(buffer.index()).map(|data| data.0.as_slice());
+    let buffer_data =
+        |buffer: gltf::Buffer<'_>| buffers.get(buffer.index()).map(|data| data.0.as_slice());
     let mut vertices = Vec::new();
     let mut indices = Vec::new();
     let mut color = AppColor::from_rgb(245, 126, 48);
@@ -3115,9 +4037,15 @@ fn load_fox_asset() -> Result<FoxAsset> {
             }
 
             let primitive_indices: Vec<usize> = match reader.read_indices() {
-                Some(ReadIndices::U8(values)) => values.map(|value| base_index + value as usize).collect(),
-                Some(ReadIndices::U16(values)) => values.map(|value| base_index + value as usize).collect(),
-                Some(ReadIndices::U32(values)) => values.map(|value| base_index + value as usize).collect(),
+                Some(ReadIndices::U8(values)) => {
+                    values.map(|value| base_index + value as usize).collect()
+                }
+                Some(ReadIndices::U16(values)) => {
+                    values.map(|value| base_index + value as usize).collect()
+                }
+                Some(ReadIndices::U32(values)) => {
+                    values.map(|value| base_index + value as usize).collect()
+                }
                 None => (base_index..base_index + positions.len()).collect(),
             };
             for face in primitive_indices.chunks_exact(3) {
@@ -3133,12 +4061,16 @@ fn load_fox_asset() -> Result<FoxAsset> {
             FoxNode {
                 children: node.children().map(|child| child.index()).collect(),
                 base_translation: Vec3::new(translation[0], translation[1], translation[2]),
-                base_rotation: Quat::new(rotation[0], rotation[1], rotation[2], rotation[3]).normalized(),
+                base_rotation: Quat::new(rotation[0], rotation[1], rotation[2], rotation[3])
+                    .normalized(),
                 base_scale: Vec3::new(scale[0], scale[1], scale[2]),
             }
         })
         .collect();
-    let skin = document.skins().next().context("Fox GLB did not contain a skin")?;
+    let skin = document
+        .skins()
+        .next()
+        .context("Fox GLB did not contain a skin")?;
     let skin_reader = skin.reader(buffer_data);
     let skin_joints: Vec<usize> = skin.joints().map(|joint| joint.index()).collect();
     let inverse_bind_matrices: Vec<Mat4> = skin_reader
@@ -3158,14 +4090,21 @@ fn load_fox_asset() -> Result<FoxAsset> {
     })
 }
 
-fn load_fox_animations(document: &gltf::Document, buffers: &[gltf::buffer::Data]) -> Vec<FoxAnimation> {
+fn load_fox_animations(
+    document: &gltf::Document,
+    buffers: &[gltf::buffer::Data],
+) -> Vec<FoxAnimation> {
     let mut animations = Vec::new();
     for animation in document.animations() {
         let mut channels = Vec::new();
         let mut duration = 0.0f32;
         for channel in animation.channels() {
-            let reader = channel.reader(|buffer| buffers.get(buffer.index()).map(|data| data.0.as_slice()));
-            let Some(times) = reader.read_inputs().map(|values| values.collect::<Vec<_>>()) else {
+            let reader =
+                channel.reader(|buffer| buffers.get(buffer.index()).map(|data| data.0.as_slice()));
+            let Some(times) = reader
+                .read_inputs()
+                .map(|values| values.collect::<Vec<_>>())
+            else {
                 continue;
             };
             if let Some(last) = times.last() {
@@ -3180,7 +4119,11 @@ fn load_fox_animations(document: &gltf::Document, buffers: &[gltf::buffer::Data]
                     node_index,
                     property: FoxAnimatedProperty::Translation,
                     times,
-                    values: FoxAnimationValues::Vec3(values.map(|value| Vec3::new(value[0], value[1], value[2])).collect()),
+                    values: FoxAnimationValues::Vec3(
+                        values
+                            .map(|value| Vec3::new(value[0], value[1], value[2]))
+                            .collect(),
+                    ),
                 }),
                 ReadOutputs::Rotations(values) => channels.push(FoxAnimationChannel {
                     node_index,
@@ -3189,7 +4132,9 @@ fn load_fox_animations(document: &gltf::Document, buffers: &[gltf::buffer::Data]
                     values: FoxAnimationValues::Rotation(
                         values
                             .into_f32()
-                            .map(|value| Quat::new(value[0], value[1], value[2], value[3]).normalized())
+                            .map(|value| {
+                                Quat::new(value[0], value[1], value[2], value[3]).normalized()
+                            })
                             .collect(),
                     ),
                 }),
@@ -3197,9 +4142,13 @@ fn load_fox_animations(document: &gltf::Document, buffers: &[gltf::buffer::Data]
                     node_index,
                     property: FoxAnimatedProperty::Scale,
                     times,
-                    values: FoxAnimationValues::Vec3(values.map(|value| Vec3::new(value[0], value[1], value[2])).collect()),
+                    values: FoxAnimationValues::Vec3(
+                        values
+                            .map(|value| Vec3::new(value[0], value[1], value[2]))
+                            .collect(),
+                    ),
                 }),
-                ReadOutputs::MorphTargetWeights(_) => {},
+                ReadOutputs::MorphTargetWeights(_) => {}
             }
         }
         animations.push(FoxAnimation {
@@ -3216,7 +4165,11 @@ fn sample_vec3(times: &[f32], values: &[Vec3], time: f32) -> Vec3 {
         return Vec3::new(0.0, 0.0, 0.0);
     }
     let (left, right, blend) = sample_span(times, time);
-    lerp_vec3(values[left.min(values.len() - 1)], values[right.min(values.len() - 1)], blend)
+    lerp_vec3(
+        values[left.min(values.len() - 1)],
+        values[right.min(values.len() - 1)],
+        blend,
+    )
 }
 
 fn sample_quat(times: &[f32], values: &[Quat], time: f32) -> Quat {
@@ -3267,7 +4220,13 @@ fn compute_global_matrices(nodes: &[FoxNode], local_matrices: &[Mat4]) -> Vec<Ma
     globals
 }
 
-fn fill_global_matrices(index: usize, parent: Mat4, nodes: &[FoxNode], local_matrices: &[Mat4], globals: &mut [Mat4]) {
+fn fill_global_matrices(
+    index: usize,
+    parent: Mat4,
+    nodes: &[FoxNode],
+    local_matrices: &[Mat4],
+    globals: &mut [Mat4],
+) {
     let global = parent.mul(local_matrices[index]);
     globals[index] = global;
     for &child in &nodes[index].children {
@@ -3283,7 +4242,11 @@ fn lerp_vec3(left: Vec3, right: Vec3, t: f32) -> Vec3 {
     )
 }
 
-fn load_gltf_mesh_from_slice(bytes: &[u8], target_size: f32, fallback_color: AppColor) -> Result<Mesh> {
+fn load_gltf_mesh_from_slice(
+    bytes: &[u8],
+    target_size: f32,
+    fallback_color: AppColor,
+) -> Result<Mesh> {
     let (document, buffers, _) = gltf::import_slice(bytes).context("Failed to import GLB model")?;
     let mut mesh = Mesh {
         triangles: Vec::new(),
@@ -3291,7 +4254,13 @@ fn load_gltf_mesh_from_slice(bytes: &[u8], target_size: f32, fallback_color: App
 
     for scene in document.scenes() {
         for node in scene.nodes() {
-            append_gltf_node(&mut mesh, &node, &buffers, identity_matrix(), fallback_color)?;
+            append_gltf_node(
+                &mut mesh,
+                &node,
+                &buffers,
+                identity_matrix(),
+                fallback_color,
+            )?;
         }
     }
 
@@ -3314,7 +4283,8 @@ fn append_gltf_node(
     let transform = multiply_matrix(parent_transform, node.transform().matrix());
     if let Some(node_mesh) = node.mesh() {
         for primitive in node_mesh.primitives() {
-            let reader = primitive.reader(|buffer| buffers.get(buffer.index()).map(|data| data.0.as_slice()));
+            let reader = primitive
+                .reader(|buffer| buffers.get(buffer.index()).map(|data| data.0.as_slice()));
             let Some(positions) = reader.read_positions() else {
                 continue;
             };
@@ -3330,9 +4300,18 @@ fn append_gltf_node(
             let color_factor = material.pbr_metallic_roughness().base_color_factor();
             let color = AppColor::from_argb(
                 (color_factor[3] * 255.0).round().clamp(0.0, 255.0) as u8,
-                multiply_channel(fallback_color.r, (color_factor[0] * 255.0).round().clamp(0.0, 255.0) as u8),
-                multiply_channel(fallback_color.g, (color_factor[1] * 255.0).round().clamp(0.0, 255.0) as u8),
-                multiply_channel(fallback_color.b, (color_factor[2] * 255.0).round().clamp(0.0, 255.0) as u8),
+                multiply_channel(
+                    fallback_color.r,
+                    (color_factor[0] * 255.0).round().clamp(0.0, 255.0) as u8,
+                ),
+                multiply_channel(
+                    fallback_color.g,
+                    (color_factor[1] * 255.0).round().clamp(0.0, 255.0) as u8,
+                ),
+                multiply_channel(
+                    fallback_color.b,
+                    (color_factor[2] * 255.0).round().clamp(0.0, 255.0) as u8,
+                ),
             );
 
             for face in indices.chunks_exact(3) {
@@ -3428,7 +4407,11 @@ fn normalize_mesh(mesh: &mut Mesh, target_size: f32) -> Result<()> {
         bail!("Imported model has zero size.");
     }
 
-    let center = Vec3::new(min.x + size_x * 0.5, min.y + size_y * 0.5, min.z + size_z * 0.5);
+    let center = Vec3::new(
+        min.x + size_x * 0.5,
+        min.y + size_y * 0.5,
+        min.z + size_z * 0.5,
+    );
     let scale = target_size / collision_footprint;
     for triangle in &mut mesh.triangles {
         for vertex in &mut triangle.vertices {
@@ -3444,4 +4427,155 @@ fn normalize_mesh(mesh: &mut Mesh, target_size: f32) -> Result<()> {
 fn index_vertex(data: &[f32], index: usize) -> [f32; 3] {
     let base = index * 3;
     [data[base], data[base + 1], data[base + 2]]
+}
+
+#[cfg(test)]
+mod chat_tests {
+    use super::*;
+
+    #[test]
+    fn procedural_chat_uses_one_quad_per_visible_glyph() {
+        let message = ChatMessageVisual {
+            id: 1,
+            center: Vector2::ZERO,
+            username: "PixelGoblin".to_string(),
+            message: "that bounce was perfect".to_string(),
+            inline_image_slots: vec![],
+            username_color: AppColor::from_rgb(168, 112, 255),
+            pixel_size: 3.0,
+            opacity: 1.0,
+            scale: 1.0,
+            rotation_x: 0.0,
+            rotation_y: 0.0,
+            rotation_z: 0.0,
+        };
+        let layout = chat_message_layout(&message);
+        let mut vertices = Vec::new();
+        emit_chat_message_3d(&mut vertices, &message, &layout, false);
+
+        assert_eq!(layout.glyphs.len(), 31);
+        assert_eq!(
+            vertices.len(),
+            layout.glyphs.len() * CHAT_VERTICES_PER_GLYPH
+        );
+        assert_eq!(vertices.len(), 186);
+    }
+
+    #[test]
+    fn procedural_chat_places_wrapped_message_lines_below_each_other() {
+        let message = ChatMessageVisual {
+            id: 3,
+            center: Vector2::ZERO,
+            username: "User".to_string(),
+            message: "first\nsecond\nthird".to_string(),
+            inline_image_slots: vec![],
+            username_color: AppColor::from_rgb(255, 255, 255),
+            pixel_size: 2.0,
+            opacity: 1.0,
+            scale: 1.0,
+            rotation_x: 0.0,
+            rotation_y: 0.0,
+            rotation_z: 0.0,
+        };
+
+        let layout = chat_message_layout(&message);
+        let line_origins = [
+            layout.glyphs[0].origin_y,
+            layout.glyphs[4].origin_y,
+            layout.glyphs[9].origin_y,
+            layout.glyphs[15].origin_y,
+        ];
+        assert_eq!(line_origins, [-17.5, -8.5, 0.5, 9.5]);
+    }
+
+    #[test]
+    fn procedural_chat_emits_inline_image_quad_with_atlas_uvs() {
+        let message = ChatMessageVisual {
+            id: 4,
+            center: Vector2::ZERO,
+            username: "User".to_string(),
+            message: "\u{fffc}".to_string(),
+            inline_image_slots: vec![17],
+            username_color: AppColor::from_rgb(255, 255, 255),
+            pixel_size: 2.0,
+            opacity: 1.0,
+            scale: 1.0,
+            rotation_x: 0.0,
+            rotation_y: 0.0,
+            rotation_z: 0.0,
+        };
+        let layout = chat_message_layout(&message);
+        let mut vertices = Vec::new();
+        emit_chat_message_3d(&mut vertices, &message, &layout, false);
+
+        let image_vertices = vertices
+            .iter()
+            .filter(|vertex| vertex.material[0] == CHAT_IMAGE_MATERIAL_ID)
+            .collect::<Vec<_>>();
+        assert_eq!(image_vertices.len(), 6);
+        assert!(
+            image_vertices
+                .iter()
+                .all(|vertex| vertex.material[1] >= 1.0 / 16.0)
+        );
+    }
+
+    #[test]
+    fn packed_chat_rows_preserve_font_bits() {
+        let rows = font8x8::BASIC_FONTS
+            .get('R')
+            .expect("basic font should contain R");
+        let message = ChatMessageVisual {
+            id: 2,
+            center: Vector2::ZERO,
+            username: "R".to_string(),
+            message: String::new(),
+            inline_image_slots: vec![],
+            username_color: AppColor::from_rgb(255, 255, 255),
+            pixel_size: 2.0,
+            opacity: 1.0,
+            scale: 1.0,
+            rotation_x: 0.0,
+            rotation_y: 0.0,
+            rotation_z: 0.0,
+        };
+        let layout = chat_message_layout(&message);
+        let packed = layout.glyphs[0].packed_rows;
+        let unpacked = [
+            packed[0] as u8,
+            (packed[0] >> 8) as u8,
+            packed[1] as u8,
+            (packed[1] >> 8) as u8,
+            packed[2] as u8,
+            (packed[2] >> 8) as u8,
+            packed[3] as u8,
+            (packed[3] >> 8) as u8,
+        ];
+        assert_eq!(unpacked, rows);
+    }
+
+    #[test]
+    fn chat_rotation_basis_matches_the_existing_euler_transform() {
+        let basis = ChatRotationBasis::from_euler(17.0, -23.0, 9.0);
+        let point = Vec3::new(12.5, -7.25, 0.0);
+        let transformed = chat_vertex_position(Vec3::default(), basis.x, basis.y, point.x, point.y);
+        let expected = project_vertex(
+            point,
+            VisualTransform {
+                center_x: 0.0,
+                center_y: 0.0,
+                center_z: 0.0,
+                rotation_x: 17.0,
+                rotation_y: -23.0,
+                rotation_z: 9.0,
+                scale_x: 1.0,
+                scale_y: 1.0,
+                scale_z: 1.0,
+            },
+        );
+
+        assert!((transformed.x - expected.x).abs() < 0.0001);
+        assert!((transformed.y - expected.y).abs() < 0.0001);
+        assert!((transformed.z - expected.z).abs() < 0.0001);
+    }
 }

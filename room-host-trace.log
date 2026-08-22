@@ -1,0 +1,3 @@
+ui[native[838848836648] ] bridge client authenticatedbridge authenticated to native
+
+native[838848] bridge client ended: An existing connection was forcibly closed by the remote host. (os error 10054)

@@ -16,4 +16,5 @@ control-ui/dist/
 control-ui/src-tauri/target/
 control-ui/src-tauri/gen/
 control-ui/src-tauri/binaries/*.exe
+control-ui/src-tauri/resources/
 control-ui/tsconfig*.tsbuildinfo

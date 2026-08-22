@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use core_types::{RectF, Vector2};
 #[cfg(target_os = "macos")]
 use core_foundation::{
     base::{Boolean, TCFType},
@@ -9,49 +8,51 @@ use core_foundation::{
     dictionary::{CFDictionary, CFDictionaryRef},
     string::{CFString, CFStringRef},
 };
-#[cfg(not(target_os = "macos"))]
-use device_query::{DeviceState, Keycode};
+use core_types::{RectF, Vector2};
 #[cfg(not(target_os = "macos"))]
 use device_query::DeviceQuery;
 #[cfg(not(target_os = "macos"))]
-use std::panic::AssertUnwindSafe;
+use device_query::{DeviceState, Keycode};
+#[cfg(target_os = "macos")]
+use objc2::{ClassType, rc::Retained};
 #[cfg(target_os = "macos")]
 use objc2_app_kit::NSScreen;
 #[cfg(target_os = "macos")]
-use objc2_foundation::MainThreadMarker;
-#[cfg(target_os = "macos")]
-use objc2::{rc::Retained, ClassType};
-#[cfg(target_os = "macos")]
 use objc2_app_kit::NSView;
+#[cfg(target_os = "macos")]
+use objc2_foundation::MainThreadMarker;
 #[cfg(target_os = "macos")]
 use readmouse::Mouse;
 use rfd::{FileDialog, MessageButtons, MessageDialog, MessageLevel};
+#[cfg(not(target_os = "macos"))]
+use std::panic::AssertUnwindSafe;
 use tray_icon::{
-    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     Icon, TrayIcon, TrayIconBuilder,
+    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
 };
+#[cfg(target_os = "macos")]
+use winit::monitor::MonitorHandle;
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize, Position, Size},
     error::ExternalError,
     raw_window_handle::{HasWindowHandle, RawWindowHandle},
     window::{Window, WindowAttributes, WindowLevel},
 };
-#[cfg(target_os = "macos")]
-use winit::monitor::MonitorHandle;
 
-#[cfg(target_os = "linux")]
-use winit::platform::x11::WindowAttributesExtX11;
 #[cfg(target_os = "windows")]
 use windows::Win32::{
     Foundation::{BOOL, HWND, LPARAM, POINT, RECT},
     Graphics::Gdi::ClientToScreen,
     UI::WindowsAndMessaging::{
-        EnumWindows, GetClassNameW, GetClientRect, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW,
-        GetWindowThreadProcessId, IsIconic, IsWindow, IsWindowVisible, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE,
-        HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_APPWINDOW, WS_EX_LAYERED,
-        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
+        EnumWindows, GWL_EXSTYLE, GetClassNameW, GetClientRect, GetWindowLongPtrW,
+        GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, HWND_TOPMOST, IsIconic,
+        IsWindow, IsWindowVisible, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+        SetWindowLongPtrW, SetWindowPos, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
     },
 };
+#[cfg(target_os = "linux")]
+use winit::platform::x11::WindowAttributesExtX11;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OverlayInputMode {
@@ -129,8 +130,14 @@ unsafe extern "system" fn find_window_at_point(hwnd: HWND, lparam: LPARAM) -> BO
     if unsafe { GetClientRect(hwnd, &mut rect) }.is_err() {
         return BOOL(1);
     }
-    let mut origin = POINT { x: rect.left, y: rect.top };
-    let mut extent = POINT { x: rect.right, y: rect.bottom };
+    let mut origin = POINT {
+        x: rect.left,
+        y: rect.top,
+    };
+    let mut extent = POINT {
+        x: rect.right,
+        y: rect.bottom,
+    };
     if !unsafe { ClientToScreen(hwnd, &mut origin) }.as_bool()
         || !unsafe { ClientToScreen(hwnd, &mut extent) }.as_bool()
     {
@@ -159,26 +166,37 @@ fn desktop_window_target(hwnd: HWND, origin: POINT, extent: POINT) -> Option<Des
     let title = String::from_utf16_lossy(&title_buffer[..copied.max(0) as usize]);
     Some(DesktopWindowTarget {
         id: hwnd.0,
-        title: if title.trim().is_empty() { "Untitled window".to_string() } else { title },
+        title: if title.trim().is_empty() {
+            "Untitled window".to_string()
+        } else {
+            title
+        },
         client_rect: RectF::new(
             origin.x as f32,
             origin.y as f32,
             (extent.x - origin.x) as f32,
             (extent.y - origin.y) as f32,
         ),
-        is_visible: unsafe { IsWindowVisible(hwnd) }.as_bool() && !unsafe { IsIconic(hwnd) }.as_bool(),
+        is_visible: unsafe { IsWindowVisible(hwnd) }.as_bool()
+            && !unsafe { IsIconic(hwnd) }.as_bool(),
     })
 }
 
 #[cfg(target_os = "windows")]
 pub fn desktop_window_at_point(screen_position: (i32, i32)) -> Option<DesktopWindowTarget> {
     let mut search = WindowSearch {
-        point: POINT { x: screen_position.0, y: screen_position.1 },
+        point: POINT {
+            x: screen_position.0,
+            y: screen_position.1,
+        },
         process_id: std::process::id(),
         result: None,
     };
     unsafe {
-        let _ = EnumWindows(Some(find_window_at_point), LPARAM((&mut search as *mut WindowSearch) as isize));
+        let _ = EnumWindows(
+            Some(find_window_at_point),
+            LPARAM((&mut search as *mut WindowSearch) as isize),
+        );
     }
     search.result
 }
@@ -194,9 +212,17 @@ pub fn desktop_window_by_id(id: isize) -> Option<DesktopWindowTarget> {
         if GetClientRect(hwnd, &mut rect).is_err() {
             return None;
         }
-        let mut origin = POINT { x: rect.left, y: rect.top };
-        let mut extent = POINT { x: rect.right, y: rect.bottom };
-        if !ClientToScreen(hwnd, &mut origin).as_bool() || !ClientToScreen(hwnd, &mut extent).as_bool() {
+        let mut origin = POINT {
+            x: rect.left,
+            y: rect.top,
+        };
+        let mut extent = POINT {
+            x: rect.right,
+            y: rect.bottom,
+        };
+        if !ClientToScreen(hwnd, &mut origin).as_bool()
+            || !ClientToScreen(hwnd, &mut extent).as_bool()
+        {
             return None;
         }
         desktop_window_target(hwnd, origin, extent)
@@ -218,12 +244,18 @@ pub fn overlay_window_attributes(title: &str, bounds: RectF) -> WindowAttributes
         .with_title(title)
         .with_decorations(false)
         .with_resizable(false)
-        .with_position(Position::Physical(PhysicalPosition::new(bounds.x as i32, bounds.y as i32)))
+        .with_position(Position::Physical(PhysicalPosition::new(
+            bounds.x as i32,
+            bounds.y as i32,
+        )))
         .with_inner_size(Size::Physical(PhysicalSize::new(
             bounds.width.max(1.0) as u32,
             bounds.height.max(1.0) as u32,
         )))
         .with_window_level(WindowLevel::AlwaysOnTop);
+
+    #[cfg(target_os = "windows")]
+    let attributes = attributes.with_visible(false);
 
     #[cfg(not(target_os = "windows"))]
     let attributes = attributes.with_transparent(true);
@@ -236,7 +268,10 @@ pub fn overlay_window_attributes(title: &str, bounds: RectF) -> WindowAttributes
 
 pub fn sync_window_to_bounds(window: &Window, bounds: RectF) -> RectF {
     let position = PhysicalPosition::new(bounds.x.round() as i32, bounds.y.round() as i32);
-    let size = PhysicalSize::new(bounds.width.max(1.0).round() as u32, bounds.height.max(1.0).round() as u32);
+    let size = PhysicalSize::new(
+        bounds.width.max(1.0).round() as u32,
+        bounds.height.max(1.0).round() as u32,
+    );
     window.set_outer_position(position);
     let _ = window.request_inner_size(Size::Physical(size));
     window.set_window_level(WindowLevel::AlwaysOnTop);
@@ -244,7 +279,10 @@ pub fn sync_window_to_bounds(window: &Window, bounds: RectF) -> RectF {
     bounds
 }
 
-pub fn set_overlay_input_mode(window: &Window, mode: OverlayInputMode) -> Result<(), ExternalError> {
+pub fn set_overlay_input_mode(
+    window: &Window,
+    mode: OverlayInputMode,
+) -> Result<(), ExternalError> {
     let interactive = mode == OverlayInputMode::Interactive;
     window.set_cursor_hittest(interactive)
 }
@@ -329,8 +367,9 @@ impl GlobalInputPoller {
         {
             let device_state = std::panic::catch_unwind(AssertUnwindSafe(DeviceState::new))
                 .map_err(|_| anyhow::anyhow!("Global input is unavailable on this host."))?;
-            std::panic::catch_unwind(AssertUnwindSafe(|| device_state.get_mouse()))
-                .map_err(|_| anyhow::anyhow!("Global mouse access requires OS accessibility permissions."))?;
+            std::panic::catch_unwind(AssertUnwindSafe(|| device_state.get_mouse())).map_err(
+                |_| anyhow::anyhow!("Global mouse access requires OS accessibility permissions."),
+            )?;
             Ok(Self { device_state })
         }
     }
@@ -385,10 +424,17 @@ impl GlobalInputPoller {
 
         #[cfg(not(target_os = "macos"))]
         {
-            let mouse = std::panic::catch_unwind(AssertUnwindSafe(|| self.device_state.get_mouse()))
-                .map_err(|_| anyhow::anyhow!("Global mouse access requires OS accessibility permissions."))?;
+            let mouse =
+                std::panic::catch_unwind(AssertUnwindSafe(|| self.device_state.get_mouse()))
+                    .map_err(|_| {
+                        anyhow::anyhow!(
+                            "Global mouse access requires OS accessibility permissions."
+                        )
+                    })?;
             let keys = std::panic::catch_unwind(AssertUnwindSafe(|| self.device_state.get_keys()))
-                .map_err(|_| anyhow::anyhow!("Global keyboard access requires OS accessibility permissions."))?;
+                .map_err(|_| {
+                    anyhow::anyhow!("Global keyboard access requires OS accessibility permissions.")
+                })?;
             let local_x = (mouse.coords.0 as f32 - bounds.x).clamp(0.0, bounds.width.max(1.0));
             let local_y = (mouse.coords.1 as f32 - bounds.y).clamp(0.0, bounds.height.max(1.0));
 
@@ -453,14 +499,18 @@ fn macos_visible_monitor_bounds(monitor: &MonitorHandle) -> Option<RectF> {
 }
 
 #[cfg(target_os = "macos")]
-fn macos_global_pointer_state(bounds: RectF, raw_x_points: f32, raw_y_points: f32) -> (f32, f32, f32, f32) {
+fn macos_global_pointer_state(
+    bounds: RectF,
+    raw_x_points: f32,
+    raw_y_points: f32,
+) -> (f32, f32, f32, f32) {
     let mtm = match MainThreadMarker::new() {
         Some(mtm) => mtm,
         None => {
             let local_x = (raw_x_points - bounds.x).clamp(0.0, bounds.width.max(1.0));
             let local_y = (raw_y_points - bounds.y).clamp(0.0, bounds.height.max(1.0));
             return (raw_x_points, raw_y_points, local_x, local_y);
-        },
+        }
     };
 
     let mut selected_visible = None;
@@ -482,7 +532,10 @@ fn macos_global_pointer_state(bounds: RectF, raw_x_points: f32, raw_y_points: f3
 
     let (visible, backing_scale) = selected_visible.unwrap_or_else(|| {
         let fallback = NSScreen::mainScreen(mtm).expect("main screen should exist");
-        (fallback.visibleFrame(), fallback.backingScaleFactor() as f32)
+        (
+            fallback.visibleFrame(),
+            fallback.backingScaleFactor() as f32,
+        )
     });
     let screen_x = raw_x_points * backing_scale;
     let screen_y = raw_y_points * backing_scale;

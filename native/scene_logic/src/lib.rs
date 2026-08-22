@@ -1,8 +1,8 @@
 use std::time::Instant;
 
 use core_types::{
-    AppColor, AppConfig, CollisionShape, ObjectState, ObjectVisualKind, PhysicsBody, RectF, ScreenShardGeometry,
-    Vector2,
+    AppColor, AppConfig, CollisionShape, ObjectState, ObjectVisualKind, PhysicsBody, RectF,
+    ScreenShardGeometry, Vector2,
 };
 use physics_core::PhysicsWorld;
 use rand::RngExt;
@@ -24,27 +24,90 @@ const SHARD_THICKNESS: f32 = 18.0;
 
 const SPAWN_CATALOG: [SpawnSpec; 22] = [
     SpawnSpec::new(ObjectVisualKind::Cube, None),
-    SpawnSpec::new(ObjectVisualKind::Ball, Some(AppColor::from_rgb(90, 205, 255))),
-    SpawnSpec::new(ObjectVisualKind::SoftBall, Some(AppColor::from_rgb(106, 236, 188))),
-    SpawnSpec::new(ObjectVisualKind::GlassMarble, Some(AppColor::from_rgb(220, 246, 255))),
-    SpawnSpec::new(ObjectVisualKind::PlasmaOrb, Some(AppColor::from_rgb(160, 88, 255))),
-    SpawnSpec::new(ObjectVisualKind::PortalOrb, Some(AppColor::from_rgb(80, 180, 255))),
-    SpawnSpec::new(ObjectVisualKind::SoapBubble, Some(AppColor::from_rgb(245, 255, 255))),
-    SpawnSpec::new(ObjectVisualKind::ForcefieldOrb, Some(AppColor::from_rgb(78, 240, 255))),
-    SpawnSpec::new(ObjectVisualKind::RaymarchCube, Some(AppColor::from_rgb(130, 92, 255))),
-    SpawnSpec::new(ObjectVisualKind::RobotBuddy, Some(AppColor::from_rgb(150, 220, 245))),
-    SpawnSpec::new(ObjectVisualKind::Snail, Some(AppColor::from_rgb(166, 214, 124))),
-    SpawnSpec::new(ObjectVisualKind::Fan, Some(AppColor::from_rgb(105, 230, 255))),
-    SpawnSpec::new(ObjectVisualKind::QuadDrone, Some(AppColor::from_rgb(248, 250, 252))),
-    SpawnSpec::new(ObjectVisualKind::Pyramid, Some(AppColor::from_rgb(255, 176, 92))),
-    SpawnSpec::new(ObjectVisualKind::Barrel, Some(AppColor::from_rgb(126, 226, 168))),
-    SpawnSpec::new(ObjectVisualKind::Ring, Some(AppColor::from_rgb(255, 118, 210))),
-    SpawnSpec::new(ObjectVisualKind::Star, Some(AppColor::from_rgb(255, 224, 92))),
-    SpawnSpec::new(ObjectVisualKind::Crystal, Some(AppColor::from_rgb(108, 241, 255))),
-    SpawnSpec::new(ObjectVisualKind::Satellite, Some(AppColor::from_rgb(88, 160, 255))),
-    SpawnSpec::new(ObjectVisualKind::DvdLogo, Some(AppColor::from_rgb(244, 78, 255))),
-    SpawnSpec::new(ObjectVisualKind::Dice, Some(AppColor::from_rgb(245, 245, 240))),
-    SpawnSpec::new(ObjectVisualKind::Crystal, Some(AppColor::from_rgb(255, 112, 214))),
+    SpawnSpec::new(
+        ObjectVisualKind::Ball,
+        Some(AppColor::from_rgb(90, 205, 255)),
+    ),
+    SpawnSpec::new(
+        ObjectVisualKind::SoftBall,
+        Some(AppColor::from_rgb(106, 236, 188)),
+    ),
+    SpawnSpec::new(
+        ObjectVisualKind::GlassMarble,
+        Some(AppColor::from_rgb(220, 246, 255)),
+    ),
+    SpawnSpec::new(
+        ObjectVisualKind::PlasmaOrb,
+        Some(AppColor::from_rgb(160, 88, 255)),
+    ),
+    SpawnSpec::new(
+        ObjectVisualKind::PortalOrb,
+        Some(AppColor::from_rgb(80, 180, 255)),
+    ),
+    SpawnSpec::new(
+        ObjectVisualKind::SoapBubble,
+        Some(AppColor::from_rgb(245, 255, 255)),
+    ),
+    SpawnSpec::new(
+        ObjectVisualKind::ForcefieldOrb,
+        Some(AppColor::from_rgb(78, 240, 255)),
+    ),
+    SpawnSpec::new(
+        ObjectVisualKind::RaymarchCube,
+        Some(AppColor::from_rgb(130, 92, 255)),
+    ),
+    SpawnSpec::new(
+        ObjectVisualKind::RobotBuddy,
+        Some(AppColor::from_rgb(150, 220, 245)),
+    ),
+    SpawnSpec::new(
+        ObjectVisualKind::Snail,
+        Some(AppColor::from_rgb(166, 214, 124)),
+    ),
+    SpawnSpec::new(
+        ObjectVisualKind::Fan,
+        Some(AppColor::from_rgb(105, 230, 255)),
+    ),
+    SpawnSpec::new(
+        ObjectVisualKind::QuadDrone,
+        Some(AppColor::from_rgb(248, 250, 252)),
+    ),
+    SpawnSpec::new(
+        ObjectVisualKind::Pyramid,
+        Some(AppColor::from_rgb(255, 176, 92)),
+    ),
+    SpawnSpec::new(
+        ObjectVisualKind::Barrel,
+        Some(AppColor::from_rgb(126, 226, 168)),
+    ),
+    SpawnSpec::new(
+        ObjectVisualKind::Ring,
+        Some(AppColor::from_rgb(255, 118, 210)),
+    ),
+    SpawnSpec::new(
+        ObjectVisualKind::Star,
+        Some(AppColor::from_rgb(255, 224, 92)),
+    ),
+    SpawnSpec::new(
+        ObjectVisualKind::Crystal,
+        Some(AppColor::from_rgb(108, 241, 255)),
+    ),
+    SpawnSpec::new(
+        ObjectVisualKind::Satellite,
+        Some(AppColor::from_rgb(88, 160, 255)),
+    ),
+    SpawnSpec::new(
+        ObjectVisualKind::DvdLogo,
+        Some(AppColor::from_rgb(244, 78, 255)),
+    ),
+    SpawnSpec::new(
+        ObjectVisualKind::Dice,
+        Some(AppColor::from_rgb(245, 245, 240)),
+    ),
+    SpawnSpec::new(
+        ObjectVisualKind::Crystal,
+        Some(AppColor::from_rgb(255, 112, 214)),
+    ),
 ];
 
 #[derive(Clone, Copy, Debug)]
@@ -131,7 +194,12 @@ impl MouseTracker {
         self.count = 0;
     }
 
-    pub fn estimate_velocity(&self, lookback_seconds: f64, sensitivity: f32, max_speed: f32) -> Vector2 {
+    pub fn estimate_velocity(
+        &self,
+        lookback_seconds: f64,
+        sensitivity: f32,
+        max_speed: f32,
+    ) -> Vector2 {
         if self.count < 2 {
             return Vector2::ZERO;
         }
@@ -173,7 +241,11 @@ impl MouseTracker {
 pub struct HitTester;
 
 impl HitTester {
-    pub fn hit_test_topmost<'a>(&self, objects: &'a [ObjectState], point: Vector2) -> Option<&'a ObjectState> {
+    pub fn hit_test_topmost<'a>(
+        &self,
+        objects: &'a [ObjectState],
+        point: Vector2,
+    ) -> Option<&'a ObjectState> {
         let mut best: Option<&ObjectState> = None;
         let mut best_z = i32::MIN;
 
@@ -201,9 +273,9 @@ impl HitTester {
     }
 
     pub fn is_point_over_any_object(&self, objects: &[ObjectState], point: Vector2) -> bool {
-        objects
-            .iter()
-            .any(|object| object.is_visible && object.depth_z >= -1.0 && contains_point(&object.body, point))
+        objects.iter().any(|object| {
+            object.is_visible && object.depth_z >= -1.0 && contains_point(&object.body, point)
+        })
     }
 }
 
@@ -330,9 +402,9 @@ impl DragController {
 
         self.mouse_tracker
             .add_sample(object.body.position + self.cursor_offset, now_seconds);
-        let throw_velocity = self
-            .mouse_tracker
-            .estimate_velocity(0.085, throw_sensitivity, max_throw_speed);
+        let throw_velocity =
+            self.mouse_tracker
+                .estimate_velocity(0.085, throw_sensitivity, max_throw_speed);
 
         object.body.is_dragging = false;
         object.body.is_sleeping = false;
@@ -400,8 +472,12 @@ impl SceneController {
     }
 
     pub fn step(&mut self, dt: f32, bounds: RectF) {
-        self.physics_world
-            .step(dt, bounds, self.config.sleep_threshold, self.config.floor_snap_threshold);
+        self.physics_world.step(
+            dt,
+            bounds,
+            self.config.sleep_threshold,
+            self.config.floor_snap_threshold,
+        );
     }
 
     pub fn spawn_next_object(&mut self, position: Vector2) -> u64 {
@@ -411,11 +487,19 @@ impl SceneController {
     }
 
     pub fn spawn_random_crystal(&mut self, position: Vector2) -> u64 {
-        self.spawn_object(position, Some(random_crystal_color()), ObjectVisualKind::Crystal)
+        self.spawn_object(
+            position,
+            Some(random_crystal_color()),
+            ObjectVisualKind::Crystal,
+        )
     }
 
     pub fn spawn_random_dvd_logo(&mut self, position: Vector2) -> u64 {
-        self.spawn_object(position, Some(random_logo_color()), ObjectVisualKind::DvdLogo)
+        self.spawn_object(
+            position,
+            Some(random_logo_color()),
+            ObjectVisualKind::DvdLogo,
+        )
     }
 
     pub fn spawn_small_cube_batch(&mut self, center: Vector2, count: usize) -> Option<u64> {
@@ -440,7 +524,12 @@ impl SceneController {
                 start_x + (column as f32 * spacing) + stagger,
                 start_y + (row as f32 * spacing),
             );
-            last_id = Some(self.spawn_object_with_size(position, None, ObjectVisualKind::Cube, STARTUP_CUBE_SIZE));
+            last_id = Some(self.spawn_object_with_size(
+                position,
+                None,
+                ObjectVisualKind::Cube,
+                STARTUP_CUBE_SIZE,
+            ));
         }
 
         last_id
@@ -461,7 +550,12 @@ impl SceneController {
         shard_count
     }
 
-    pub fn spawn_object(&mut self, position: Vector2, color: Option<AppColor>, visual_kind: ObjectVisualKind) -> u64 {
+    pub fn spawn_object(
+        &mut self,
+        position: Vector2,
+        color: Option<AppColor>,
+        visual_kind: ObjectVisualKind,
+    ) -> u64 {
         self.spawn_object_with_size(position, color, visual_kind, DEFAULT_OBJECT_SIZE)
     }
 
@@ -473,12 +567,56 @@ impl SceneController {
         visual_kind: ObjectVisualKind,
         shape: CollisionShape,
     ) -> u64 {
-        let id = self.spawn_object_with_size(position, Some(color), visual_kind, size.x.min(size.y).max(1.0));
-        if let Some(object) = self.physics_world.objects_mut().iter_mut().find(|object| object.id == id) {
+        let id = self.spawn_object_with_size(
+            position,
+            Some(color),
+            visual_kind,
+            size.x.min(size.y).max(1.0),
+        );
+        if let Some(object) = self
+            .physics_world
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == id)
+        {
             object.body.width = size.x.max(1.0);
             object.body.height = size.y.max(1.0);
             object.body.shape = shape;
             object.body.collision_scale = 1.0;
+        }
+        id
+    }
+
+    pub fn spawn_text_object(&mut self, position: Vector2, text: String) -> u64 {
+        self.spawn_text_object_with_scale(position, text, 1.0)
+    }
+
+    pub fn spawn_text_object_with_scale(
+        &mut self,
+        position: Vector2,
+        text: String,
+        scale: f32,
+    ) -> u64 {
+        let text = text.trim().chars().take(120).collect::<String>();
+        let scale = scale.clamp(0.5, 3.0);
+        let width = ((text.chars().count().max(1) as f32) * 18.0).clamp(96.0, 720.0) * scale;
+        let id = self.spawn_custom_object(
+            position,
+            Vector2::new(width, 72.0 * scale),
+            AppColor::from_rgb(248, 248, 252),
+            ObjectVisualKind::Text,
+            CollisionShape::Box,
+        );
+        if let Some(object) = self.objects_mut().iter_mut().find(|object| object.id == id) {
+            object.custom_text = Some(if text.is_empty() {
+                "Text".to_string()
+            } else {
+                text
+            });
+            object.body.restitution = 0.42;
+            object.body.collision_scale = 0.9;
+            object.rotation_x = -0.16;
+            object.rotation_y = 0.22;
         }
         id
     }
@@ -501,7 +639,8 @@ impl SceneController {
         let direction = from_impact / distance;
         let max_distance = max_corner_distance(bounds, impact).max(1.0);
         let near_impact = (1.0 - distance / max_distance).clamp(0.0, 1.0);
-        let blast_speed = rng.random_range(160.0..430.0) + near_impact * rng.random_range(480.0..920.0);
+        let blast_speed =
+            rng.random_range(160.0..430.0) + near_impact * rng.random_range(480.0..920.0);
         let lift = rng.random_range(80.0..310.0) + near_impact * 180.0;
         let area_mass = (spec.area / 18_000.0).clamp(0.45, 3.5);
 
@@ -516,7 +655,8 @@ impl SceneController {
         state.body.position = spec.min;
         state.body.width = spec.size.x.max(4.0);
         state.body.height = spec.size.y.max(4.0);
-        state.body.velocity = Vector2::new(direction.x * blast_speed, direction.y * blast_speed - lift);
+        state.body.velocity =
+            Vector2::new(direction.x * blast_speed, direction.y * blast_speed - lift);
         state.body.mass = area_mass;
         state.body.restitution = 0.34;
         state.body.friction = 0.82;
@@ -526,7 +666,8 @@ impl SceneController {
         state.body.collision_scale = 0.88;
         state.depth_unlocked = true;
         state.depth_z = rng.random_range(0.0..18.0) + near_impact * 26.0;
-        state.depth_velocity = rng.random_range(90.0..240.0) + near_impact * rng.random_range(280.0..740.0);
+        state.depth_velocity =
+            rng.random_range(90.0..240.0) + near_impact * rng.random_range(280.0..740.0);
         state.rotation_x = rng.random_range(-10.0..10.0) as f64;
         state.rotation_y = rng.random_range(-10.0..10.0) as f64;
         state.rotation_z = rng.random_range(-4.0..4.0) as f64;
@@ -553,7 +694,13 @@ impl SceneController {
             .add_static_box_collider(center, half_extents, friction, restitution);
     }
 
-    pub fn add_static_sphere_collider(&mut self, center: (f32, f32, f32), radius: f32, friction: f32, restitution: f32) {
+    pub fn add_static_sphere_collider(
+        &mut self,
+        center: (f32, f32, f32),
+        radius: f32,
+        friction: f32,
+        restitution: f32,
+    ) {
         self.physics_world
             .add_static_sphere_collider(center, radius, friction, restitution);
     }
@@ -614,9 +761,15 @@ impl SceneController {
         };
         state.body.linear_damping = if visual_kind == ObjectVisualKind::DvdLogo {
             1.0
-        } else if matches!(visual_kind, ObjectVisualKind::FoxBuddy | ObjectVisualKind::RobotBuddy) {
+        } else if matches!(
+            visual_kind,
+            ObjectVisualKind::FoxBuddy | ObjectVisualKind::RobotBuddy
+        ) {
             0.982
-        } else if matches!(visual_kind, ObjectVisualKind::Snail | ObjectVisualKind::QuadDrone) {
+        } else if matches!(
+            visual_kind,
+            ObjectVisualKind::Snail | ObjectVisualKind::QuadDrone
+        ) {
             1.0
         } else if visual_kind == ObjectVisualKind::Fan {
             0.992
@@ -648,11 +801,16 @@ impl SceneController {
             | ObjectVisualKind::Snail
             | ObjectVisualKind::QuadDrone
             | ObjectVisualKind::Basketball => CollisionShape::Circle,
-            ObjectVisualKind::Crystal | ObjectVisualKind::BitCrystal | ObjectVisualKind::Star => CollisionShape::Diamond,
+            ObjectVisualKind::Crystal | ObjectVisualKind::BitCrystal | ObjectVisualKind::Star => {
+                CollisionShape::Diamond
+            }
             _ => CollisionShape::Box,
         };
         state.body.collision_scale = 1.0;
-        if matches!(visual_kind, ObjectVisualKind::FoxBuddy | ObjectVisualKind::RobotBuddy) {
+        if matches!(
+            visual_kind,
+            ObjectVisualKind::FoxBuddy | ObjectVisualKind::RobotBuddy
+        ) {
             state.body.mass = 1.45;
             state.body.friction = 1.05;
             state.body.restitution = 0.28;
@@ -774,7 +932,11 @@ struct ShatterShardSpec {
     geometry: ScreenShardGeometry,
 }
 
-fn generate_shatter_specs(bounds: RectF, impact: Vector2, rng: &mut impl RngExt) -> Vec<ShatterShardSpec> {
+fn generate_shatter_specs(
+    bounds: RectF,
+    impact: Vector2,
+    rng: &mut impl RngExt,
+) -> Vec<ShatterShardSpec> {
     let max_radius = max_corner_distance(bounds, impact) * 1.12;
     let impact_radius = (bounds.width.min(bounds.height) * 0.045).clamp(42.0, 92.0);
     let usable_radius = (max_radius - impact_radius).max(1.0);
@@ -823,7 +985,11 @@ fn generate_shatter_specs(bounds: RectF, impact: Vector2, rng: &mut impl RngExt)
             let polygon = vec![
                 point_from_polar(impact, angle0, radii_by_angle[wedge_index][ring_index]),
                 point_from_polar(impact, angle1, radii_by_angle[wedge_index + 1][ring_index]),
-                point_from_polar(impact, angle1, radii_by_angle[wedge_index + 1][ring_index + 1]),
+                point_from_polar(
+                    impact,
+                    angle1,
+                    radii_by_angle[wedge_index + 1][ring_index + 1],
+                ),
                 point_from_polar(impact, angle0, radii_by_angle[wedge_index][ring_index + 1]),
             ];
             let clipped = dedupe_polygon(clip_polygon_to_rect(polygon, bounds));
@@ -883,10 +1049,26 @@ fn build_shatter_spec(points: Vec<Vector2>, bounds: RectF) -> Option<ShatterShar
 }
 
 fn clip_polygon_to_rect(points: Vec<Vector2>, bounds: RectF) -> Vec<Vector2> {
-    let points = clip_polygon_edge(points, |point| point.x >= bounds.left(), |a, b| intersect_x(a, b, bounds.left()));
-    let points = clip_polygon_edge(points, |point| point.x <= bounds.right(), |a, b| intersect_x(a, b, bounds.right()));
-    let points = clip_polygon_edge(points, |point| point.y >= bounds.top(), |a, b| intersect_y(a, b, bounds.top()));
-    clip_polygon_edge(points, |point| point.y <= bounds.bottom(), |a, b| intersect_y(a, b, bounds.bottom()))
+    let points = clip_polygon_edge(
+        points,
+        |point| point.x >= bounds.left(),
+        |a, b| intersect_x(a, b, bounds.left()),
+    );
+    let points = clip_polygon_edge(
+        points,
+        |point| point.x <= bounds.right(),
+        |a, b| intersect_x(a, b, bounds.right()),
+    );
+    let points = clip_polygon_edge(
+        points,
+        |point| point.y >= bounds.top(),
+        |a, b| intersect_y(a, b, bounds.top()),
+    );
+    clip_polygon_edge(
+        points,
+        |point| point.y <= bounds.bottom(),
+        |a, b| intersect_y(a, b, bounds.bottom()),
+    )
 }
 
 fn clip_polygon_edge(
@@ -947,7 +1129,12 @@ fn dedupe_polygon(points: Vec<Vector2>) -> Vec<Vector2> {
         }
     }
     if deduped.len() > 2
-        && (deduped[0] - *deduped.last().expect("deduped polygon should have a last point")).length_squared() <= 0.25
+        && (deduped[0]
+            - *deduped
+                .last()
+                .expect("deduped polygon should have a last point"))
+        .length_squared()
+            <= 0.25
     {
         deduped.pop();
     }
@@ -1016,7 +1203,75 @@ fn color_from_hsv(hue: f64, saturation: f64, value: f64) -> AppColor {
     };
 
     let matched = value - chroma;
-    AppColor::from_rgb(to_byte(red + matched), to_byte(green + matched), to_byte(blue + matched))
+    AppColor::from_rgb(
+        to_byte(red + matched),
+        to_byte(green + matched),
+        to_byte(blue + matched),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_objects_keep_their_content_and_do_not_expire() {
+        let mut scene = SceneController::new(AppConfig::default());
+        let bounds = RectF::new(0.0, 0.0, 1920.0, 1080.0);
+        let id = scene.spawn_text_object(Vector2::new(320.0, 120.0), "  Hello forever  ".into());
+
+        for _ in 0..36_000 {
+            scene.step(1.0 / 60.0, bounds);
+        }
+
+        let text = scene
+            .objects()
+            .iter()
+            .find(|object| object.id == id)
+            .expect("ordinary scene updates must not expire text objects");
+        assert_eq!(text.visual_kind, ObjectVisualKind::Text);
+        assert_eq!(text.custom_text.as_deref(), Some("Hello forever"));
+    }
+
+    #[test]
+    fn text_objects_use_a_safe_default_and_limit_custom_input() {
+        let mut scene = SceneController::new(AppConfig::default());
+        let empty_id = scene.spawn_text_object(Vector2::ZERO, "   ".into());
+        let long_id = scene.spawn_text_object(Vector2::ZERO, "x".repeat(200));
+
+        let empty = scene
+            .objects()
+            .iter()
+            .find(|object| object.id == empty_id)
+            .unwrap();
+        let long = scene
+            .objects()
+            .iter()
+            .find(|object| object.id == long_id)
+            .unwrap();
+        assert_eq!(empty.custom_text.as_deref(), Some("Text"));
+        assert_eq!(long.custom_text.as_deref().unwrap().chars().count(), 120);
+    }
+
+    #[test]
+    fn text_size_scales_visuals_and_physics_bounds_together() {
+        let mut scene = SceneController::new(AppConfig::default());
+        let medium_id = scene.spawn_text_object_with_scale(Vector2::ZERO, "Size".into(), 1.0);
+        let xlarge_id = scene.spawn_text_object_with_scale(Vector2::ZERO, "Size".into(), 2.0);
+        let medium = scene
+            .objects()
+            .iter()
+            .find(|object| object.id == medium_id)
+            .unwrap();
+        let xlarge = scene
+            .objects()
+            .iter()
+            .find(|object| object.id == xlarge_id)
+            .unwrap();
+
+        assert_eq!(xlarge.body.width, medium.body.width * 2.0);
+        assert_eq!(xlarge.body.height, medium.body.height * 2.0);
+    }
 }
 
 fn to_byte(value: f64) -> u8 {

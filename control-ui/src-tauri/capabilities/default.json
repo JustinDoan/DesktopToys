@@ -2,6 +2,6 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capability for the control UI window",
-  "windows": ["main"],
+  "windows": ["main", "room"],
   "permissions": ["core:default"]
 }

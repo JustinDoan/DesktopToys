@@ -3,7 +3,9 @@ use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use core_types::{AppColor, CollisionShape, ObjectState, ObjectVisualKind, PhysicsBody, RectF, Vector2};
+use core_types::{
+    AppColor, CollisionShape, ObjectState, ObjectVisualKind, PhysicsBody, RectF, Vector2,
+};
 
 const PENETRATION_SLOP: f32 = 0.75;
 const POSITION_CORRECTION_PERCENT: f32 = 0.8;
@@ -109,7 +111,13 @@ unsafe extern "C" {
     fn sop_box3d_reset(world: *mut c_void, gravity_y: f32, bounds_width: f32, bounds_height: f32);
     fn sop_box3d_set_gravity(world: *mut c_void, gravity_y: f32);
     fn sop_box3d_sync_body(world: *mut c_void, def: *const SopBox3dBodyDef);
-    fn sop_box3d_add_velocity(world: *mut c_void, id: u64, delta_x: f32, delta_y: f32, delta_z: f32) -> bool;
+    fn sop_box3d_add_velocity(
+        world: *mut c_void,
+        id: u64,
+        delta_x: f32,
+        delta_y: f32,
+        delta_z: f32,
+    ) -> bool;
     fn sop_box3d_remove_body(world: *mut c_void, id: u64);
     fn sop_box3d_add_static_box(
         world: *mut c_void,
@@ -220,8 +228,11 @@ impl Box3dBackend {
         let should_sync = match self.synced_bodies.get(&object.id) {
             None => true,
             Some(previous) => {
-                is_dragging || previous.is_dragging || next_state.motor_enabled || previous.static_fields_changed(next_state)
-            },
+                is_dragging
+                    || previous.is_dragging
+                    || next_state.motor_enabled
+                    || previous.static_fields_changed(next_state)
+            }
         };
         if !should_sync {
             return;
@@ -254,7 +265,13 @@ impl Box3dBackend {
         self.synced_bodies.insert(object.id, next_state);
     }
 
-    fn add_static_box(&mut self, center: (f32, f32, f32), half_extents: (f32, f32, f32), friction: f32, restitution: f32) {
+    fn add_static_box(
+        &mut self,
+        center: (f32, f32, f32),
+        half_extents: (f32, f32, f32),
+        friction: f32,
+        restitution: f32,
+    ) {
         unsafe {
             sop_box3d_add_static_box(
                 self.raw.as_ptr(),
@@ -270,9 +287,23 @@ impl Box3dBackend {
         };
     }
 
-    fn add_static_sphere(&mut self, center: (f32, f32, f32), radius: f32, friction: f32, restitution: f32) {
+    fn add_static_sphere(
+        &mut self,
+        center: (f32, f32, f32),
+        radius: f32,
+        friction: f32,
+        restitution: f32,
+    ) {
         unsafe {
-            sop_box3d_add_static_sphere(self.raw.as_ptr(), center.0, center.1, center.2, radius, friction, restitution)
+            sop_box3d_add_static_sphere(
+                self.raw.as_ptr(),
+                center.0,
+                center.1,
+                center.2,
+                radius,
+                friction,
+                restitution,
+            )
         };
     }
 
@@ -297,23 +328,24 @@ impl Box3dBackend {
         }
 
         let empty_snapshot = SopBox3dSnapshot {
-                id: 0,
-                x: 0.0,
-                y: 0.0,
-                velocity_x: 0.0,
-                velocity_y: 0.0,
-                rotation_x: 0.0,
-                rotation_y: 0.0,
-                rotation_z: 0.0,
-                rotation_w: 1.0,
-                is_awake: false,
-                z: 0.0,
-                velocity_z: 0.0,
+            id: 0,
+            x: 0.0,
+            y: 0.0,
+            velocity_x: 0.0,
+            velocity_y: 0.0,
+            rotation_x: 0.0,
+            rotation_y: 0.0,
+            rotation_z: 0.0,
+            rotation_w: 1.0,
+            is_awake: false,
+            z: 0.0,
+            velocity_z: 0.0,
         };
         self.snapshot_buffer.resize(count as usize, empty_snapshot);
-        let filled =
-            unsafe { sop_box3d_get_snapshots(self.raw.as_ptr(), self.snapshot_buffer.as_mut_ptr(), count) }
-                .max(0) as usize;
+        let filled = unsafe {
+            sop_box3d_get_snapshots(self.raw.as_ptr(), self.snapshot_buffer.as_mut_ptr(), count)
+        }
+        .max(0) as usize;
         self.snapshot_buffer.truncate(filled);
 
         &self.snapshot_buffer
@@ -509,7 +541,13 @@ impl PhysicsWorld {
     }
 
     /// Registers a static sphere collider, e.g. one segment of a hoop rim.
-    pub fn add_static_sphere_collider(&mut self, center: (f32, f32, f32), radius: f32, friction: f32, restitution: f32) {
+    pub fn add_static_sphere_collider(
+        &mut self,
+        center: (f32, f32, f32),
+        radius: f32,
+        friction: f32,
+        restitution: f32,
+    ) {
         self.static_colliders.push(StaticCollider {
             center,
             shape: StaticColliderShape::Sphere { radius },
@@ -598,7 +636,13 @@ impl PhysicsWorld {
         }
     }
 
-    pub fn step(&mut self, dt: f32, bounds: RectF, sleep_threshold: f32, floor_snap_threshold: f32) {
+    pub fn step(
+        &mut self,
+        dt: f32,
+        bounds: RectF,
+        sleep_threshold: f32,
+        floor_snap_threshold: f32,
+    ) {
         let _ = (sleep_threshold, floor_snap_threshold);
         self.ensure_box3d(bounds);
 
@@ -611,11 +655,21 @@ impl PhysicsWorld {
             for collider in &self.static_colliders {
                 match collider.shape {
                     StaticColliderShape::Box { half_extents } => {
-                        box3d.add_static_box(collider.center, half_extents, collider.friction, collider.restitution);
-                    },
+                        box3d.add_static_box(
+                            collider.center,
+                            half_extents,
+                            collider.friction,
+                            collider.restitution,
+                        );
+                    }
                     StaticColliderShape::Sphere { radius } => {
-                        box3d.add_static_sphere(collider.center, radius, collider.friction, collider.restitution);
-                    },
+                        box3d.add_static_sphere(
+                            collider.center,
+                            radius,
+                            collider.friction,
+                            collider.restitution,
+                        );
+                    }
                 }
             }
             self.static_colliders_synced = true;
@@ -635,8 +689,12 @@ impl PhysicsWorld {
         box3d.step(dt);
         let snapshots = box3d.snapshots();
         self.object_indices.clear();
-        self.object_indices
-            .extend(self.objects.iter().enumerate().map(|(index, object)| (object.id, index)));
+        self.object_indices.extend(
+            self.objects
+                .iter()
+                .enumerate()
+                .map(|(index, object)| (object.id, index)),
+        );
         for snapshot in snapshots {
             let Some(&object_index) = self.object_indices.get(&snapshot.id) else {
                 continue;
@@ -675,11 +733,13 @@ impl PhysicsWorld {
             object.angular_velocity_y = 0.0;
             object.angular_velocity_z = 0.0;
         }
-
     }
 
     fn ensure_box3d(&mut self, bounds: RectF) {
-        let key = (bounds.width.max(1.0).round() as u32, bounds.height.max(1.0).round() as u32);
+        let key = (
+            bounds.width.max(1.0).round() as u32,
+            bounds.height.max(1.0).round() as u32,
+        );
         if self.box3d.is_none() {
             self.box3d = Some(Box3dBackend::new(self.gravity.y, bounds));
             self.box3d_bounds = Some(key);
@@ -772,7 +832,9 @@ pub fn solve_screen_bounds(
     }
 
     let effective_bottom = body.position.y + body.height - inset_y;
-    if effective_bottom >= bounds.bottom() - floor_snap_threshold && body.velocity.y.abs() < sleep_threshold {
+    if effective_bottom >= bounds.bottom() - floor_snap_threshold
+        && body.velocity.y.abs() < sleep_threshold
+    {
         body.velocity.y = 0.0;
     }
 
@@ -796,12 +858,14 @@ fn update_sleep_state(
 
     let speed_squared = body.velocity.length_squared();
     let linear_threshold = sleep_threshold * sleep_threshold;
-    let angular_speed =
-        object.angular_velocity_x.abs() + object.angular_velocity_y.abs() + object.angular_velocity_z.abs();
+    let angular_speed = object.angular_velocity_x.abs()
+        + object.angular_velocity_y.abs()
+        + object.angular_velocity_z.abs();
     let inset_y = (body.height * 0.5) - (body.height * 0.5 * body.collision_scale);
     let effective_bottom = body.position.y + body.height - inset_y;
     let near_floor = effective_bottom >= bounds.bottom() - floor_snap_threshold - 1.0;
-    let can_sleep = near_floor && speed_squared <= linear_threshold && angular_speed <= SLEEP_ANGULAR_THRESHOLD;
+    let can_sleep =
+        near_floor && speed_squared <= linear_threshold && angular_speed <= SLEEP_ANGULAR_THRESHOLD;
     if !can_sleep {
         body.is_sleeping = false;
         body.sleep_timer_seconds = 0.0;
@@ -822,13 +886,19 @@ fn update_sleep_state(
 }
 
 #[allow(dead_code)]
-fn apply_dice_face_settling(object: &mut ObjectState, bounds: RectF, dt: f32, sleep_threshold: f32) {
+fn apply_dice_face_settling(
+    object: &mut ObjectState,
+    bounds: RectF,
+    dt: f32,
+    sleep_threshold: f32,
+) {
     let body = &mut object.body;
     let is_near_floor = body.position.y + body.height >= bounds.bottom() - 2.0;
     let horizontal_speed = body.velocity.x.abs();
     let vertical_speed = body.velocity.y.abs();
-    let angular_speed =
-        object.angular_velocity_x.abs() + object.angular_velocity_y.abs() + object.angular_velocity_z.abs();
+    let angular_speed = object.angular_velocity_x.abs()
+        + object.angular_velocity_y.abs()
+        + object.angular_velocity_z.abs();
 
     if !is_near_floor
         || horizontal_speed > sleep_threshold * 1.1
@@ -905,14 +975,24 @@ fn resolve_object_pair(left: &mut ObjectState, right: &mut ObjectState) {
 
     let delta_x = right_center_x - left_center_x;
     let delta_y = right_center_y - left_center_y;
-    let overlap_x = effective_half_width(&left_body) + effective_half_width(&right_body) - delta_x.abs();
-    let overlap_y = effective_half_height(&left_body) + effective_half_height(&right_body) - delta_y.abs();
+    let overlap_x =
+        effective_half_width(&left_body) + effective_half_width(&right_body) - delta_x.abs();
+    let overlap_y =
+        effective_half_height(&left_body) + effective_half_height(&right_body) - delta_y.abs();
     if overlap_x <= 0.0 || overlap_y <= 0.0 {
         return;
     }
 
-    let left_inverse_mass = if left_body.is_dragging { 0.0 } else { inverse_mass(&left_body) };
-    let right_inverse_mass = if right_body.is_dragging { 0.0 } else { inverse_mass(&right_body) };
+    let left_inverse_mass = if left_body.is_dragging {
+        0.0
+    } else {
+        inverse_mass(&left_body)
+    };
+    let right_inverse_mass = if right_body.is_dragging {
+        0.0
+    } else {
+        inverse_mass(&right_body)
+    };
     let inverse_mass_sum = left_inverse_mass + right_inverse_mass;
     if inverse_mass_sum <= 0.0 {
         return;
@@ -936,7 +1016,15 @@ fn resolve_object_pair(left: &mut ObjectState, right: &mut ObjectState) {
         inverse_mass_sum,
     );
 
-    apply_collision_impulse(left, right, normal_x, normal_y, left_inverse_mass, right_inverse_mass, inverse_mass_sum);
+    apply_collision_impulse(
+        left,
+        right,
+        normal_x,
+        normal_y,
+        left_inverse_mass,
+        right_inverse_mass,
+        inverse_mass_sum,
+    );
     randomize_logo_colors_on_contact(left, right);
 }
 
@@ -958,12 +1046,28 @@ fn resolve_circle_pair(left: &mut ObjectState, right: &mut ObjectState) -> bool 
     }
 
     let distance = distance_squared.max(0.0001).sqrt();
-    let normal_x = if distance > 0.0001 { delta_x / distance } else { 1.0 };
-    let normal_y = if distance > 0.0001 { delta_y / distance } else { 0.0 };
+    let normal_x = if distance > 0.0001 {
+        delta_x / distance
+    } else {
+        1.0
+    };
+    let normal_y = if distance > 0.0001 {
+        delta_y / distance
+    } else {
+        0.0
+    };
     let penetration = radius_sum - distance;
 
-    let left_inverse_mass = if left_body.is_dragging { 0.0 } else { inverse_mass(&left_body) };
-    let right_inverse_mass = if right_body.is_dragging { 0.0 } else { inverse_mass(&right_body) };
+    let left_inverse_mass = if left_body.is_dragging {
+        0.0
+    } else {
+        inverse_mass(&left_body)
+    };
+    let right_inverse_mass = if right_body.is_dragging {
+        0.0
+    } else {
+        inverse_mass(&right_body)
+    };
     let inverse_mass_sum = left_inverse_mass + right_inverse_mass;
     if inverse_mass_sum <= 0.0 {
         return false;
@@ -979,14 +1083,30 @@ fn resolve_circle_pair(left: &mut ObjectState, right: &mut ObjectState) -> bool 
         inverse_mass_sum,
     );
 
-    apply_collision_impulse(left, right, normal_x, normal_y, left_inverse_mass, right_inverse_mass, inverse_mass_sum);
+    apply_collision_impulse(
+        left,
+        right,
+        normal_x,
+        normal_y,
+        left_inverse_mass,
+        right_inverse_mass,
+        inverse_mass_sum,
+    );
     true
 }
 
 fn resolve_circle_box_pair(left: &mut ObjectState, right: &mut ObjectState) -> bool {
     let left_is_circle = left.body.shape == CollisionShape::Circle;
-    let circle_body = if left_is_circle { left.body } else { right.body };
-    let box_body = if left_is_circle { right.body } else { left.body };
+    let circle_body = if left_is_circle {
+        left.body
+    } else {
+        right.body
+    };
+    let box_body = if left_is_circle {
+        right.body
+    } else {
+        left.body
+    };
 
     let Some((circle_to_box_normal_x, circle_to_box_normal_y, penetration)) =
         try_get_circle_box_contact(&circle_body, &box_body)
@@ -1004,8 +1124,16 @@ fn resolve_circle_box_pair(left: &mut ObjectState, right: &mut ObjectState) -> b
     } else {
         -circle_to_box_normal_y
     };
-    let left_inverse_mass = if left.body.is_dragging { 0.0 } else { inverse_mass(&left.body) };
-    let right_inverse_mass = if right.body.is_dragging { 0.0 } else { inverse_mass(&right.body) };
+    let left_inverse_mass = if left.body.is_dragging {
+        0.0
+    } else {
+        inverse_mass(&left.body)
+    };
+    let right_inverse_mass = if right.body.is_dragging {
+        0.0
+    } else {
+        inverse_mass(&right.body)
+    };
     let inverse_mass_sum = left_inverse_mass + right_inverse_mass;
     if inverse_mass_sum <= 0.0 {
         return false;
@@ -1021,11 +1149,22 @@ fn resolve_circle_box_pair(left: &mut ObjectState, right: &mut ObjectState) -> b
         inverse_mass_sum,
     );
 
-    apply_collision_impulse(left, right, normal_x, normal_y, left_inverse_mass, right_inverse_mass, inverse_mass_sum);
+    apply_collision_impulse(
+        left,
+        right,
+        normal_x,
+        normal_y,
+        left_inverse_mass,
+        right_inverse_mass,
+        inverse_mass_sum,
+    );
     true
 }
 
-fn try_get_circle_box_contact(circle_body: &PhysicsBody, box_body: &PhysicsBody) -> Option<(f32, f32, f32)> {
+fn try_get_circle_box_contact(
+    circle_body: &PhysicsBody,
+    box_body: &PhysicsBody,
+) -> Option<(f32, f32, f32)> {
     let circle_center_x = circle_body.position.x + (circle_body.width * 0.5);
     let circle_center_y = circle_body.position.y + (circle_body.height * 0.5);
     let radius = effective_radius(circle_body);
@@ -1097,7 +1236,9 @@ fn apply_collision_impulse(
     left.angular_velocity_z += impulse_x as f64 * 0.015;
     right.angular_velocity_z -= impulse_x as f64 * 0.015;
 
-    if impulse_magnitude > WAKE_IMPULSE_THRESHOLD || velocity_along_normal.abs() > WAKE_VELOCITY_THRESHOLD {
+    if impulse_magnitude > WAKE_IMPULSE_THRESHOLD
+        || velocity_along_normal.abs() > WAKE_VELOCITY_THRESHOLD
+    {
         wake_body(&mut left.body);
         wake_body(&mut right.body);
     }
@@ -1112,8 +1253,10 @@ fn apply_position_correction(
     right_inverse_mass: f32,
     inverse_mass_sum: f32,
 ) {
-    let correction_magnitude = ((correction_x * correction_x) + (correction_y * correction_y)).sqrt();
-    let corrected_magnitude = (correction_magnitude - PENETRATION_SLOP).max(0.0) * POSITION_CORRECTION_PERCENT;
+    let correction_magnitude =
+        ((correction_x * correction_x) + (correction_y * correction_y)).sqrt();
+    let corrected_magnitude =
+        (correction_magnitude - PENETRATION_SLOP).max(0.0) * POSITION_CORRECTION_PERCENT;
     if corrected_magnitude <= 0.0 || correction_magnitude <= 0.0001 {
         return;
     }
@@ -1219,7 +1362,11 @@ fn color_from_hsv(hue: f32, saturation: f32, value: f32) -> AppColor {
     };
 
     let m = value - chroma;
-    AppColor::from_rgb(to_u8((r1 + m) * 255.0), to_u8((g1 + m) * 255.0), to_u8((b1 + m) * 255.0))
+    AppColor::from_rgb(
+        to_u8((r1 + m) * 255.0),
+        to_u8((g1 + m) * 255.0),
+        to_u8((b1 + m) * 255.0),
+    )
 }
 
 fn to_u8(value: f32) -> u8 {
@@ -1232,7 +1379,12 @@ fn next_random_u32() -> u32 {
         let next = current
             .wrapping_mul(COLOR_RANDOMIZER_MULTIPLIER)
             .wrapping_add(COLOR_RANDOMIZER_INCREMENT);
-        match COLOR_RANDOMIZER_STATE.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+        match COLOR_RANDOMIZER_STATE.compare_exchange_weak(
+            current,
+            next,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
             Ok(_) => return (next >> 32) as u32,
             Err(observed) => current = observed,
         }
@@ -1259,7 +1411,11 @@ mod tests {
         object.body.restitution = 0.75;
         object.body.linear_damping = 0.992;
         object.body.shape = shape;
-        object.body.collision_scale = if shape == CollisionShape::Circle { 0.82 } else { 1.0 };
+        object.body.collision_scale = if shape == CollisionShape::Circle {
+            0.82
+        } else {
+            1.0
+        };
         object
     }
 

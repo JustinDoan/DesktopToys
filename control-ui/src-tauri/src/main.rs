@@ -1,5 +1,10 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod local_relay;
+mod room;
+mod room_bridge;
+mod twitch;
+
 use std::{
     env,
     io::{BufRead, BufReader, Write},
@@ -14,15 +19,40 @@ use std::{
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 
+use room::{RoomFeatureFilters, RoomService, RoomSnapshot};
+use room_bridge::RoomBridge;
 use serde::Serialize;
 use tauri::{Manager, PhysicalPosition};
+use twitch::{TwitchService, TwitchSnapshot};
 
-const ENGINE_IPC_ADDR: &str = "127.0.0.1:47731";
-const WINDOW_IPC_ADDR: &str = "127.0.0.1:47732";
+const DEFAULT_ENGINE_IPC_ADDR: &str = "127.0.0.1:47731";
+const DEFAULT_WINDOW_IPC_ADDR: &str = "127.0.0.1:47732";
+fn engine_ipc_addr() -> String {
+    env::var("SCREEN_OVERLAY_ENGINE_IPC_ADDR")
+        .unwrap_or_else(|_| DEFAULT_ENGINE_IPC_ADDR.to_string())
+}
+fn window_ipc_addr() -> String {
+    env::var("SCREEN_OVERLAY_WINDOW_IPC_ADDR")
+        .unwrap_or_else(|_| DEFAULT_WINDOW_IPC_ADDR.to_string())
+}
 const RENDERER_SIDECAR_BASE: &str = "screen-overlay-renderer";
 const RENDERER_SIDECAR_EXE: &str = "screen-overlay-renderer-x86_64-pc-windows-msvc.exe";
+const DEFAULT_TWITCH_CLIENT_ID: &str = "vxukm6l5twy8m4pyena0pyfuim1sw2";
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+pub(crate) fn room_trace(message: impl AsRef<str>) {
+    let Ok(path) = env::var("SCREEN_OVERLAY_ROOM_TRACE_PATH") else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "ui[{}] {}", std::process::id(), message.as_ref());
+    }
+}
 
 #[derive(Debug, Default)]
 struct ControlState {
@@ -39,6 +69,7 @@ struct ControlModel {
     shatter_gun_equipped: bool,
     click_through: bool,
     overlay_interactive: bool,
+    obs_output_enabled: bool,
     object_count: u32,
     engine_connected: bool,
     transport: String,
@@ -55,6 +86,7 @@ impl Default for ControlModel {
             shatter_gun_equipped: false,
             click_through: true,
             overlay_interactive: true,
+            obs_output_enabled: false,
             object_count: 7,
             engine_connected: false,
             transport: "native ipc idle".to_string(),
@@ -76,6 +108,7 @@ struct EngineSnapshot {
     shatter_gun_equipped: bool,
     click_through: bool,
     overlay_interactive: bool,
+    obs_output_enabled: bool,
     fps: u32,
     object_count: u32,
     queued_commands: usize,
@@ -108,10 +141,14 @@ fn display_layout(app: tauri::AppHandle) -> Result<Vec<DisplayInfo>, String> {
     let Some(window) = app.get_webview_window("main") else {
         return Ok(Vec::new());
     };
-    let primary = window.primary_monitor().map_err(|error| error.to_string())?;
+    let primary = window
+        .primary_monitor()
+        .map_err(|error| error.to_string())?;
     let primary_position = primary.as_ref().map(|monitor| monitor.position());
     let primary_size = primary.as_ref().map(|monitor| monitor.size());
-    let monitors = window.available_monitors().map_err(|error| error.to_string())?;
+    let monitors = window
+        .available_monitors()
+        .map_err(|error| error.to_string())?;
     Ok(monitors
         .into_iter()
         .enumerate()
@@ -119,9 +156,15 @@ fn display_layout(app: tauri::AppHandle) -> Result<Vec<DisplayInfo>, String> {
             let position = monitor.position();
             let size = monitor.size();
             let is_primary = primary_position == Some(position) && primary_size == Some(size);
-            let name = monitor.name().filter(|name| !name.trim().is_empty()).cloned();
+            let name = monitor
+                .name()
+                .filter(|name| !name.trim().is_empty())
+                .cloned();
             DisplayInfo {
-                id: format!("{}:{}:{}:{}", position.x, position.y, size.width, size.height),
+                id: format!(
+                    "{}:{}:{}:{}",
+                    position.x, position.y, size.width, size.height
+                ),
                 label: name.unwrap_or_else(|| format!("Display {}", index + 1)),
                 x: position.x,
                 y: position.y,
@@ -131,6 +174,16 @@ fn display_layout(app: tauri::AppHandle) -> Result<Vec<DisplayInfo>, String> {
             }
         })
         .collect())
+}
+
+#[tauri::command]
+fn frontend_ready(app: tauri::AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main control window is unavailable".to_string())?;
+    window.show().map_err(|error| error.to_string())?;
+    let _ = window.set_focus();
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -173,6 +226,244 @@ fn engine_snapshot(state: tauri::State<'_, ControlState>) -> Result<EngineSnapsh
 }
 
 #[tauri::command]
+fn twitch_snapshot(state: tauri::State<'_, TwitchService>) -> Result<TwitchSnapshot, String> {
+    Ok(state.snapshot())
+}
+
+#[tauri::command]
+fn twitch_connect(state: tauri::State<'_, TwitchService>) -> Result<TwitchSnapshot, String> {
+    state.connect()
+}
+
+#[tauri::command]
+fn twitch_disconnect(state: tauri::State<'_, TwitchService>) -> Result<TwitchSnapshot, String> {
+    state.disconnect()
+}
+
+#[tauri::command]
+fn twitch_set_features(
+    chat_enabled: bool,
+    bits_enabled: bool,
+    state: tauri::State<'_, TwitchService>,
+) -> Result<TwitchSnapshot, String> {
+    state.set_features(chat_enabled, bits_enabled)
+}
+
+#[tauri::command]
+fn room_snapshot(
+    state: tauri::State<'_, RoomService>,
+    bridge: tauri::State<'_, RoomBridge>,
+) -> Result<RoomSnapshot, String> {
+    state.pump_transport(&bridge);
+    Ok(state.snapshot())
+}
+
+#[tauri::command]
+fn room_host(
+    display_name: String,
+    target_display_id: Option<String>,
+    allow_guest_interaction: bool,
+    feature_filters: RoomFeatureFilters,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, RoomService>,
+    bridge: tauri::State<'_, RoomBridge>,
+) -> Result<RoomSnapshot, String> {
+    let (target_display_id, target_display) = resolve_room_display(&app, target_display_id, false)?;
+    let snapshot = state.host(
+        display_name,
+        target_display_id,
+        allow_guest_interaction,
+        feature_filters,
+    )?;
+    let payload = serde_json::json!({
+        "allowInteraction": allow_guest_interaction,
+        "targetDisplay": target_display,
+    });
+    let _ = send_to_native_engine("network_enter_host", &payload);
+    bridge.send("enterHost", payload);
+    room::emit_snapshot(&app, &snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn room_join(
+    invite_url: String,
+    display_name: String,
+    target_display_id: Option<String>,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, RoomService>,
+    bridge: tauri::State<'_, RoomBridge>,
+) -> Result<RoomSnapshot, String> {
+    let (target_display_id, target_display) = resolve_room_display(&app, target_display_id, true)?;
+    let snapshot = state.join(invite_url, display_name, target_display_id)?;
+    let payload = serde_json::json!({ "targetDisplay": target_display });
+    let _ = send_to_native_engine("network_enter_guest", &payload);
+    bridge.send("enterGuest", payload);
+    room::emit_snapshot(&app, &snapshot);
+    Ok(snapshot)
+}
+
+fn resolve_room_display(
+    app: &tauri::AppHandle,
+    requested_id: Option<String>,
+    prefer_secondary: bool,
+) -> Result<(Option<String>, Option<DisplayInfo>), String> {
+    let displays = display_layout(app.clone())?;
+    let selected = requested_id
+        .as_deref()
+        .and_then(|id| displays.iter().find(|display| display.id == id))
+        .or_else(|| {
+            prefer_secondary
+                .then(|| displays.iter().find(|display| !display.primary))
+                .flatten()
+        })
+        .or_else(|| displays.iter().find(|display| display.primary))
+        .or_else(|| displays.first())
+        .cloned();
+    Ok((
+        selected.as_ref().map(|display| display.id.clone()),
+        selected,
+    ))
+}
+
+#[tauri::command]
+fn room_leave(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, RoomService>,
+    bridge: tauri::State<'_, RoomBridge>,
+) -> Result<RoomSnapshot, String> {
+    let snapshot = state.leave()?;
+    let _ = send_to_native_engine("network_leave", &serde_json::json!({}));
+    bridge.send("leaveRoom", serde_json::json!({}));
+    room::emit_snapshot(&app, &snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn room_end(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, RoomService>,
+    bridge: tauri::State<'_, RoomBridge>,
+) -> Result<RoomSnapshot, String> {
+    room_leave(app, state, bridge)
+}
+
+#[tauri::command]
+fn room_set_interaction(
+    enabled: bool,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, RoomService>,
+    bridge: tauri::State<'_, RoomBridge>,
+) -> Result<RoomSnapshot, String> {
+    let snapshot = state.set_interaction(enabled)?;
+    let _ = send_to_native_engine(
+        "network_set_interaction",
+        &serde_json::json!({ "enabled": enabled }),
+    );
+    bridge.send("setInteraction", serde_json::json!({ "enabled": enabled }));
+    room::emit_snapshot(&app, &snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn room_set_participant_interaction(
+    participant_id: String,
+    enabled: bool,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, RoomService>,
+) -> Result<RoomSnapshot, String> {
+    let snapshot = state.set_participant_interaction(participant_id, enabled)?;
+    room::emit_snapshot(&app, &snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn room_remove_participant(
+    participant_id: String,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, RoomService>,
+) -> Result<RoomSnapshot, String> {
+    let snapshot = state.remove_participant(participant_id)?;
+    room::emit_snapshot(&app, &snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn room_set_features(
+    feature_filters: RoomFeatureFilters,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, RoomService>,
+) -> Result<RoomSnapshot, String> {
+    let snapshot = state.set_features(feature_filters)?;
+    room::emit_snapshot(&app, &snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn room_regenerate_invite(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, RoomService>,
+) -> Result<RoomSnapshot, String> {
+    let snapshot = state.regenerate_invite()?;
+    room::emit_snapshot(&app, &snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn room_reconnect(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, RoomService>,
+) -> Result<RoomSnapshot, String> {
+    let snapshot = state.reconnect()?;
+    room::emit_snapshot(&app, &snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn open_room_window(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("room") {
+        let _ = window.unminimize();
+        window.show().map_err(|error| error.to_string())?;
+        let _ = window.set_focus();
+        return Ok(());
+    }
+
+    let window =
+        tauri::WebviewWindowBuilder::new(&app, "room", tauri::WebviewUrl::App("room.html".into()))
+            .title("ScreenOverlayPhysics Shared Room")
+            .inner_size(480.0, 640.0)
+            .min_inner_size(420.0, 520.0)
+            .resizable(true)
+            .decorations(true)
+            .transparent(false)
+            .always_on_top(true)
+            .skip_taskbar(false)
+            .shadow(false)
+            .build()
+            .map_err(|error| error.to_string())?;
+    window.show().map_err(|error| error.to_string())?;
+    let _ = window.center();
+    let _ = window.set_focus();
+    Ok(())
+}
+
+#[tauri::command]
+fn hide_room_window(app: tauri::AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("room") else {
+        return Ok(());
+    };
+    window.hide().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+fn minimize_room_window(app: tauri::AppHandle) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("room") else {
+        return Ok(());
+    };
+    window.minimize().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 fn dispatch_engine_command(
     command: String,
     payload: serde_json::Value,
@@ -204,11 +495,11 @@ fn dispatch_engine_command(
         Ok(()) => {
             model.engine_connected = true;
             model.transport = "native ipc connected".to_string();
-        },
+        }
         Err(_) => {
             model.engine_connected = false;
             model.transport = "native ipc offline".to_string();
-        },
+        }
     }
 
     let next_id = model
@@ -290,8 +581,25 @@ fn exit_overlay(app: tauri::AppHandle) -> Result<(), String> {
     hide_overlay(app)
 }
 
+/// Asks the engine for its published case state. Returns `None` when the engine
+/// is not running, which the page shows as offline rather than as an error.
+#[tauri::command]
+fn get_case_status() -> Option<serde_json::Value> {
+    let response = query_native_engine("query_case", &serde_json::json!({})).ok()?;
+    response.get("case").cloned()
+}
+
 fn send_to_native_engine(command: &str, payload: &serde_json::Value) -> Result<(), String> {
-    let addr: SocketAddr = ENGINE_IPC_ADDR
+    query_native_engine(command, payload).map(|_| ())
+}
+
+/// Sends one command and returns the engine's acknowledgement, which carries a
+/// payload for queries and is a bare `{"ok":true}` for everything else.
+fn query_native_engine(
+    command: &str,
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let addr: SocketAddr = engine_ipc_addr()
         .parse()
         .map_err(|error| format!("bad endpoint: {error}"))?;
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(220))
@@ -319,7 +627,7 @@ fn send_to_native_engine(command: &str, payload: &serde_json::Value) -> Result<(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
     {
-        Ok(())
+        Ok(response)
     } else {
         Err("native rejected command".to_string())
     }
@@ -335,9 +643,18 @@ fn apply_command(model: &mut ControlModel, command: &str, payload: &serde_json::
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(model.click_through);
         }
+        "set_obs_output" => {
+            model.obs_output_enabled = payload
+                .get("enabled")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(model.obs_output_enabled);
+        }
         "apply_runtime_settings" => {
             apply_runtime_settings(&mut model.settings, payload);
-            if let Some(click_through) = payload.get("clickThrough").and_then(serde_json::Value::as_bool) {
+            if let Some(click_through) = payload
+                .get("clickThrough")
+                .and_then(serde_json::Value::as_bool)
+            {
                 model.click_through = click_through;
             }
         }
@@ -354,7 +671,7 @@ fn apply_command(model: &mut ControlModel, command: &str, payload: &serde_json::
         "reset_scene" => {
             model.object_count = 7;
             model.shatter_gun_equipped = false;
-        },
+        }
         "toggle_shatter_gun" => model.shatter_gun_equipped = !model.shatter_gun_equipped,
         "shatter_screen" => model.object_count = 118,
         "spawn_stress_batch" => model.object_count = model.object_count.saturating_add(25),
@@ -378,6 +695,7 @@ fn snapshot_from_model(model: &ControlModel) -> EngineSnapshot {
         shatter_gun_equipped: model.shatter_gun_equipped,
         click_through: model.click_through,
         overlay_interactive: model.overlay_interactive,
+        obs_output_enabled: model.obs_output_enabled,
         fps: 0,
         object_count: model.object_count,
         queued_commands: model.command_log.len(),
@@ -388,12 +706,42 @@ fn snapshot_from_model(model: &ControlModel) -> EngineSnapshot {
 
 fn apply_runtime_settings(settings: &mut RuntimeSettings, payload: &serde_json::Value) {
     settings.gravity_y = payload_f32(payload, "gravityY", settings.gravity_y, 0.0, 4000.0);
-    settings.throw_sensitivity = payload_f32(payload, "throwSensitivity", settings.throw_sensitivity, 0.1, 4.0);
-    settings.max_throw_speed = payload_f32(payload, "maxThrowSpeed", settings.max_throw_speed, 100.0, 6000.0);
+    settings.throw_sensitivity = payload_f32(
+        payload,
+        "throwSensitivity",
+        settings.throw_sensitivity,
+        0.1,
+        4.0,
+    );
+    settings.max_throw_speed = payload_f32(
+        payload,
+        "maxThrowSpeed",
+        settings.max_throw_speed,
+        100.0,
+        6000.0,
+    );
     settings.restitution = payload_f32(payload, "restitution", settings.restitution, 0.05, 1.2);
-    settings.linear_damping = payload_f32(payload, "linearDamping", settings.linear_damping, 0.9, 0.999);
-    settings.sleep_threshold = payload_f32(payload, "sleepThreshold", settings.sleep_threshold, 1.0, 120.0);
-    settings.floor_snap_threshold = payload_f32(payload, "floorSnapThreshold", settings.floor_snap_threshold, 0.0, 24.0);
+    settings.linear_damping = payload_f32(
+        payload,
+        "linearDamping",
+        settings.linear_damping,
+        0.9,
+        0.999,
+    );
+    settings.sleep_threshold = payload_f32(
+        payload,
+        "sleepThreshold",
+        settings.sleep_threshold,
+        1.0,
+        120.0,
+    );
+    settings.floor_snap_threshold = payload_f32(
+        payload,
+        "floorSnapThreshold",
+        settings.floor_snap_threshold,
+        0.0,
+        24.0,
+    );
     settings.interaction_debounce_ms = payload
         .get("interactionDebounceMs")
         .and_then(serde_json::Value::as_u64)
@@ -413,14 +761,47 @@ fn payload_f32(payload: &serde_json::Value, key: &str, fallback: f32, min: f32, 
         .unwrap_or(fallback)
 }
 
-fn start_window_ipc(app: tauri::AppHandle) {
+fn claim_control_instance() -> Option<TcpListener> {
+    let address = window_ipc_addr();
+    claim_control_instance_at(&address)
+}
+
+fn claim_control_instance_at(address: &str) -> Option<TcpListener> {
+    match TcpListener::bind(&address) {
+        Ok(listener) => Some(listener),
+        Err(_) => {
+            if let Ok(mut existing) = TcpStream::connect(&address) {
+                let _ = existing.write_all(b"show\n");
+                let _ = existing.flush();
+            }
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod instance_tests {
+    use super::*;
+
+    #[test]
+    fn a_second_control_instance_cannot_claim_the_same_port() {
+        let probe = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let address = probe.local_addr().expect("read ephemeral address");
+        drop(probe);
+
+        let first = claim_control_instance_at(&address.to_string())
+            .expect("first instance should claim the address");
+        let second = claim_control_instance_at(&address.to_string());
+
+        assert!(second.is_none());
+        drop(first);
+    }
+}
+
+fn start_window_ipc(app: tauri::AppHandle, listener: TcpListener) {
     thread::Builder::new()
         .name("control-window-ipc".to_string())
         .spawn(move || {
-            let Ok(listener) = TcpListener::bind(WINDOW_IPC_ADDR) else {
-                return;
-            };
-
             for stream in listener.incoming().flatten() {
                 handle_window_ipc_stream(stream, &app);
             }
@@ -475,7 +856,7 @@ fn start_native_renderer_sidecar(app: &tauri::AppHandle) {
 }
 
 fn native_engine_is_online() -> bool {
-    let Ok(addr) = ENGINE_IPC_ADDR.parse::<SocketAddr>() else {
+    let Ok(addr) = engine_ipc_addr().parse::<SocketAddr>() else {
         return false;
     };
     TcpStream::connect_timeout(&addr, Duration::from_millis(80)).is_ok()
@@ -501,7 +882,11 @@ fn find_native_renderer_sidecar(app: &tauri::AppHandle) -> Option<PathBuf> {
 
     for root in roots {
         for subdir in subdirs {
-            let base = if subdir.is_empty() { root.clone() } else { root.join(subdir) };
+            let base = if subdir.is_empty() {
+                root.clone()
+            } else {
+                root.join(subdir)
+            };
             for name in names {
                 let candidate = base.join(name);
                 if candidate.is_file() && is_not_current_exe(&candidate) {
@@ -527,10 +912,35 @@ fn configure_hidden_process(command: &mut Command) {
     }
 }
 
+fn twitch_client_id() -> Option<String> {
+    env::var("SCREEN_OVERLAY_TWITCH_CLIENT_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            option_env!("SCREEN_OVERLAY_TWITCH_CLIENT_ID")
+                .map(str::to_string)
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or_else(|| {
+            option_env!("TWITCH_CLIENT_ID")
+                .map(str::to_string)
+                .filter(|value| !value.trim().is_empty())
+        })
+        .or_else(|| Some(DEFAULT_TWITCH_CLIENT_ID.to_string()))
+}
+
 fn main() {
+    let Some(instance_listener) = claim_control_instance() else {
+        return;
+    };
+    let twitch_service = TwitchService::start(twitch_client_id(), send_to_native_engine);
+    let room_service = RoomService::default();
+    let room_bridge = RoomBridge::start_from_environment();
+    room_service.start_transport_pump(room_bridge.clone());
+
     tauri::Builder::default()
-        .setup(|app| {
-            start_window_ipc(app.handle().clone());
+        .setup(move |app| {
+            start_window_ipc(app.handle().clone(), instance_listener);
             start_native_renderer_sidecar(app.handle());
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.set_always_on_top(true);
@@ -546,12 +956,18 @@ fn main() {
                     if let Ok(size) = window.outer_size() {
                         let work_area = monitor.work_area();
                         let margin = 18;
-                        let x = work_area.position.x + work_area.size.width as i32 - size.width as i32 - margin;
-                        let y = work_area.position.y + work_area.size.height as i32 - size.height as i32 - margin;
-                        let _ = window.set_position(PhysicalPosition::new(x.max(work_area.position.x), y.max(work_area.position.y)));
+                        let x = work_area.position.x + work_area.size.width as i32
+                            - size.width as i32
+                            - margin;
+                        let y = work_area.position.y + work_area.size.height as i32
+                            - size.height as i32
+                            - margin;
+                        let _ = window.set_position(PhysicalPosition::new(
+                            x.max(work_area.position.x),
+                            y.max(work_area.position.y),
+                        ));
                     }
                 }
-                let _ = window.show();
             }
             Ok(())
         })
@@ -562,10 +978,33 @@ fn main() {
             }
         })
         .manage(ControlState::default())
+        .manage(room_service)
+        .manage(room_bridge)
+        .manage(twitch_service)
         .invoke_handler(tauri::generate_handler![
             engine_snapshot,
+            twitch_snapshot,
+            twitch_connect,
+            twitch_disconnect,
+            twitch_set_features,
+            room_snapshot,
+            room_host,
+            room_join,
+            room_leave,
+            room_end,
+            room_set_interaction,
+            room_set_participant_interaction,
+            room_remove_participant,
+            room_set_features,
+            room_regenerate_invite,
+            room_reconnect,
+            open_room_window,
+            hide_room_window,
+            minimize_room_window,
             display_layout,
+            frontend_ready,
             dispatch_engine_command,
+            get_case_status,
             set_overlay_interactive,
             hide_overlay,
             minimize_overlay,

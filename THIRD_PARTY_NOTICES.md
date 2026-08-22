@@ -33,3 +33,12 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+
+## Twemoji
+
+Unicode emoji artwork is provided by Twemoji, copyright Twitter, Inc. and
+other contributors, licensed under CC-BY 4.0.
+
+Source: https://github.com/jdecked/twemoji
+
+License: https://creativecommons.org/licenses/by/4.0/

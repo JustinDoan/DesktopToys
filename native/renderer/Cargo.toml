@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.102"
+case_sim = { version = "0.1.0", path = "../case_sim" }
 core_types = { version = "0.1.0", path = "../core_types" }
 font8x8 = "0.3.1"
 gltf = "1.4.1"

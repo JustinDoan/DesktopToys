@@ -160,6 +160,7 @@ pub enum ObjectVisualKind {
     QuadDrone,
     Basketball,
     BasketballHoop,
+    Text,
     ScreenShard,
     ImportedModel,
 }
@@ -240,6 +241,8 @@ pub struct ObjectState {
     pub angular_velocity_z: f64,
     pub is_hovered: bool,
     pub is_dragging: bool,
+    pub visual_scale: f32,
+    pub visual_opacity: f32,
     /// World-space depth used by the perspective renderer. 0 is the screen
     /// plane; negative values recede "into" the screen.
     pub depth_z: f32,
@@ -257,6 +260,7 @@ pub struct ObjectState {
     pub screen_shard: Option<ScreenShardGeometry>,
     pub source_owner: Option<String>,
     pub source_value: Option<u32>,
+    pub custom_text: Option<String>,
 }
 
 impl Default for ObjectState {
@@ -273,6 +277,8 @@ impl Default for ObjectState {
             angular_velocity_z: 0.0,
             is_hovered: false,
             is_dragging: false,
+            visual_scale: 1.0,
+            visual_opacity: 1.0,
             depth_z: 0.0,
             depth_velocity: 0.0,
             depth_unlocked: false,
@@ -284,6 +290,7 @@ impl Default for ObjectState {
             screen_shard: None,
             source_owner: None,
             source_value: None,
+            custom_text: None,
         }
     }
 }

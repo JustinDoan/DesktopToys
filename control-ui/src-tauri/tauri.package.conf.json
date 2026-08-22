@@ -2,6 +2,7 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
-    "externalBin": ["binaries/screen-overlay-renderer"]
+    "externalBin": ["binaries/screen-overlay-renderer"],
+    "resources": { "resources/rewards.json": "rewards.json" }
   }
 }

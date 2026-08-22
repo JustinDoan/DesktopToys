@@ -1,5 +1,9 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+mod case_api;
+mod case_mode;
+mod network;
+
 use std::{
     borrow::Cow,
     collections::HashMap,
@@ -10,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::Arc,
-    sync::mpsc::{self, Receiver, Sender, TryRecvError},
+    sync::mpsc::{self, Receiver, SyncSender, TryRecvError, TrySendError},
     thread,
     time::{Duration, Instant},
 };
@@ -18,19 +22,96 @@ use std::{
 #[cfg(target_os = "windows")]
 use std::{ffi::CString, os::windows::process::CommandExt};
 
+#[cfg(target_os = "windows")]
+use core::ffi::c_void;
+
 use anyhow::{Context, Result};
-use core_types::{AppColor, AppConfig, CollisionShape, ObjectState, ObjectVisualKind, RectF, Vector2};
+use case_mode::{CaseDirector, CaseStatusBoard};
+use case_sim::CaseRequest;
+use core_types::{
+    AppColor, AppConfig, CollisionShape, ObjectState, ObjectVisualKind, RectF, Vector2,
+};
 use native_shell::{
-    configure_overlay_window, desktop_window_at_point, desktop_window_by_id, overlay_window_attributes,
-    pick_model_file, set_overlay_input_mode, show_error_dialog, sync_window_to_bounds, DesktopWindowTarget,
-    GlobalImportKeys, GlobalInputPoller, OverlayInputMode, TrayAction, TrayController,
+    DesktopWindowTarget, GlobalImportKeys, GlobalInputPoller, OverlayInputMode, TrayAction,
+    TrayController, configure_overlay_window, desktop_window_at_point, desktop_window_by_id,
+    overlay_window_attributes, pick_model_file, set_overlay_input_mode, show_error_dialog,
+    sync_window_to_bounds,
 };
 use renderer::{
-    hoop_geometry, CheerPortalVisual, GpuVertex, HudState, OverlayPanel, PanelLine, RenderScene, SandRenderCell,
-    SceneRenderer, ScreenLabel,
+    CaseView, ChatMessageVisual, CheerPortalVisual, GpuVertex, HudState, OverlayPanel, PanelLine,
+    RenderScene, SandRenderCell, SceneRenderer, ScreenLabel, hoop_geometry,
 };
 use scene_logic::{DragController, FrameClock, HitTester, MouseTracker, SceneController};
 use serde::Deserialize;
+use unicode_segmentation::UnicodeSegmentation;
+#[cfg(target_os = "windows")]
+use windows::Win32::{
+    Foundation::{BOOL, HINSTANCE, HMODULE, HWND, LPARAM, LRESULT, WPARAM},
+    Graphics::{
+        Direct3D::{
+            D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL,
+            D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, Fxc::D3DCompile, ID3DBlob,
+        },
+        Direct3D11::{
+            D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_DEPTH_STENCIL, D3D11_BIND_SHADER_RESOURCE,
+            D3D11_BIND_VERTEX_BUFFER, D3D11_BLEND_DESC, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_ONE,
+            D3D11_BLEND_OP_ADD, D3D11_BOX, D3D11_BUFFER_DESC, D3D11_CLEAR_DEPTH,
+            D3D11_COLOR_WRITE_ENABLE_ALL, D3D11_COMPARISON_LESS_EQUAL, D3D11_COMPARISON_NEVER,
+            D3D11_CPU_ACCESS_WRITE, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            D3D11_CREATE_DEVICE_SINGLETHREADED, D3D11_CULL_NONE, D3D11_DEPTH_STENCIL_DESC,
+            D3D11_DEPTH_WRITE_MASK_ALL, D3D11_FILL_SOLID, D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+            D3D11_INPUT_ELEMENT_DESC, D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAP_WRITE_DISCARD,
+            D3D11_MAPPED_SUBRESOURCE, D3D11_RASTERIZER_DESC, D3D11_RENDER_TARGET_BLEND_DESC,
+            D3D11_SAMPLER_DESC, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA,
+            D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+            D3D11_USAGE_DYNAMIC, D3D11_USAGE_IMMUTABLE, D3D11_VIEWPORT, D3D11CreateDevice,
+            ID3D11BlendState, ID3D11Buffer, ID3D11DepthStencilState, ID3D11DepthStencilView,
+            ID3D11Device, ID3D11DeviceContext, ID3D11InputLayout, ID3D11PixelShader,
+            ID3D11RasterizerState, ID3D11RenderTargetView, ID3D11SamplerState,
+            ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
+        },
+        DirectComposition::{
+            DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
+        },
+        Dxgi::Common::{
+            DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM,
+            DXGI_FORMAT_D32_FLOAT, DXGI_FORMAT_R32G32B32_FLOAT, DXGI_FORMAT_R32G32B32A32_FLOAT,
+            DXGI_SAMPLE_DESC,
+        },
+        Dxgi::{
+            CreateDXGIFactory1, DXGI_SCALING_STRETCH, DXGI_SWAP_CHAIN_DESC1,
+            DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGIDevice,
+            IDXGIFactory2, IDXGISwapChain1,
+        },
+        Gdi::{
+            BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CreateCompatibleBitmap,
+            CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, HGDIOBJ,
+            ReleaseDC, SRCCOPY, SelectObject,
+        },
+    },
+    System::LibraryLoader::GetModuleHandleW,
+    UI::WindowsAndMessaging::{
+        CreateWindowExW, DefWindowProcW, GWL_EXSTYLE, GetWindowLongPtrW, HWND_TOPMOST,
+        RegisterClassW, SW_SHOWNA, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+        SetWindowLongPtrW, SetWindowPos, ShowWindow, WINDOW_EX_STYLE, WNDCLASSW, WS_EX_LAYERED,
+        WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    },
+};
+#[cfg(target_os = "windows")]
+use windows::core::{ComInterface, HRESULT, Interface, PCSTR, w};
+
+pub(crate) fn room_trace(message: impl AsRef<str>) {
+    let Ok(path) = env::var("SCREEN_OVERLAY_ROOM_TRACE_PATH") else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "native[{}] {}", std::process::id(), message.as_ref());
+    }
+}
 use winit::{
     application::ApplicationHandler,
     dpi::PhysicalPosition,
@@ -39,55 +120,6 @@ use winit::{
     keyboard::{KeyCode, ModifiersState, PhysicalKey},
     window::{CursorIcon, Window, WindowId},
 };
-#[cfg(target_os = "windows")]
-use windows::Win32::{
-    Foundation::{BOOL, HINSTANCE, HWND, HMODULE, LPARAM, LRESULT, WPARAM},
-    Graphics::{
-        Direct3D::{
-            Fxc::D3DCompile, ID3DBlob, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST, D3D_DRIVER_TYPE_HARDWARE,
-            D3D_DRIVER_TYPE_WARP, D3D_FEATURE_LEVEL,
-        },
-        Direct3D11::{
-            D3D11CreateDevice, ID3D11BlendState, ID3D11Buffer, ID3D11DepthStencilState, ID3D11DepthStencilView,
-            ID3D11Device, ID3D11DeviceContext, ID3D11InputLayout, ID3D11PixelShader, ID3D11RasterizerState,
-            ID3D11RenderTargetView, ID3D11SamplerState, ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
-            D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_DEPTH_STENCIL, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_VERTEX_BUFFER,
-            D3D11_BLEND_DESC, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD,
-            D3D11_BUFFER_DESC, D3D11_CLEAR_DEPTH, D3D11_COLOR_WRITE_ENABLE_ALL, D3D11_COMPARISON_LESS_EQUAL,
-            D3D11_COMPARISON_NEVER,
-            D3D11_CPU_ACCESS_WRITE, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_SINGLETHREADED,
-            D3D11_CULL_NONE, D3D11_DEPTH_STENCIL_DESC, D3D11_DEPTH_WRITE_MASK_ALL, D3D11_FILL_SOLID,
-            D3D11_FILTER_MIN_MAG_MIP_LINEAR,
-            D3D11_INPUT_ELEMENT_DESC, D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAP_WRITE_DISCARD,
-            D3D11_MAPPED_SUBRESOURCE, D3D11_RASTERIZER_DESC, D3D11_RENDER_TARGET_BLEND_DESC,
-            D3D11_SAMPLER_DESC, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
-            D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC, D3D11_USAGE_IMMUTABLE,
-            D3D11_VIEWPORT,
-        },
-        DirectComposition::{DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual},
-        Dxgi::{
-            CreateDXGIFactory1, IDXGIDevice, IDXGIFactory2, IDXGISwapChain1, DXGI_SWAP_CHAIN_DESC1,
-            DXGI_SCALING_STRETCH, DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, DXGI_USAGE_RENDER_TARGET_OUTPUT,
-        },
-        Dxgi::Common::{
-            DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_D32_FLOAT,
-            DXGI_FORMAT_R32G32B32A32_FLOAT, DXGI_FORMAT_R32G32B32_FLOAT, DXGI_SAMPLE_DESC,
-        },
-        Gdi::{
-            BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits, ReleaseDC,
-            SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ, SRCCOPY,
-        },
-    },
-    System::LibraryLoader::GetModuleHandleW,
-    UI::WindowsAndMessaging::{
-        CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, RegisterClassW, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-        GWL_EXSTYLE, HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_SHOWNA,
-        WINDOW_EX_STYLE, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-        WS_EX_TRANSPARENT, WS_POPUP,
-    },
-};
-#[cfg(target_os = "windows")]
-use windows::core::{w, ComInterface, HRESULT, PCSTR};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -191,6 +223,8 @@ struct BitCrystalLifecycle {
     expires_at: f64,
     cracked: bool,
     shatter_at: Option<f64>,
+    impact_armed: bool,
+    last_velocity: Vector2,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -201,11 +235,28 @@ struct BitPointerPress {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct BitBurstEffect {
-    center: Vector2,
-    color: AppColor,
+struct BitShardEffect {
+    object_id: u64,
     started_at: f64,
     ends_at: f64,
+    last_updated_at: f64,
+}
+
+#[derive(Clone, Debug)]
+struct FallingChatMessage {
+    id: u64,
+    velocity: Vector2,
+    angular_velocity_x: f64,
+    angular_velocity_y: f64,
+    angular_velocity_z: f64,
+    floor_y: f32,
+    left: f32,
+    right: f32,
+    half_width: f32,
+    half_height: f32,
+    fade_at: f64,
+    ends_at: f64,
+    bounces: u8,
 }
 
 struct NativeApp {
@@ -223,6 +274,21 @@ struct NativeApp {
     tray: Option<TrayController>,
     control_ui_process: Option<Child>,
     control_command_rx: Option<Receiver<ControlIpcCommand>>,
+    case_api_command_rx: Option<Receiver<case_api::CaseApiCommand>>,
+    /// Case state published for the control UI to poll over IPC.
+    case_status: Arc<CaseStatusBoard>,
+    room_runtime: network::RoomRuntime,
+    replica_world: network::ReplicaWorld,
+    local_scene_backup: Option<network_protocol::SceneKeyframeV1>,
+    network_host_tick: u64,
+    last_network_entity_ids: Vec<u64>,
+    next_network_transform_at: f64,
+    room_bridge: Option<network::bridge::NativeBridge>,
+    guest_drag_network_id: Option<String>,
+    guest_drag_offset: Vector2,
+    guest_pointer_tracker: MouseTracker,
+    guest_interaction_sequence: u64,
+    next_guest_interaction_at: f64,
     physics_paused: bool,
     bounds: RectF,
     spawn_monitor_bounds: Option<RectF>,
@@ -239,7 +305,16 @@ struct NativeApp {
     cheer_labels: Vec<ScreenLabel>,
     bit_crystals: HashMap<u64, BitCrystalLifecycle>,
     bit_pointer_press: Option<BitPointerPress>,
-    bit_bursts: Vec<BitBurstEffect>,
+    bit_shards: Vec<BitShardEffect>,
+    falling_chat_messages: Vec<FallingChatMessage>,
+    chat_message_visuals: Vec<ChatMessageVisual>,
+    held_chat_message_id: Option<u64>,
+    held_chat_grab_offset: Vector2,
+    next_chat_message_id: u64,
+    chat_spawn_sequence: u64,
+    chat_stream_active: bool,
+    chat_stream_sequence: u64,
+    next_chat_stream_at: f64,
     last_bit_cleanup_at: f64,
     debug_visible: bool,
     debug_hit_primary_cursor: bool,
@@ -266,6 +341,7 @@ struct NativeApp {
     settings_panel: SettingsPanel,
     import_panel: Option<ImportPanel>,
     slingshot_game: SlingshotGame,
+    case_director: CaseDirector,
     basketball_game: BasketballGame,
     basketball_tracker: MouseTracker,
     basketball_confetti: Vec<(u64, f64)>,
@@ -283,6 +359,8 @@ struct NativeApp {
     robot_bin_ids: Vec<u64>,
     drone_carries: HashMap<u64, DroneCarry>,
     drone_drop_cooldowns: HashMap<u64, DroneDropCooldown>,
+    helper_targets: HashMap<u64, u64>,
+    helper_release_protection: HashMap<u64, f64>,
     snail_death_until_seconds: f64,
     snail_respawn_grace_until_seconds: f64,
     fallback_left_down: bool,
@@ -297,20 +375,29 @@ struct NativeApp {
 
 const FLOOR_MARGIN_PIXELS: f32 = 0.0;
 const STRESS_SPAWN_COUNT: usize = 25;
-const ROBOT_STACK_DROP_COOLDOWN_SECONDS: f64 = 1.8;
+const ROBOT_STACK_DROP_COOLDOWN_SECONDS: f64 = 0.4;
 const ROBOT_THROW_HOLD_SECONDS: f64 = 0.55;
-const ROBOT_BIN_WIDTH: f32 = 118.0;
-const ROBOT_BIN_HEIGHT: f32 = 96.0;
+const ROBOT_TRAVEL_SPEED_PIXELS_PER_SECOND: f32 = 168.0;
+const ROBOT_BIN_WIDTH: f32 = 230.0;
+const ROBOT_BIN_HEIGHT: f32 = 126.0;
 const ROBOT_BIN_WALL: f32 = 12.0;
+const ROBOT_PICKUP_CLEARANCE_PIXELS: f32 = 14.0;
+const ROBOT_VERTICAL_REACH_PIXELS: f32 = 18.0;
 const FAN_RANGE_PIXELS: f32 = 560.0;
 const FAN_HALF_ANGLE_RADIANS: f32 = 0.58;
 const FAN_PUSH_ACCELERATION: f32 = 1850.0;
-const DRONE_SPEED_PIXELS_PER_SECOND: f32 = 230.0;
-const DRONE_ACCELERATION_PIXELS_PER_SECOND_SQUARED: f32 = 680.0;
+const DRONE_SPEED_PIXELS_PER_SECOND: f32 = 280.0;
+const DRONE_ACCELERATION_PIXELS_PER_SECOND_SQUARED: f32 = 860.0;
 const DRONE_PICKUP_RADIUS_PIXELS: f32 = 58.0;
 const DRONE_DROP_RADIUS_PIXELS: f32 = 52.0;
-const DRONE_BIN_RELEASE_RADIUS_PIXELS: f32 = 8.0;
+const DRONE_BIN_RELEASE_RADIUS_PIXELS: f32 = 28.0;
+const DRONE_MAX_CARRY_SECONDS: f64 = 18.0;
 const DRONE_DROP_COOLDOWN_SECONDS: f64 = 1.25;
+const HELPER_RELEASE_PROTECTION_SECONDS: f64 = 3.0;
+const HELPER_TARGET_RESERVATION_RADIUS_PIXELS: f32 = 96.0;
+const DRONE_SEPARATION_RADIUS_PIXELS: f32 = 170.0;
+const DRONE_MIN_CENTER_SEPARATION_PIXELS: f32 = 145.0;
+const ROBOT_SEPARATION_RADIUS_PIXELS: f32 = 88.0;
 const BIT_GLOBAL_LIMIT: usize = 450;
 const BIT_MIN_LIFETIME_SECONDS: f64 = 120.0;
 const BIT_VALUE_LIFETIME_BONUS_SECONDS: f64 = 18.0;
@@ -322,6 +409,23 @@ const BIT_CLICK_MAX_TRAVEL_PIXELS: f32 = 9.0;
 const BIT_THROW_SHATTER_SPEED: f32 = 1_050.0;
 const BIT_THROW_FLIGHT_SECONDS: f64 = 0.55;
 const BIT_TOUGH_VALUE: u32 = 100;
+const BIT_IMPACT_SHATTER_DELTA_SPEED: f32 = 360.0;
+const BIT_SHARD_COUNT: usize = 8;
+const BIT_SHARD_LIFETIME_SECONDS: f64 = 0.85;
+const CHAT_MESSAGE_LIMIT: usize = 12;
+const CHAT_MESSAGE_GRAVITY: f32 = 940.0;
+const CHAT_MESSAGE_FADE_SECONDS: f64 = 1.45;
+const CHAT_MESSAGE_LIFETIME_SECONDS: f64 = 5.8;
+const CHAT_STREAM_MIN_INTERVAL_SECONDS: f64 = 0.020;
+const CHAT_STREAM_INTERVAL_VARIANCE_SECONDS: f64 = 0.020;
+const CHAT_MAX_PITCH_DEGREES: f64 = 18.0;
+const CHAT_MAX_YAW_DEGREES: f64 = 28.0;
+const CHAT_MAX_ROLL_DEGREES: f64 = 12.0;
+const CHAT_HELD_SCALE: f32 = 1.38;
+const CHAT_MESSAGE_LINE_CHARACTERS: usize = 36;
+const CONTROL_IPC_QUEUE_CAPACITY: usize = 512;
+const CONTROL_COMMANDS_PER_FRAME: usize = 128;
+const NETWORK_TRANSFORM_INTERVAL_SECONDS: f64 = 1.0 / 20.0;
 const PORTAL_COOLDOWN_SECONDS: f64 = 0.30;
 const PORTAL_HALF_LENGTH_PIXELS: f32 = 86.0;
 const PORTAL_EDGE_MARGIN_PIXELS: f32 = 14.0;
@@ -374,6 +478,20 @@ impl Default for NativeApp {
             tray: None,
             control_ui_process: None,
             control_command_rx: None,
+            case_api_command_rx: None,
+            case_status: Arc::new(CaseStatusBoard::default()),
+            room_runtime: network::RoomRuntime::default(),
+            replica_world: network::ReplicaWorld::default(),
+            local_scene_backup: None,
+            network_host_tick: 0,
+            last_network_entity_ids: Vec::new(),
+            next_network_transform_at: 0.0,
+            room_bridge: None,
+            guest_drag_network_id: None,
+            guest_drag_offset: Vector2::ZERO,
+            guest_pointer_tracker: MouseTracker::new(12),
+            guest_interaction_sequence: 0,
+            next_guest_interaction_at: 0.0,
             physics_paused: false,
             bounds: RectF::new(0.0, 0.0, 1280.0, 720.0),
             spawn_monitor_bounds: None,
@@ -390,7 +508,16 @@ impl Default for NativeApp {
             cheer_labels: Vec::new(),
             bit_crystals: HashMap::new(),
             bit_pointer_press: None,
-            bit_bursts: Vec::new(),
+            bit_shards: Vec::new(),
+            falling_chat_messages: Vec::new(),
+            chat_message_visuals: Vec::new(),
+            held_chat_message_id: None,
+            held_chat_grab_offset: Vector2::ZERO,
+            next_chat_message_id: 1,
+            chat_spawn_sequence: 0,
+            chat_stream_active: false,
+            chat_stream_sequence: 0,
+            next_chat_stream_at: 0.0,
             last_bit_cleanup_at: 0.0,
             debug_visible: false,
             debug_hit_primary_cursor: false,
@@ -417,6 +544,7 @@ impl Default for NativeApp {
             settings_panel: SettingsPanel::default(),
             import_panel: None,
             slingshot_game: SlingshotGame::default(),
+            case_director: CaseDirector::default(),
             basketball_game: BasketballGame::default(),
             basketball_tracker: MouseTracker::new(12),
             basketball_confetti: Vec::new(),
@@ -434,6 +562,8 @@ impl Default for NativeApp {
             robot_bin_ids: Vec::new(),
             drone_carries: HashMap::new(),
             drone_drop_cooldowns: HashMap::new(),
+            helper_targets: HashMap::new(),
+            helper_release_protection: HashMap::new(),
             snail_death_until_seconds: 0.0,
             snail_respawn_grace_until_seconds: 0.0,
             fallback_left_down: false,
@@ -480,7 +610,7 @@ impl NativeApp {
                     ));
                     self.next_input_retry_seconds = 1.0;
                     None
-                },
+                }
             };
         }
 
@@ -499,7 +629,10 @@ impl NativeApp {
 
         let window = Arc::new(
             event_loop
-                .create_window(overlay_window_attributes("ScreenOverlayPhysics Native", self.bounds))
+                .create_window(overlay_window_attributes(
+                    "ScreenOverlayPhysics Native",
+                    self.bounds,
+                ))
                 .context("Failed to create native overlay window")?,
         );
         configure_overlay_window(&window)?;
@@ -539,14 +672,47 @@ impl NativeApp {
         if self.tray.is_none() {
             self.status_message = Some("Tray icon unavailable on this host.".to_string());
         }
-        match start_control_ipc_server() {
+        // Seed the board before the first poll so the page has the config even
+        // if nothing has been opened yet.
+        self.case_director
+            .publish_status(&self.case_status, f32::INFINITY);
+        match start_control_ipc_server(Arc::clone(&self.case_status)) {
             Ok(receiver) => {
                 self.control_command_rx = Some(receiver);
-                self.push_status_message(format!("Control UI IPC listening on {CONTROL_IPC_ADDR}."));
-            },
+                self.push_status_message(format!(
+                    "Control UI IPC listening on {}.",
+                    control_ipc_addr()
+                ));
+            }
             Err(error) => {
                 self.push_status_message(format!("Control UI IPC unavailable: {error:#}."));
-            },
+            }
+        }
+        match case_api::start() {
+            Ok(receiver) => {
+                self.case_api_command_rx = Some(receiver);
+                self.push_status_message(format!(
+                    "Case WebSocket listening on ws://{}.",
+                    case_api::addr()
+                ));
+            }
+            Err(error) => {
+                self.push_status_message(format!("Case WebSocket unavailable: {error:#}."));
+            }
+        }
+        match network::bridge::start() {
+            Ok(bridge) => {
+                self.room_bridge = Some(bridge);
+                self.push_status_message(format!(
+                    "Shared room local bridge listening on {}.",
+                    network::bridge::bridge_addr()
+                ));
+            }
+            Err(error) => self
+                .push_status_message(format!("Shared room local bridge unavailable: {error:#}.")),
+        }
+        if env::var("SCREEN_OVERLAY_SHOW_CONTROL_UI").ok().as_deref() == Some("1") {
+            self.show_control_ui();
         }
         #[cfg(target_os = "windows")]
         self.push_status_message("Renderer backend: Direct3D 11 + DirectComposition".to_string());
@@ -573,10 +739,10 @@ impl NativeApp {
                     self.input_poller = Some(poller);
                     self.force_interactive_for_debug = false;
                     self.push_status_message("Global drag input enabled.".to_string());
-                },
+                }
                 Err(_) => {
                     self.next_input_retry_seconds = now + 2.0;
-                },
+                }
             }
         }
 
@@ -586,12 +752,11 @@ impl NativeApp {
                 Ok(pointer) => {
                     self.cursor_local = pointer.local_position;
                     pointer
-                },
+                }
                 Err(error) => {
                     self.input_poller = None;
-                    self.status_message = Some(format!(
-                        "{error}. Falling back to local input only."
-                    ));
+                    self.status_message =
+                        Some(format!("{error}. Falling back to local input only."));
                     self.force_interactive_for_debug = true;
                     self.next_input_retry_seconds = now + 2.0;
                     native_shell::GlobalPointerState {
@@ -611,7 +776,7 @@ impl NativeApp {
                         basketball_toggle_down: false,
                         import_keys: GlobalImportKeys::default(),
                     }
-                },
+                }
             }
         } else {
             native_shell::GlobalPointerState {
@@ -636,9 +801,16 @@ impl NativeApp {
         self.debug_right_down = pointer.right_down;
         self.debug_hit_primary_cursor = self
             .hit_tester
-            .is_point_over_any_object(self.scene.objects(), self.cursor_local);
+            .is_point_over_any_object(self.scene.objects(), self.cursor_local)
+            || self.chat_message_at(self.cursor_local).is_some();
 
         self.drain_control_commands();
+        self.drain_case_api_commands();
+        self.drain_room_bridge();
+        if self.room_runtime.mode() == network::RoomMode::Guest {
+            self.replica_world
+                .advance_interpolation(dt, &mut self.scene);
+        }
         self.update_click_through_mode(now, &window);
         self.update_cursor_icon(&window);
 
@@ -672,6 +844,7 @@ impl NativeApp {
         self.handle_global_basketball_toggle(pointer.basketball_toggle_down);
         self.handle_global_import_keys(pointer.import_keys);
         self.update_slingshot_game();
+        self.update_case_opening(dt);
         self.update_basketball_game(dt);
         self.update_robot_buddies(dt);
         self.update_fans(dt);
@@ -679,9 +852,43 @@ impl NativeApp {
         self.update_snails(dt, &window);
         self.update_portals(dt);
         self.update_cheer_drop_effects(now);
+        self.update_chat_messages(dt, now);
         self.update_bit_crystal_lifecycle(now);
-        if !self.physics_paused {
+        self.update_bit_shard_effects(now);
+        if !self.physics_paused && self.room_runtime.mode() != network::RoomMode::Guest {
             self.scene.step(dt, self.scene_bounds());
+        }
+        if self.room_runtime.mode() == network::RoomMode::Host {
+            self.network_host_tick = self.network_host_tick.saturating_add(1);
+            let shared_entity_ids = self.room_runtime.shared_entity_ids(self.scene.objects());
+            if shared_entity_ids != self.last_network_entity_ids {
+                self.last_network_entity_ids = shared_entity_ids;
+                let keyframe = self.room_runtime.capture_keyframe(
+                    self.scene.objects(),
+                    self.scene_bounds(),
+                    self.network_host_tick,
+                );
+                self.send_room_bridge_reliable(
+                    "scene.keyframe",
+                    serde_json::to_value(keyframe).unwrap_or(serde_json::Value::Null),
+                );
+                room_trace(format!(
+                    "sent keyframe tick={} entities={}",
+                    self.network_host_tick,
+                    self.last_network_entity_ids.len()
+                ));
+            } else if now >= self.next_network_transform_at {
+                self.next_network_transform_at = now + NETWORK_TRANSFORM_INTERVAL_SECONDS;
+                let batch = self
+                    .room_runtime
+                    .capture_transform_batch(self.scene.objects(), self.network_host_tick);
+                if !batch.transforms.is_empty() {
+                    self.send_room_bridge(
+                        "scene.transformBatch",
+                        serde_json::to_value(batch).unwrap_or(serde_json::Value::Null),
+                    );
+                }
+            }
         }
         self.enforce_window_captures();
         self.collect_robot_bin_cubes();
@@ -696,6 +903,7 @@ impl NativeApp {
         let should_be_interactive = self.force_interactive_for_debug
             || self.input_poller.is_none()
             || self.drag_controller.is_dragging()
+            || self.held_chat_message_id.is_some()
             || self.debug_hit_primary_cursor
             || self.sand_world.active
             || self.lasso_tool.needs_interactive()
@@ -719,7 +927,9 @@ impl NativeApp {
             debounce_seconds = debounce_seconds.min(0.02);
         }
 
-        if now_seconds - self.mode_candidate_since_seconds >= debounce_seconds && desired_mode != self.overlay_mode {
+        if now_seconds - self.mode_candidate_since_seconds >= debounce_seconds
+            && desired_mode != self.overlay_mode
+        {
             let mut applied_mode = set_overlay_input_mode(window, desired_mode).is_ok();
             #[cfg(target_os = "windows")]
             {
@@ -727,8 +937,9 @@ impl NativeApp {
                     match renderer.set_input_mode(desired_mode) {
                         Ok(()) => applied_mode = true,
                         Err(error) => {
-                            self.status_message = Some(format!("Overlay input mode update failed: {error:#}"));
-                        },
+                            self.status_message =
+                                Some(format!("Overlay input mode update failed: {error:#}"));
+                        }
                     }
                 }
             }
@@ -739,8 +950,35 @@ impl NativeApp {
         }
     }
 
-    fn handle_global_mouse_buttons(&mut self, now_seconds: f64, is_left_down: bool, is_right_down: bool) {
+    fn chat_message_at(&self, point: Vector2) -> Option<u64> {
+        self.falling_chat_messages
+            .iter()
+            .zip(self.chat_message_visuals.iter())
+            .rev()
+            .find_map(|(state, visual)| {
+                let half_width = (state.half_width * visual.scale).max(12.0) + 6.0;
+                let half_height = (state.half_height * visual.scale).max(12.0) + 6.0;
+                ((point.x - visual.center.x).abs() <= half_width
+                    && (point.y - visual.center.y).abs() <= half_height)
+                    .then_some(state.id)
+            })
+    }
+
+    fn handle_global_mouse_buttons(
+        &mut self,
+        now_seconds: f64,
+        is_left_down: bool,
+        is_right_down: bool,
+    ) {
         if self.settings_panel.visible || self.import_panel.is_some() {
+            self.was_left_down = is_left_down;
+            self.was_right_down = is_right_down;
+            self.is_rotation_dragging = false;
+            return;
+        }
+
+        if self.room_runtime.mode() == network::RoomMode::Guest {
+            self.handle_guest_room_pointer(now_seconds, is_left_down);
             self.was_left_down = is_left_down;
             self.was_right_down = is_right_down;
             self.is_rotation_dragging = false;
@@ -845,6 +1083,37 @@ impl NativeApp {
         }
 
         if is_left_down && !self.was_left_down {
+            if let Some(chat_id) = self.chat_message_at(self.cursor_local) {
+                self.drag_controller.cancel_drag(self.scene.objects_mut());
+                self.bit_pointer_press = None;
+                if let Some(index) = self
+                    .falling_chat_messages
+                    .iter()
+                    .position(|message| message.id == chat_id)
+                {
+                    self.held_chat_grab_offset =
+                        self.chat_message_visuals[index].center - self.cursor_local;
+                }
+                self.held_chat_message_id = Some(chat_id);
+                self.last_drag_attempt = "chat:hold".to_string();
+                self.was_left_down = is_left_down;
+                self.was_right_down = is_right_down;
+                return;
+            }
+        }
+
+        if self.held_chat_message_id.is_some() {
+            if !is_left_down {
+                self.held_chat_message_id = None;
+                self.held_chat_grab_offset = Vector2::ZERO;
+                self.last_drag_attempt = "chat:release".to_string();
+            }
+            self.was_left_down = is_left_down;
+            self.was_right_down = is_right_down;
+            return;
+        }
+
+        if is_left_down && !self.was_left_down {
             let began = if self.cursor_is_over_robot_bin() {
                 None
             } else {
@@ -862,7 +1131,9 @@ impl NativeApp {
                     .scene
                     .objects()
                     .iter()
-                    .find(|object| object.id == id && object.visual_kind == ObjectVisualKind::BitCrystal)
+                    .find(|object| {
+                        object.id == id && object.visual_kind == ObjectVisualKind::BitCrystal
+                    })
                     .map(|_| BitPointerPress {
                         object_id: id,
                         position: self.cursor_local,
@@ -886,8 +1157,110 @@ impl NativeApp {
         self.was_right_down = is_right_down;
     }
 
+    fn handle_guest_room_pointer(&mut self, now_seconds: f64, is_left_down: bool) {
+        if !self.room_runtime.allows_interaction() {
+            self.guest_drag_network_id = None;
+            self.guest_drag_offset = Vector2::ZERO;
+            self.guest_pointer_tracker.clear();
+            return;
+        }
+        if is_left_down && !self.was_left_down {
+            let hit = self
+                .hit_tester
+                .hit_test_topmost(self.scene.objects(), self.cursor_local)
+                .and_then(|object| {
+                    self.replica_world
+                        .network_id_for_local(object.id)
+                        .map(|network_id| (object.id, network_id.to_string()))
+                });
+            if let Some((local_id, network_id)) = hit {
+                self.guest_drag_network_id = Some(network_id.clone());
+                if let Some(object) = self
+                    .scene
+                    .objects_mut()
+                    .iter_mut()
+                    .find(|object| object.id == local_id)
+                {
+                    self.guest_drag_offset = object.body.position - self.cursor_local;
+                    object.is_dragging = true;
+                    object.body.is_dragging = true;
+                }
+                self.guest_pointer_tracker.clear();
+                self.guest_pointer_tracker
+                    .add_sample(self.cursor_local, now_seconds);
+                self.guest_interaction_sequence = self.guest_interaction_sequence.saturating_add(1);
+                let desired_position = self.cursor_local + self.guest_drag_offset;
+                let pointer = self.replica_world.host_surface_position(desired_position);
+                self.send_room_bridge("interaction.beginGrab", serde_json::json!({ "intentId": format!("guest-{}", self.guest_interaction_sequence), "networkEntityId": network_id, "pointer": { "x": pointer.x, "y": pointer.y }, "observedHostTick": self.replica_world.last_host_tick(), "inputSequence": self.guest_interaction_sequence, "clientMonotonicMs": (now_seconds * 1000.0) as u64 }));
+            }
+        }
+        if is_left_down && self.guest_drag_network_id.is_some() {
+            self.guest_pointer_tracker
+                .add_sample(self.cursor_local, now_seconds);
+            let desired_position = self.cursor_local + self.guest_drag_offset;
+            if let Some(local_id) = self
+                .guest_drag_network_id
+                .as_deref()
+                .and_then(|network_id| self.replica_world.local_id_for_network(network_id))
+            {
+                if let Some(object) = self
+                    .scene
+                    .objects_mut()
+                    .iter_mut()
+                    .find(|object| object.id == local_id)
+                {
+                    object.body.position = desired_position;
+                    object.body.velocity = Vector2::ZERO;
+                }
+            }
+            if now_seconds >= self.next_guest_interaction_at {
+                self.next_guest_interaction_at = now_seconds + (1.0 / 30.0);
+                self.guest_interaction_sequence = self.guest_interaction_sequence.saturating_add(1);
+                let pointer = self.replica_world.host_surface_position(desired_position);
+                self.send_room_bridge("interaction.moveGrab", serde_json::json!({ "intentId": format!("guest-{}", self.guest_interaction_sequence), "networkEntityId": self.guest_drag_network_id, "pointer": { "x": pointer.x, "y": pointer.y }, "observedHostTick": self.replica_world.last_host_tick(), "inputSequence": self.guest_interaction_sequence, "clientMonotonicMs": (now_seconds * 1000.0) as u64 }));
+            }
+        }
+        if !is_left_down && self.was_left_down {
+            if let Some(network_id) = self.guest_drag_network_id.take() {
+                self.guest_pointer_tracker
+                    .add_sample(self.cursor_local, now_seconds);
+                let local_release_velocity = self.guest_pointer_tracker.estimate_velocity(
+                    0.085,
+                    self.scene.config().throw_sensitivity,
+                    self.scene.config().max_throw_speed,
+                );
+                let host_release_velocity = self
+                    .replica_world
+                    .host_surface_velocity(local_release_velocity);
+                if let Some(local_id) = self.replica_world.local_id_for_network(&network_id) {
+                    if let Some(object) = self
+                        .scene
+                        .objects_mut()
+                        .iter_mut()
+                        .find(|object| object.id == local_id)
+                    {
+                        object.is_dragging = false;
+                        object.body.is_dragging = false;
+                        object.body.velocity = local_release_velocity;
+                    }
+                }
+                self.replica_world.predict_local_motion(
+                    &network_id,
+                    self.cursor_local + self.guest_drag_offset,
+                    local_release_velocity,
+                );
+                self.guest_interaction_sequence = self.guest_interaction_sequence.saturating_add(1);
+                self.send_room_bridge("interaction.endGrab", serde_json::json!({ "intentId": format!("guest-{}", self.guest_interaction_sequence), "networkEntityId": network_id, "inputSequence": self.guest_interaction_sequence, "clientMonotonicMs": (now_seconds * 1000.0) as u64, "releaseVelocity": { "x": host_release_velocity.x, "y": host_release_velocity.y } }));
+                self.guest_drag_offset = Vector2::ZERO;
+                self.guest_pointer_tracker.clear();
+            }
+        }
+    }
+
     fn update_cursor_icon(&mut self, window: &Window) {
         let desired = if self.drag_controller.is_dragging()
+            || self.guest_drag_network_id.is_some()
+            || self.held_chat_message_id.is_some()
             || self.slingshot_game.aiming
             || self.basketball_game.aiming
             || self.measure_tool.dragging
@@ -947,7 +1320,9 @@ impl NativeApp {
 
     fn handle_global_spawn_crystal(&mut self, is_down: bool) {
         if is_down && !self.was_spawn_crystal_down {
-            let id = self.scene.spawn_random_crystal(self.default_spawn_position());
+            let id = self
+                .scene
+                .spawn_random_crystal(self.default_spawn_position());
             self.selected_id = Some(id);
         }
         self.was_spawn_crystal_down = is_down;
@@ -1014,7 +1389,9 @@ impl NativeApp {
     }
 
     fn toggle_spotlight(&mut self) {
-        let active = self.spotlight_tool.toggle(self.cursor_local, self.scene_bounds());
+        let active = self
+            .spotlight_tool
+            .toggle(self.cursor_local, self.scene_bounds());
         self.push_status_message(if active {
             "Spotlight on, click-through stays on.".to_string()
         } else {
@@ -1023,7 +1400,8 @@ impl NativeApp {
     }
 
     fn update_spotlight(&mut self) {
-        self.spotlight_tool.update(self.cursor_local, self.scene_bounds());
+        self.spotlight_tool
+            .update(self.cursor_local, self.scene_bounds());
     }
 
     fn toggle_lasso_tool(&mut self) {
@@ -1037,7 +1415,8 @@ impl NativeApp {
             self.shatter_gun.deactivate();
             self.drag_controller.cancel_drag(self.scene.objects_mut());
             self.push_status_message(
-                "Rope lasso on: drag a loop, release to snare, move mouse to whip. Right releases.".to_string(),
+                "Rope lasso on: drag a loop, release to snare, move mouse to whip. Right releases."
+                    .to_string(),
             );
         }
     }
@@ -1056,11 +1435,16 @@ impl NativeApp {
         self.drag_controller.cancel_drag(self.scene.objects_mut());
         self.was_left_down = true;
         self.was_right_down = true;
-        self.push_status_message("Portal placement on: click two screen edges to link them. Right click cancels.".to_string());
+        self.push_status_message(
+            "Portal placement on: click two screen edges to link them. Right click cancels."
+                .to_string(),
+        );
     }
 
     fn toggle_shatter_gun(&mut self) {
-        let active = self.shatter_gun.toggle(self.cursor_local, self.frame_clock.elapsed_seconds);
+        let active = self
+            .shatter_gun
+            .toggle(self.cursor_local, self.frame_clock.elapsed_seconds);
         self.drag_controller.cancel_drag(self.scene.objects_mut());
         if active {
             self.measure_tool.clear();
@@ -1068,7 +1452,9 @@ impl NativeApp {
             self.portal_pair_tool.stop_placement();
             self.was_left_down = true;
             self.was_right_down = true;
-            self.push_status_message("Shatter gun equipped: click anywhere to fire, B holsters.".to_string());
+            self.push_status_message(
+                "Shatter gun equipped: click anywhere to fire, B holsters.".to_string(),
+            );
         } else {
             self.push_status_message("Shatter gun holstered.".to_string());
         }
@@ -1083,11 +1469,15 @@ impl NativeApp {
         #[cfg(target_os = "windows")]
         if let Some(d3d_renderer) = &mut self.d3d_renderer {
             if let Err(error) = d3d_renderer.capture_screen_texture(self.bounds) {
-                self.push_status_message(format!("Screen capture failed; using fallback shard color: {error:#}."));
+                self.push_status_message(format!(
+                    "Screen capture failed; using fallback shard color: {error:#}."
+                ));
             }
         }
         #[cfg(not(target_os = "windows"))]
-        self.push_status_message("Screen capture texture is only wired for the Windows Direct3D backend.".to_string());
+        self.push_status_message(
+            "Screen capture texture is only wired for the Windows Direct3D backend.".to_string(),
+        );
 
         self.drag_controller.cancel_drag(self.scene.objects_mut());
         self.scene.clear_static_colliders();
@@ -1101,7 +1491,11 @@ impl NativeApp {
         self.cheer_labels.clear();
         self.bit_crystals.clear();
         self.bit_pointer_press = None;
-        self.bit_bursts.clear();
+        self.bit_shards.clear();
+        self.falling_chat_messages.clear();
+        self.chat_message_visuals.clear();
+        self.held_chat_message_id = None;
+        self.held_chat_grab_offset = Vector2::ZERO;
         self.last_bit_cleanup_at = now;
         self.weather_world.clear();
         self.sand_world.clear();
@@ -1115,6 +1509,8 @@ impl NativeApp {
         self.fan_yaws.clear();
         self.drone_carries.clear();
         self.drone_drop_cooldowns.clear();
+        self.helper_targets.clear();
+        self.helper_release_protection.clear();
         self.snail_death_until_seconds = 0.0;
         self.snail_respawn_grace_until_seconds = 0.0;
         self.import_panel = None;
@@ -1140,14 +1536,17 @@ impl NativeApp {
         if !self.lasso_tool.active {
             return;
         }
-        let velocity_deltas = self
-            .lasso_tool
-            .compute_velocity_deltas(self.scene.objects(), self.cursor_local, dt);
+        let velocity_deltas =
+            self.lasso_tool
+                .compute_velocity_deltas(self.scene.objects(), self.cursor_local, dt);
         for (id, delta) in velocity_deltas {
             self.scene.add_object_velocity(id, delta);
         }
-        self.lasso_tool
-            .rebuild_render_cells(self.cursor_local, self.scene.objects(), self.frame_clock.elapsed_seconds);
+        self.lasso_tool.rebuild_render_cells(
+            self.cursor_local,
+            self.scene.objects(),
+            self.frame_clock.elapsed_seconds,
+        );
     }
 
     fn update_sand(&mut self, is_left_down: bool, is_right_down: bool) {
@@ -1220,6 +1619,30 @@ impl NativeApp {
     }
 
     fn spawn_stress_cubes(&mut self) {
+        if self.room_runtime.mode() == network::RoomMode::Guest {
+            if !self.room_runtime.allows_interaction() {
+                self.push_status_message("The host has disabled guest interaction.".to_string());
+                return;
+            }
+            let pointer = self
+                .replica_world
+                .host_surface_position(self.default_spawn_position());
+            self.guest_interaction_sequence = self.guest_interaction_sequence.saturating_add(1);
+            self.send_room_bridge_reliable(
+                "interaction.spawnIntent",
+                serde_json::json!({
+                    "intentId": format!("guest-spawn-{}", self.guest_interaction_sequence),
+                    "visualKindTag": "Cube",
+                    "pointer": { "x": pointer.x, "y": pointer.y },
+                    "options": { "count": STRESS_SPAWN_COUNT },
+                    "inputSequence": self.guest_interaction_sequence,
+                }),
+            );
+            self.push_status_message(format!(
+                "Requested {STRESS_SPAWN_COUNT} shared stress cubes."
+            ));
+            return;
+        }
         let id = self
             .scene
             .spawn_small_cube_batch(self.default_spawn_position(), STRESS_SPAWN_COUNT);
@@ -1237,22 +1660,85 @@ impl NativeApp {
             return;
         };
 
-        if visual_kind == ObjectVisualKind::Snail {
-            self.spawn_snail();
-            return;
-        }
-        if visual_kind == ObjectVisualKind::Fan {
-            self.spawn_fan();
-            return;
-        }
-        if visual_kind == ObjectVisualKind::QuadDrone {
-            self.spawn_quad_drone();
+        let text = payload
+            .and_then(|payload| payload.get("text"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Text")
+            .trim()
+            .chars()
+            .take(120)
+            .collect::<String>();
+        let text_size = payload
+            .and_then(|payload| payload.get("textSize"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("medium");
+        let text_scale = text_size_scale(text_size);
+        let position = self.default_spawn_position();
+
+        if self.room_runtime.mode() == network::RoomMode::Guest {
+            if !self.room_runtime.allows_interaction() {
+                self.push_status_message("The host has disabled guest interaction.".to_string());
+                return;
+            }
+            let pointer = self.replica_world.host_surface_position(position);
+            self.guest_interaction_sequence = self.guest_interaction_sequence.saturating_add(1);
+            self.send_room_bridge_reliable(
+                "interaction.spawnIntent",
+                serde_json::json!({
+                    "intentId": format!("guest-spawn-{}", self.guest_interaction_sequence),
+                    "visualKindTag": kind,
+                    "pointer": { "x": pointer.x, "y": pointer.y },
+                    "options": { "text": text, "textSize": text_size },
+                    "inputSequence": self.guest_interaction_sequence,
+                }),
+            );
+            self.push_status_message(format!("Requested shared {label}."));
             return;
         }
 
-        let id = self.scene.spawn_object(self.default_spawn_position(), color, visual_kind);
+        let id = self.spawn_visual_kind_at(position, visual_kind, color, &text, text_scale);
         self.selected_id = Some(id);
         self.push_status_message(format!("Control UI spawned {label}."));
+    }
+
+    fn spawn_visual_kind_at(
+        &mut self,
+        position: Vector2,
+        visual_kind: ObjectVisualKind,
+        color: Option<AppColor>,
+        text: &str,
+        text_scale: f32,
+    ) -> u64 {
+        let id = if visual_kind == ObjectVisualKind::Text {
+            self.scene
+                .spawn_text_object_with_scale(position, text.to_string(), text_scale)
+        } else {
+            self.scene.spawn_object(position, color, visual_kind)
+        };
+        if let Some(object) = self
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == id)
+        {
+            match visual_kind {
+                ObjectVisualKind::Fan => {
+                    object.rotation_z = 0.0;
+                    object.body.gravity_scale = 0.0;
+                    object.body.velocity = Vector2::ZERO;
+                }
+                ObjectVisualKind::QuadDrone => {
+                    object.body.gravity_scale = 0.0;
+                    object.body.velocity = Vector2::ZERO;
+                    object.body.lock_rotation = true;
+                }
+                _ => {}
+            }
+        }
+        if visual_kind == ObjectVisualKind::Fan {
+            self.fan_yaws.insert(id, 0.0);
+        }
+        id
     }
 
     fn apply_control_runtime_settings(&mut self, payload: Option<&serde_json::Value>) {
@@ -1264,22 +1750,61 @@ impl NativeApp {
         let gravity_y = {
             let config = self.scene.config_mut();
             config.gravity_y = payload_f32(payload, "gravityY", config.gravity_y, 0.0, 4000.0);
-            config.throw_sensitivity = payload_f32(payload, "throwSensitivity", config.throw_sensitivity, 0.1, 4.0);
-            config.max_throw_speed = payload_f32(payload, "maxThrowSpeed", config.max_throw_speed, 100.0, 6000.0);
+            config.throw_sensitivity = payload_f32(
+                payload,
+                "throwSensitivity",
+                config.throw_sensitivity,
+                0.1,
+                4.0,
+            );
+            config.max_throw_speed = payload_f32(
+                payload,
+                "maxThrowSpeed",
+                config.max_throw_speed,
+                100.0,
+                6000.0,
+            );
             config.restitution = payload_f32(payload, "restitution", config.restitution, 0.05, 1.2);
-            config.linear_damping = payload_f32(payload, "linearDamping", config.linear_damping, 0.900, 0.999);
-            config.sleep_threshold = payload_f32(payload, "sleepThreshold", config.sleep_threshold, 1.0, 120.0);
-            config.floor_snap_threshold = payload_f32(payload, "floorSnapThreshold", config.floor_snap_threshold, 0.0, 24.0);
-            if let Some(debounce_ms) = payload.get("interactionDebounceMs").and_then(serde_json::Value::as_u64) {
+            config.linear_damping = payload_f32(
+                payload,
+                "linearDamping",
+                config.linear_damping,
+                0.900,
+                0.999,
+            );
+            config.sleep_threshold = payload_f32(
+                payload,
+                "sleepThreshold",
+                config.sleep_threshold,
+                1.0,
+                120.0,
+            );
+            config.floor_snap_threshold = payload_f32(
+                payload,
+                "floorSnapThreshold",
+                config.floor_snap_threshold,
+                0.0,
+                24.0,
+            );
+            if let Some(debounce_ms) = payload
+                .get("interactionDebounceMs")
+                .and_then(serde_json::Value::as_u64)
+            {
                 config.interaction_debounce_ms = debounce_ms.clamp(0, 300) as u32;
             }
-            if let Some(start_in_pass_through) = payload.get("startInPassThrough").and_then(serde_json::Value::as_bool) {
+            if let Some(start_in_pass_through) = payload
+                .get("startInPassThrough")
+                .and_then(serde_json::Value::as_bool)
+            {
                 config.start_in_pass_through = start_in_pass_through;
             }
             config.gravity_y
         };
 
-        if let Some(click_through) = payload.get("clickThrough").and_then(serde_json::Value::as_bool) {
+        if let Some(click_through) = payload
+            .get("clickThrough")
+            .and_then(serde_json::Value::as_bool)
+        {
             self.force_interactive_for_debug = !click_through;
         }
 
@@ -1289,7 +1814,7 @@ impl NativeApp {
     }
 
     fn drain_control_commands(&mut self) {
-        loop {
+        for _ in 0..CONTROL_COMMANDS_PER_FRAME {
             let command = {
                 let Some(receiver) = self.control_command_rx.as_ref() else {
                     return;
@@ -1304,9 +1829,231 @@ impl NativeApp {
                     self.control_command_rx = None;
                     self.push_status_message("Control UI IPC disconnected.".to_string());
                     return;
-                },
+                }
             }
         }
+    }
+
+    fn drain_case_api_commands(&mut self) {
+        for _ in 0..CONTROL_COMMANDS_PER_FRAME {
+            let command = {
+                let Some(receiver) = self.case_api_command_rx.as_ref() else {
+                    return;
+                };
+                receiver.try_recv()
+            };
+
+            match command {
+                Ok(command) => {
+                    self.case_director
+                        .request_from_api(command.request, command.events);
+                }
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => {
+                    self.case_api_command_rx = None;
+                    self.push_status_message("Case WebSocket disconnected.".to_string());
+                    return;
+                }
+            }
+        }
+    }
+
+    fn drain_room_bridge(&mut self) {
+        for _ in 0..CONTROL_COMMANDS_PER_FRAME {
+            let message = {
+                let Some(bridge) = self.room_bridge.as_ref() else {
+                    return;
+                };
+                bridge.incoming.try_recv()
+            };
+            let message = match message {
+                Ok(message) => message,
+                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => return,
+            };
+            match message.kind.as_str() {
+                "enterHost" => self.handle_control_command(ControlIpcCommand { command: "network_enter_host".to_string(), payload: Some(message.payload) }),
+                "enterGuest" => self.handle_control_command(ControlIpcCommand { command: "network_enter_guest".to_string(), payload: Some(message.payload) }),
+                "leaveRoom" => self.handle_control_command(ControlIpcCommand { command: "network_leave".to_string(), payload: Some(message.payload) }),
+                "setInteraction" => self.handle_control_command(ControlIpcCommand { command: "network_set_interaction".to_string(), payload: Some(message.payload) }),
+                "relayFrame" => {
+                    let message_type = message.payload.get("messageType").and_then(serde_json::Value::as_str);
+                    let payload = message.payload.get("payload").cloned();
+                    match (message_type, payload) {
+                        (Some("scene.keyframe"), Some(payload)) => self.handle_control_command(ControlIpcCommand { command: "network_apply_keyframe".to_string(), payload: Some(payload) }),
+                        (Some("scene.transformBatch"), Some(payload)) => self.handle_control_command(ControlIpcCommand { command: "network_apply_transform_batch".to_string(), payload: Some(payload) }),
+                        (Some("interaction.beginGrab"), Some(payload)) => self.apply_remote_grab_intent(payload, false),
+                        (Some("interaction.moveGrab"), Some(payload)) => self.apply_remote_grab_intent(payload, false),
+                        (Some("interaction.endGrab"), Some(payload)) => self.apply_remote_grab_intent(payload, true),
+                        (Some("interaction.spawnIntent"), Some(payload)) => self.apply_remote_spawn_intent(payload),
+                        _ => self.send_room_bridge("protocolError", serde_json::json!({ "code": "unsupported_feature", "message": "Unsupported bridge relay frame." })),
+                    }
+                }
+                "requestKeyframe" if self.room_runtime.mode() == network::RoomMode::Host => {
+                    let keyframe = self.room_runtime.capture_keyframe(self.scene.objects(), self.scene_bounds(), self.network_host_tick);
+                    self.send_room_bridge_reliable("scene.keyframe", serde_json::to_value(keyframe).unwrap_or(serde_json::Value::Null));
+                }
+                _ => self.send_room_bridge("protocolError", serde_json::json!({ "code": "invalid_payload", "message": "Unsupported bridge message." })),
+            }
+        }
+    }
+
+    fn send_room_bridge(&self, kind: &str, payload: serde_json::Value) {
+        if let Some(bridge) = self.room_bridge.as_ref() {
+            if bridge
+                .outgoing
+                .try_send(network::bridge::BridgeMessage {
+                    kind: kind.to_string(),
+                    payload,
+                })
+                .is_err()
+            {
+                room_trace(format!("dropped queued bridge message kind={kind}"));
+            }
+        }
+    }
+
+    fn send_room_bridge_reliable(&self, kind: &str, payload: serde_json::Value) {
+        if let Some(bridge) = self.room_bridge.as_ref() {
+            if bridge
+                .outgoing
+                .send(network::bridge::BridgeMessage {
+                    kind: kind.to_string(),
+                    payload,
+                })
+                .is_err()
+            {
+                room_trace(format!("failed reliable bridge message kind={kind}"));
+            }
+        }
+    }
+
+    fn apply_remote_grab_intent(&mut self, payload: serde_json::Value, release: bool) {
+        if self.room_runtime.mode() != network::RoomMode::Host
+            || !self.room_runtime.allows_interaction()
+        {
+            self.send_room_bridge("interaction.intentRejected", serde_json::json!({ "code": "permission_denied", "message": "Host interaction is disabled." }));
+            return;
+        }
+        let Some(network_id) = payload
+            .get("networkEntityId")
+            .and_then(serde_json::Value::as_str)
+        else {
+            return;
+        };
+        let Some(local_id) = self.room_runtime.local_id_for_network(network_id) else {
+            self.send_room_bridge("interaction.intentRejected", serde_json::json!({ "code": "entity_not_found", "message": "Shared object is no longer available." }));
+            return;
+        };
+        if release {
+            let release_velocity = payload
+                .get("releaseVelocity")
+                .map(|velocity| {
+                    Vector2::new(
+                        velocity
+                            .get("x")
+                            .and_then(serde_json::Value::as_f64)
+                            .unwrap_or_default() as f32,
+                        velocity
+                            .get("y")
+                            .and_then(serde_json::Value::as_f64)
+                            .unwrap_or_default() as f32,
+                    )
+                })
+                .unwrap_or(Vector2::ZERO);
+            if let Some(object) = self
+                .scene
+                .objects_mut()
+                .iter_mut()
+                .find(|object| object.id == local_id)
+            {
+                object.is_dragging = false;
+                object.body.is_dragging = false;
+                object.body.velocity = release_velocity;
+                object.body.is_sleeping = false;
+            }
+            return;
+        }
+        let Some(pointer) = payload.get("pointer") else {
+            return;
+        };
+        let x = pointer
+            .get("x")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or_default() as f32;
+        let y = pointer
+            .get("y")
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or_default() as f32;
+        let host_position = self.room_runtime.host_scene_position(Vector2::new(x, y));
+        let _ = self
+            .scene
+            .teleport_object(local_id, host_position, Vector2::ZERO);
+        if let Some(object) = self
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == local_id)
+        {
+            object.is_dragging = true;
+            object.body.is_dragging = true;
+            object.body.is_sleeping = false;
+        }
+    }
+
+    fn apply_remote_spawn_intent(&mut self, payload: serde_json::Value) {
+        if self.room_runtime.mode() != network::RoomMode::Host
+            || !self.room_runtime.allows_interaction()
+        {
+            self.send_room_bridge("interaction.intentRejected", serde_json::json!({ "code": "permission_denied", "message": "Host interaction is disabled." }));
+            return;
+        }
+        let kind = payload
+            .get("visualKindTag")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Cube");
+        let Some((visual_kind, color, label)) = control_visual_kind(kind) else {
+            self.send_room_bridge("interaction.intentRejected", serde_json::json!({ "code": "unsupported_feature", "message": "That object type cannot be shared." }));
+            return;
+        };
+        let Some(pointer) = payload.get("pointer") else {
+            return;
+        };
+        let position = self.room_runtime.host_scene_position(Vector2::new(
+            pointer
+                .get("x")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or_default() as f32,
+            pointer
+                .get("y")
+                .and_then(serde_json::Value::as_f64)
+                .unwrap_or_default() as f32,
+        ));
+        let text = payload
+            .pointer("/options/text")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("Text");
+        let text_scale = text_size_scale(
+            payload
+                .pointer("/options/textSize")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("medium"),
+        );
+        let count = payload
+            .pointer("/options/count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(1)
+            .clamp(1, 100) as usize;
+        let id = if count > 1 && visual_kind == ObjectVisualKind::Cube {
+            self.scene.spawn_small_cube_batch(position, count)
+        } else {
+            Some(self.spawn_visual_kind_at(position, visual_kind, color, text, text_scale))
+        };
+        self.selected_id = id;
+        self.push_status_message(if count > 1 {
+            format!("Guest spawned {count} shared cubes.")
+        } else {
+            format!("Guest spawned shared {label}.")
+        });
     }
 
     fn handle_control_command(&mut self, command: ControlIpcCommand) {
@@ -1318,29 +2065,35 @@ impl NativeApp {
                 } else {
                     "Control UI disabled debug HUD.".to_string()
                 });
-            },
+            }
             "spawn_next_catalog" => {
                 let id = self.scene.spawn_next_object(self.default_spawn_position());
                 self.selected_id = Some(id);
                 self.push_status_message("Control UI spawned next catalog object.".to_string());
-            },
+            }
             "spawn_cube" => {
-                let id = self
-                    .scene
-                    .spawn_object(self.default_spawn_position(), None, ObjectVisualKind::Cube);
+                let id = self.scene.spawn_object(
+                    self.default_spawn_position(),
+                    None,
+                    ObjectVisualKind::Cube,
+                );
                 self.selected_id = Some(id);
                 self.push_status_message("Control UI spawned cube.".to_string());
-            },
+            }
             "spawn_crystal" => {
-                let id = self.scene.spawn_random_crystal(self.default_spawn_position());
+                let id = self
+                    .scene
+                    .spawn_random_crystal(self.default_spawn_position());
                 self.selected_id = Some(id);
                 self.push_status_message("Control UI spawned crystal.".to_string());
-            },
+            }
             "spawn_dvd_logo" => {
-                let id = self.scene.spawn_random_dvd_logo(self.default_spawn_position());
+                let id = self
+                    .scene
+                    .spawn_random_dvd_logo(self.default_spawn_position());
                 self.selected_id = Some(id);
                 self.push_status_message("Control UI spawned DVD logo.".to_string());
-            },
+            }
             "spawn_target" => {
                 let id = self.scene.spawn_object(
                     self.default_spawn_position(),
@@ -1349,20 +2102,165 @@ impl NativeApp {
                 );
                 self.selected_id = Some(id);
                 self.push_status_message("Control UI spawned target.".to_string());
-            },
+            }
             "spawn_visual_kind" => self.spawn_control_visual_kind(command.payload.as_ref()),
-            "simulate_twitch_cheer" => self.simulate_twitch_cheer(command.payload.as_ref()),
+            "simulate_twitch_cheer" => self.simulate_twitch_cheer(command.payload.as_ref(), true),
+            "twitch_bits_event" => self.simulate_twitch_cheer(command.payload.as_ref(), false),
+            "simulate_twitch_chat" | "twitch_chat_message" => {
+                self.simulate_twitch_chat(command.payload.as_ref())
+            }
+            "set_twitch_chat_stream" => self.set_twitch_chat_stream(command.payload.as_ref()),
+            "network_enter_host" => {
+                let allow_interaction = command
+                    .payload
+                    .as_ref()
+                    .and_then(|payload| payload.get("allowInteraction"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                self.replica_world.clear();
+                let surface_bounds = room_target_bounds(command.payload.as_ref(), self.bounds)
+                    .or(self.spawn_monitor_bounds);
+                self.room_runtime
+                    .enter_host(allow_interaction, surface_bounds);
+                room_trace(format!("entered host surface={surface_bounds:?}"));
+                self.network_host_tick = 0;
+                self.last_network_entity_ids.clear();
+                self.next_network_transform_at = 0.0;
+                self.push_status_message(
+                    "Shared room host mode ready (localhost development).".to_string(),
+                );
+            }
+            "network_enter_guest" => {
+                if self.local_scene_backup.is_none() {
+                    self.local_scene_backup = Some(self.room_runtime.capture_keyframe(
+                        self.scene.objects(),
+                        self.scene_bounds(),
+                        self.network_host_tick,
+                    ));
+                }
+                let target_bounds = room_target_bounds(command.payload.as_ref(), self.bounds)
+                    .or(self.spawn_monitor_bounds);
+                self.replica_world.set_target_bounds(target_bounds);
+                self.room_runtime.enter_guest();
+                room_trace(format!("entered guest target={target_bounds:?}"));
+                self.last_network_entity_ids.clear();
+                self.physics_paused = true;
+                self.drag_controller.cancel_drag(self.scene.objects_mut());
+                self.push_status_message(
+                    "Shared room guest mode syncing; local physics paused.".to_string(),
+                );
+            }
+            "network_leave" => {
+                let was_guest = self.room_runtime.mode() == network::RoomMode::Guest;
+                self.room_runtime.leave();
+                self.last_network_entity_ids.clear();
+                if let Some(local_scene) = self.local_scene_backup.take() {
+                    self.replica_world = network::ReplicaWorld::default();
+                    self.replica_world
+                        .apply_keyframe(local_scene, &mut self.scene);
+                } else {
+                    self.replica_world.clear();
+                }
+                if was_guest {
+                    self.physics_paused = false;
+                }
+                self.push_status_message(
+                    "Shared room mode ended; local scene restored.".to_string(),
+                );
+            }
+            "network_set_interaction" => {
+                let enabled = command
+                    .payload
+                    .as_ref()
+                    .and_then(|payload| payload.get("enabled"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                self.room_runtime.set_allow_interaction(enabled);
+                self.push_status_message(format!(
+                    "Shared room interaction {}.",
+                    if enabled { "enabled" } else { "disabled" }
+                ));
+            }
+            "network_apply_keyframe" => {
+                let Some(payload) = command.payload else {
+                    return;
+                };
+                match serde_json::from_value::<network_protocol::SceneKeyframeV1>(payload) {
+                    Ok(keyframe) => {
+                        self.room_runtime.enter_guest();
+                        self.room_runtime
+                            .set_allow_interaction(keyframe.feature_policy.allow_interaction);
+                        room_trace(format!(
+                            "applying keyframe tick={} definitions={} dynamics={}",
+                            keyframe.host_tick,
+                            keyframe.entity_definitions.len(),
+                            keyframe.entity_dynamics.len()
+                        ));
+                        if self.local_scene_backup.is_none() {
+                            self.local_scene_backup = Some(self.room_runtime.capture_keyframe(
+                                self.scene.objects(),
+                                self.scene_bounds(),
+                                self.network_host_tick,
+                            ));
+                        }
+                        self.physics_paused = true;
+                        self.replica_world.apply_keyframe(keyframe, &mut self.scene);
+                        self.push_status_message("Shared room keyframe applied.".to_string());
+                    }
+                    Err(error) => {
+                        self.push_status_message(format!("Rejected room keyframe: {error}."))
+                    }
+                }
+            }
+            "network_apply_transform_batch" => {
+                let Some(payload) = command.payload else {
+                    return;
+                };
+                match serde_json::from_value(payload) {
+                    Ok(batch) => self
+                        .replica_world
+                        .apply_transform_batch(batch, &mut self.scene),
+                    Err(error) => {
+                        self.push_status_message(format!("Rejected room transform batch: {error}."))
+                    }
+                }
+            }
+            "set_obs_output" => {
+                let enabled = command
+                    .payload
+                    .as_ref()
+                    .and_then(|payload| payload.get("enabled"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                #[cfg(target_os = "windows")]
+                if let Some(renderer) = &mut self.d3d_renderer {
+                    match renderer.set_spout_enabled(enabled) {
+                        Ok(()) => self.push_status_message(if enabled {
+                            format!("OBS output enabled: Spout sender {SPOUT_SENDER_NAME}.")
+                        } else {
+                            "OBS Spout output disabled.".to_string()
+                        }),
+                        Err(error) => {
+                            self.push_status_message(format!("OBS Spout output failed: {error:#}"))
+                        }
+                    }
+                }
+                #[cfg(not(target_os = "windows"))]
+                self.push_status_message(
+                    "OBS Spout output is only available on Windows.".to_string(),
+                );
+            }
             "spawn_robot_buddy" => self.spawn_robot_buddy(),
             "spawn_stress_batch" => self.spawn_stress_cubes(),
             "reset_scene" => self.reset_everything(),
             "pause_physics" => {
                 self.physics_paused = true;
                 self.push_status_message("Control UI paused physics.".to_string());
-            },
+            }
             "resume_physics" => {
                 self.physics_paused = false;
                 self.push_status_message("Control UI resumed physics.".to_string());
-            },
+            }
             "set_scene_mode" => {
                 let mode = command
                     .payload
@@ -1371,8 +2269,10 @@ impl NativeApp {
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("custom");
                 self.push_status_message(format!("Control UI scene mode: {mode}."));
-            },
-            "apply_runtime_settings" => self.apply_control_runtime_settings(command.payload.as_ref()),
+            }
+            "apply_runtime_settings" => {
+                self.apply_control_runtime_settings(command.payload.as_ref())
+            }
             "set_spawn_monitor" => self.set_spawn_monitor(command.payload.as_ref()),
             "toggle_weather" => self.toggle_weather_world(),
             "toggle_sand" => self.toggle_sand_world(),
@@ -1384,25 +2284,34 @@ impl NativeApp {
             "shatter_screen" => self.trigger_screen_shatter(),
             "toggle_slingshot_game" => self.toggle_slingshot_game(),
             "toggle_basketball_game" => self.toggle_basketball_game(),
+            "open_case" => self.open_case_from_payload(command.payload.as_ref()),
+            "cancel_case" => {
+                self.case_director.cancel();
+                self.push_status_message("Case openings cancelled.".to_string());
+            }
+            "load_case_config" => self.load_case_config_from_payload(command.payload.as_ref()),
             "release_lasso" => {
                 self.lasso_tool.release_capture();
                 self.push_status_message("Control UI released lasso.".to_string());
-            },
+            }
             "open_overlay_settings" => {
                 self.settings_panel.visible = !self.settings_panel.visible;
                 if self.settings_panel.visible {
                     self.import_panel = None;
                 }
-            },
+            }
             "import_model" => {
                 if let Some(path) = pick_model_file() {
                     self.import_panel = Some(ImportPanel::new(path.display().to_string()));
                     self.settings_panel.visible = false;
                 }
-            },
+            }
             _ => {
-                self.push_status_message(format!("Unknown Control UI command: {}", command.command));
-            },
+                self.push_status_message(format!(
+                    "Unknown Control UI command: {}",
+                    command.command
+                ));
+            }
         }
     }
 
@@ -1421,17 +2330,26 @@ impl NativeApp {
     fn spawn_fan(&mut self) {
         let mut position = self.default_spawn_position();
         position.y = (position.y + 160.0).min(self.scene_bounds().bottom() - 140.0);
-        let id = self
+        let id = self.scene.spawn_object(
+            position,
+            Some(AppColor::from_rgb(105, 230, 255)),
+            ObjectVisualKind::Fan,
+        );
+        if let Some(object) = self
             .scene
-            .spawn_object(position, Some(AppColor::from_rgb(105, 230, 255)), ObjectVisualKind::Fan);
-        if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == id) {
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == id)
+        {
             object.rotation_z = 0.0;
             object.body.gravity_scale = 0.0;
             object.body.velocity = Vector2::ZERO;
         }
         self.fan_yaws.insert(id, 0.0);
         self.selected_id = Some(id);
-        self.push_status_message("Fan spawned. Drag it around; right-drag while held aims the gust.".to_string());
+        self.push_status_message(
+            "Fan spawned. Drag it around; right-drag while held aims the gust.".to_string(),
+        );
     }
 
     fn spawn_quad_drone(&mut self) {
@@ -1442,13 +2360,20 @@ impl NativeApp {
             Some(AppColor::from_rgb(248, 250, 252)),
             ObjectVisualKind::QuadDrone,
         );
-        if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == id) {
+        if let Some(object) = self
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == id)
+        {
             object.body.gravity_scale = 0.0;
             object.body.velocity = Vector2::ZERO;
             object.body.lock_rotation = true;
         }
         self.selected_id = Some(id);
-        self.push_status_message("Quadcopter drone spawned. It will tidy loose desktop toys into the bin.".to_string());
+        self.push_status_message(
+            "Quadcopter drone spawned. It will tidy loose desktop toys into the bin.".to_string(),
+        );
     }
 
     fn spawn_snail(&mut self) {
@@ -1469,7 +2394,10 @@ impl NativeApp {
         let candidates = [
             Vector2::new(margin, margin),
             Vector2::new((bounds.right() - snail_width - margin).max(margin), margin),
-            Vector2::new(margin, (bounds.bottom() - snail_height - margin).max(margin)),
+            Vector2::new(
+                margin,
+                (bounds.bottom() - snail_height - margin).max(margin),
+            ),
             Vector2::new(
                 (bounds.right() - snail_width - margin).max(margin),
                 (bounds.bottom() - snail_height - margin).max(margin),
@@ -1545,7 +2473,8 @@ impl NativeApp {
         self.cursor_local = respawn;
         self.was_left_down = false;
         self.was_right_down = false;
-        let _ = window.set_cursor_position(PhysicalPosition::new(respawn.x as f64, respawn.y as f64));
+        let _ =
+            window.set_cursor_position(PhysicalPosition::new(respawn.x as f64, respawn.y as f64));
         self.push_status_message("The snail ate the mouse. Respawning.".to_string());
     }
 
@@ -1556,7 +2485,10 @@ impl NativeApp {
             Vector2::new(margin, margin),
             Vector2::new((bounds.right() - margin).max(margin), margin),
             Vector2::new(margin, (bounds.bottom() - margin).max(margin)),
-            Vector2::new((bounds.right() - margin).max(margin), (bounds.bottom() - margin).max(margin)),
+            Vector2::new(
+                (bounds.right() - margin).max(margin),
+                (bounds.bottom() - margin).max(margin),
+            ),
             Vector2::new(bounds.width * 0.5, margin),
             Vector2::new(bounds.width * 0.5, (bounds.bottom() - margin).max(margin)),
         ];
@@ -1584,31 +2516,55 @@ impl NativeApp {
     }
 
     fn update_robot_buddies(&mut self, _dt: f32) {
-        if self.slingshot_game.active || self.basketball_game.active {
+        if self.room_runtime.mode() == network::RoomMode::Guest
+            || self.slingshot_game.active
+            || self.basketball_game.active
+        {
             return;
         }
+        self.reconcile_helper_cargo_claims();
         let objects = self.scene.objects().to_vec();
-        let robot_ids: Vec<u64> = objects
+        let mut robot_ids: Vec<u64> = objects
             .iter()
             .filter(|object| object.visual_kind == ObjectVisualKind::RobotBuddy)
             .map(|object| object.id)
             .collect();
+        robot_ids.sort_unstable();
         if !robot_ids.is_empty() {
             self.ensure_robot_bin();
         }
-        self.robot_carries
-            .retain(|robot_id, carry| robot_ids.contains(robot_id) && objects.iter().any(|object| object.id == carry.object_id));
-        self.robot_drop_cooldowns.retain(|robot_id, cooldown| {
-            robot_ids.contains(robot_id) && self.frame_clock.elapsed_seconds - cooldown.dropped_at < ROBOT_STACK_DROP_COOLDOWN_SECONDS
+        self.robot_carries.retain(|robot_id, carry| {
+            robot_ids.contains(robot_id)
+                && objects.iter().any(|object| object.id == carry.object_id)
         });
-
+        self.robot_drop_cooldowns.retain(|robot_id, cooldown| {
+            robot_ids.contains(robot_id)
+                && self.frame_clock.elapsed_seconds - cooldown.dropped_at
+                    < ROBOT_STACK_DROP_COOLDOWN_SECONDS
+        });
+        self.helper_release_protection.retain(|_, released_at| {
+            self.frame_clock.elapsed_seconds - *released_at < HELPER_RELEASE_PROTECTION_SECONDS
+        });
+        let mut reserved_objects: std::collections::HashSet<u64> = self
+            .robot_carries
+            .values()
+            .map(|carry| carry.object_id)
+            .chain(self.drone_carries.values().map(|carry| carry.object_id))
+            .chain(self.helper_targets.values().copied())
+            .collect();
         for robot_id in robot_ids {
             let Some(robot_snapshot) = objects.iter().find(|object| object.id == robot_id) else {
                 continue;
             };
             if self.drag_controller.dragged_id() == Some(robot_id) || robot_snapshot.is_dragging {
+                self.helper_targets.remove(&robot_id);
                 self.drop_robot_carry(robot_id, 0.0);
-                if let Some(robot) = self.scene.objects_mut().iter_mut().find(|object| object.id == robot_id) {
+                if let Some(robot) = self
+                    .scene
+                    .objects_mut()
+                    .iter_mut()
+                    .find(|object| object.id == robot_id)
+                {
                     robot.body.motor_enabled = false;
                     robot.body.motor_velocity_x = 0.0;
                 }
@@ -1619,15 +2575,19 @@ impl NativeApp {
                 robot_snapshot.body.position.x + robot_snapshot.body.width * 0.5,
                 robot_snapshot.body.position.y + robot_snapshot.body.height * 0.5,
             );
-            let facing = if robot_snapshot.body.motor_velocity_x < -1.0 || robot_snapshot.body.velocity.x < -1.0 {
+            let facing = if robot_snapshot.body.motor_velocity_x < -1.0
+                || robot_snapshot.body.velocity.x < -1.0
+            {
                 -1.0
             } else {
                 1.0
             };
 
             if let Some(carry) = self.robot_carries.get(&robot_id).copied() {
+                self.helper_targets.remove(&robot_id);
                 let held_seconds = self.frame_clock.elapsed_seconds - carry.picked_up_at;
-                let near_edge = robot_center.x < 80.0 || robot_center.x > self.scene_bounds().right() - 80.0;
+                let near_edge =
+                    robot_center.x < 80.0 || robot_center.x > self.scene_bounds().right() - 80.0;
                 if near_edge || held_seconds > 7.0 {
                     self.drop_robot_carry(robot_id, facing * 70.0);
                 } else if held_seconds >= ROBOT_THROW_HOLD_SECONDS {
@@ -1641,53 +2601,82 @@ impl NativeApp {
             }
 
             let is_carrying = self.robot_carries.contains_key(&robot_id);
-            let nearest = if is_carrying {
+            let current_target = self.helper_targets.get(&robot_id).copied();
+            let nearest = if is_carrying || self.robot_drop_cooldowns.contains_key(&robot_id) {
                 None
             } else {
                 objects
                     .iter()
+                    .filter(|object| {
+                        !reserved_objects.contains(&object.id) || current_target == Some(object.id)
+                    })
                     .filter(|object| self.is_robot_carry_candidate(robot_id, object))
                     .map(|object| {
-                        let center = Vector2::new(
-                            object.body.position.x + object.body.width * 0.5,
-                            object.body.position.y + object.body.height * 0.5,
-                        );
-                        (object.id, center, (center - robot_center).length_squared())
+                        let center = object_center(object);
+                        let horizontal_travel = ((center.x - robot_center.x).abs()
+                            - (robot_snapshot.body.width + object.body.width) * 0.5)
+                            .max(0.0);
+                        (object.id, center, horizontal_travel)
                     })
-                    .filter(|(_, _, distance)| *distance < 540.0 * 540.0)
-                    .min_by(|(_, _, left), (_, _, right)| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal))
+                    .filter(|(_, _, distance)| *distance < 540.0)
+                    .min_by(|(_, _, left), (_, _, right)| {
+                        left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
+                    })
             };
 
             if let Some((object_id, object_center, distance)) = nearest {
-                if distance < 95.0 * 95.0 {
-                    self.robot_carries.insert(
-                        robot_id,
-                        RobotCarry {
-                            object_id,
-                            picked_up_at: self.frame_clock.elapsed_seconds,
-                        },
-                    );
-                    self.position_robot_carry(robot_snapshot, object_id);
+                self.helper_targets.insert(robot_id, object_id);
+                reserved_objects.insert(object_id);
+                if distance <= ROBOT_PICKUP_CLEARANCE_PIXELS {
+                    let already_claimed = self
+                        .robot_carries
+                        .values()
+                        .any(|carry| carry.object_id == object_id)
+                        || self
+                            .drone_carries
+                            .values()
+                            .any(|carry| carry.object_id == object_id);
+                    if !already_claimed && !self.robot_carries.contains_key(&robot_id) {
+                        self.helper_targets.remove(&robot_id);
+                        self.robot_carries.insert(
+                            robot_id,
+                            RobotCarry {
+                                object_id,
+                                picked_up_at: self.frame_clock.elapsed_seconds,
+                            },
+                        );
+                        self.position_robot_carry(robot_snapshot, object_id);
+                    }
                 }
                 let direction = (object_center.x - robot_center.x).clamp(-1.0, 1.0);
-                self.drive_robot(robot_id, direction, 108.0);
+                self.drive_robot(robot_id, direction, ROBOT_TRAVEL_SPEED_PIXELS_PER_SECOND);
                 continue;
             }
 
-            let patrol = ((self.frame_clock.elapsed_seconds * 0.32 + robot_id as f64 * 0.17).sin() as f32).signum();
-            let target_x = self.robot_bin_rect().right() + 210.0 + patrol * 180.0;
-            let direction = (target_x - robot_center.x).clamp(-1.0, 1.0);
-            let speed = if is_carrying { 72.0 } else { 64.0 };
-            self.drive_robot(robot_id, direction, speed);
+            self.helper_targets.remove(&robot_id);
+            self.drive_robot(robot_id, 0.0, 0.0);
         }
     }
 
     fn is_robot_carry_candidate(&self, robot_id: u64, object: &ObjectState) -> bool {
         let bounds = self.scene_bounds();
         let bin_rect = self.robot_bin_rect();
+        let Some(robot) = self
+            .scene
+            .objects()
+            .iter()
+            .find(|candidate| candidate.id == robot_id)
+        else {
+            return false;
+        };
+        let robot_center = object_center(robot);
+        let object_center = object_center(object);
+        let vertical_reach =
+            (robot.body.height + object.body.height) * 0.5 + ROBOT_VERTICAL_REACH_PIXELS;
         let center_x = object.body.position.x + object.body.width * 0.5;
         let bottom_y = object.body.position.y + object.body.height;
-        let in_bin_zone = center_x > bin_rect.x - object.body.width && center_x < bin_rect.right() + object.body.width;
+        let in_bin_zone = center_x > bin_rect.x - object.body.width
+            && center_x < bin_rect.right() + object.body.width;
         object.id != robot_id
             && object.body.collidable
             && !object.is_dragging
@@ -1695,13 +2684,19 @@ impl NativeApp {
             && object.visual_kind == ObjectVisualKind::Cube
             && object.body.width <= 120.0
             && object.body.height <= 120.0
+            && (object_center.y - robot_center.y).abs() <= vertical_reach
             && bottom_y > bounds.bottom() - 210.0
             && !in_bin_zone
-            && !self.robot_carries.values().any(|carry| carry.object_id == object.id)
             && !self
-                .robot_drop_cooldowns
-                .get(&robot_id)
-                .is_some_and(|cooldown| cooldown.object_id == object.id)
+                .robot_carries
+                .values()
+                .any(|carry| carry.object_id == object.id)
+            && !self
+                .drone_carries
+                .values()
+                .any(|carry| carry.object_id == object.id)
+            && !self.helper_release_protection.contains_key(&object.id)
+            && !self.robot_drop_cooldowns.contains_key(&robot_id)
             && !matches!(
                 object.visual_kind,
                 ObjectVisualKind::RobotBuddy
@@ -1714,8 +2709,23 @@ impl NativeApp {
     }
 
     fn drive_robot(&mut self, robot_id: u64, direction: f32, speed: f32) {
-        let motor_velocity = if direction.abs() < 0.08 { 0.0 } else { direction.signum() * speed };
-        if let Some(robot) = self.scene.objects_mut().iter_mut().find(|object| object.id == robot_id) {
+        let separation = self.robot_separation_bias(robot_id).clamp(-0.55, 0.55);
+        let direction = if direction.abs() >= 0.08 {
+            (direction.signum() + separation).clamp(-1.0, 1.0)
+        } else {
+            separation
+        };
+        let motor_velocity = if direction.abs() < 0.08 {
+            0.0
+        } else {
+            direction.signum() * speed
+        };
+        if let Some(robot) = self
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == robot_id)
+        {
             robot.body.is_dragging = false;
             robot.is_dragging = false;
             robot.body.is_sleeping = false;
@@ -1732,10 +2742,49 @@ impl NativeApp {
         }
     }
 
+    fn robot_separation_bias(&self, robot_id: u64) -> f32 {
+        let Some(robot) = self
+            .scene
+            .objects()
+            .iter()
+            .find(|object| object.id == robot_id)
+        else {
+            return 0.0;
+        };
+        let center = object_center(robot);
+        self.scene
+            .objects()
+            .iter()
+            .filter(|other| {
+                other.id != robot_id && other.visual_kind == ObjectVisualKind::RobotBuddy
+            })
+            .filter_map(|other| {
+                let delta = center.x - object_center(other).x;
+                let distance = delta.abs();
+                if distance >= ROBOT_SEPARATION_RADIUS_PIXELS {
+                    return None;
+                }
+                let direction = if distance < 0.5 {
+                    if robot_id < other.id { -1.0 } else { 1.0 }
+                } else {
+                    delta.signum()
+                };
+                Some(direction * (1.0 - distance / ROBOT_SEPARATION_RADIUS_PIXELS) * 1.35)
+            })
+            .sum::<f32>()
+            .clamp(-1.6, 1.6)
+    }
+
     fn position_robot_carry(&mut self, robot: &ObjectState, object_id: u64) {
-        if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == object_id) {
+        if let Some(object) = self
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == object_id)
+        {
             object.is_dragging = true;
             object.body.is_dragging = true;
+            object.body.collidable = false;
             object.body.is_sleeping = false;
             object.body.velocity = Vector2::ZERO;
             object.rotation_z *= 0.92;
@@ -1753,12 +2802,19 @@ impl NativeApp {
     }
 
     fn drop_robot_carry(&mut self, robot_id: u64, toss_x: f32) {
+        self.helper_targets.remove(&robot_id);
         let Some(carry) = self.robot_carries.remove(&robot_id) else {
             return;
         };
-        if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == carry.object_id) {
+        if let Some(object) = self
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == carry.object_id)
+        {
             object.is_dragging = false;
             object.body.is_dragging = false;
+            object.body.collidable = true;
             object.body.is_sleeping = false;
             object.body.velocity = Vector2::new(toss_x, -65.0);
         }
@@ -1769,9 +2825,12 @@ impl NativeApp {
                 dropped_at: self.frame_clock.elapsed_seconds,
             },
         );
+        self.helper_release_protection
+            .insert(carry.object_id, self.frame_clock.elapsed_seconds);
     }
 
     fn throw_robot_carry_to_bin(&mut self, robot_id: u64, object_id: u64) {
+        self.helper_targets.remove(&robot_id);
         let Some(carry) = self.robot_carries.remove(&robot_id) else {
             return;
         };
@@ -1779,9 +2838,15 @@ impl NativeApp {
             self.robot_carries.insert(robot_id, carry);
             return;
         };
-        if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == object_id) {
+        if let Some(object) = self
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == object_id)
+        {
             object.is_dragging = false;
             object.body.is_dragging = false;
+            object.body.collidable = true;
             object.body.is_sleeping = false;
             object.body.velocity = throw_velocity;
             object.body.friction = 0.95;
@@ -1802,10 +2867,16 @@ impl NativeApp {
                 dropped_at: self.frame_clock.elapsed_seconds,
             },
         );
+        self.helper_release_protection
+            .insert(object_id, self.frame_clock.elapsed_seconds);
     }
 
     fn robot_bin_throw_velocity(&self, object_id: u64) -> Option<Vector2> {
-        let object = self.scene.objects().iter().find(|object| object.id == object_id)?;
+        let object = self
+            .scene
+            .objects()
+            .iter()
+            .find(|object| object.id == object_id)?;
         let mut target = self.robot_bin_target();
         let start = Vector2::new(
             object.body.position.x + object.body.width * 0.5,
@@ -1823,7 +2894,12 @@ impl NativeApp {
 
     fn robot_bin_rect(&self) -> RectF {
         let bottom = self.scene_bounds().bottom();
-        RectF::new(42.0, bottom - ROBOT_BIN_HEIGHT, ROBOT_BIN_WIDTH, ROBOT_BIN_HEIGHT)
+        RectF::new(
+            0.0,
+            bottom - ROBOT_BIN_HEIGHT,
+            ROBOT_BIN_WIDTH,
+            ROBOT_BIN_HEIGHT,
+        )
     }
 
     fn robot_bin_target(&self) -> Vector2 {
@@ -1832,8 +2908,18 @@ impl NativeApp {
     }
 
     fn ensure_robot_bin(&mut self) {
-        let existing_ids: std::collections::HashSet<u64> = self.scene.objects().iter().map(|object| object.id).collect();
-        if self.robot_bin_ids.len() == 3 && self.robot_bin_ids.iter().all(|id| existing_ids.contains(id)) {
+        let existing_ids: std::collections::HashSet<u64> = self
+            .scene
+            .objects()
+            .iter()
+            .map(|object| object.id)
+            .collect();
+        if self.robot_bin_ids.len() == 3
+            && self
+                .robot_bin_ids
+                .iter()
+                .all(|id| existing_ids.contains(id))
+        {
             return;
         }
         self.robot_bin_ids.clear();
@@ -1896,12 +2982,16 @@ impl NativeApp {
         for id in &collected {
             let _ = self.scene.remove_object(*id);
         }
-        self.robot_carries.retain(|_, carry| !collected.contains(&carry.object_id));
+        self.robot_carries
+            .retain(|_, carry| !collected.contains(&carry.object_id));
         self.robot_drop_cooldowns
             .retain(|_, cooldown| !collected.contains(&cooldown.object_id));
-        self.drone_carries.retain(|_, carry| !collected.contains(&carry.object_id));
+        self.drone_carries
+            .retain(|_, carry| !collected.contains(&carry.object_id));
         self.drone_drop_cooldowns
             .retain(|_, cooldown| !collected.contains(&cooldown.object_id));
+        self.helper_targets
+            .retain(|_, object_id| !collected.contains(object_id));
     }
 
     fn stabilize_robot_buddies(&mut self) {
@@ -1941,11 +3031,12 @@ impl NativeApp {
             .iter_mut()
             .filter(|object| object.visual_kind == ObjectVisualKind::Fan)
         {
-            let yaw = if dragged_id == Some(object.id) || object.is_dragging || object.body.is_dragging {
-                object.rotation_z
-            } else {
-                *self.fan_yaws.entry(object.id).or_insert(object.rotation_z)
-            };
+            let yaw =
+                if dragged_id == Some(object.id) || object.is_dragging || object.body.is_dragging {
+                    object.rotation_z
+                } else {
+                    *self.fan_yaws.entry(object.id).or_insert(object.rotation_z)
+                };
             self.fan_yaws.insert(object.id, yaw);
             object.rotation_z = yaw;
             object.rotation_x *= 0.5;
@@ -1971,7 +3062,10 @@ impl NativeApp {
             let radians = (yaw_degrees as f32).to_radians();
             let forward = Vector2::new(radians.cos(), radians.sin());
             let normal = Vector2::new(-forward.y, forward.x);
-            for object in objects.iter().filter(|object| self.is_fan_push_candidate(fan_id, object)) {
+            for object in objects
+                .iter()
+                .filter(|object| self.is_fan_push_candidate(fan_id, object))
+            {
                 let target_center = object_center(object);
                 let delta = target_center - fan_center;
                 let forward_distance = vector_dot(delta, forward);
@@ -1985,9 +3079,14 @@ impl NativeApp {
                     continue;
                 }
                 let distance_falloff = 1.0 - (forward_distance / FAN_RANGE_PIXELS).clamp(0.0, 1.0);
-                let lateral_falloff = 1.0 - (lateral / cone_half_width.max(1.0)).clamp(0.0, 1.0) * 0.35;
+                let lateral_falloff =
+                    1.0 - (lateral / cone_half_width.max(1.0)).clamp(0.0, 1.0) * 0.35;
                 let mass_falloff = (1.35 / object.body.mass.max(0.35)).sqrt().clamp(0.45, 1.7);
-                let impulse = FAN_PUSH_ACCELERATION * dt * distance_falloff.max(0.12) * lateral_falloff * mass_falloff;
+                let impulse = FAN_PUSH_ACCELERATION
+                    * dt
+                    * distance_falloff.max(0.12)
+                    * lateral_falloff
+                    * mass_falloff;
                 pushes.push((object.id, forward * impulse));
             }
         }
@@ -2029,47 +3128,99 @@ impl NativeApp {
     }
 
     fn update_quad_drones(&mut self, dt: f32) {
-        if self.slingshot_game.active || self.basketball_game.active || dt <= 0.0 {
+        if self.room_runtime.mode() == network::RoomMode::Guest
+            || self.slingshot_game.active
+            || self.basketball_game.active
+            || dt <= 0.0
+        {
             return;
         }
 
         let objects = self.scene.objects().to_vec();
-        let drone_ids: Vec<u64> = objects
+        let mut drone_ids: Vec<u64> = objects
             .iter()
             .filter(|object| object.visual_kind == ObjectVisualKind::QuadDrone)
             .map(|object| object.id)
             .collect();
+        drone_ids.sort_unstable();
         if drone_ids.is_empty() {
             self.drone_carries.clear();
             self.drone_drop_cooldowns.clear();
             return;
         }
         self.ensure_robot_bin();
-        self.drone_carries
-            .retain(|drone_id, carry| drone_ids.contains(drone_id) && objects.iter().any(|object| object.id == carry.object_id));
+        self.drone_carries.retain(|drone_id, carry| {
+            drone_ids.contains(drone_id)
+                && objects.iter().any(|object| object.id == carry.object_id)
+        });
         self.drone_drop_cooldowns.retain(|drone_id, cooldown| {
             drone_ids.contains(drone_id)
-                && self.frame_clock.elapsed_seconds - cooldown.dropped_at < DRONE_DROP_COOLDOWN_SECONDS
+                && self.frame_clock.elapsed_seconds - cooldown.dropped_at
+                    < DRONE_DROP_COOLDOWN_SECONDS
                 && objects.iter().any(|object| object.id == cooldown.object_id)
         });
-
+        let mut delivery_order: Vec<(u64, f64)> = self
+            .drone_carries
+            .iter()
+            .map(|(drone_id, carry)| (*drone_id, carry.picked_up_at))
+            .collect();
+        delivery_order.sort_by(|(left_id, left_time), (right_id, right_time)| {
+            left_time
+                .partial_cmp(right_time)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left_id.cmp(right_id))
+        });
+        let mut reserved_objects: std::collections::HashSet<u64> = self
+            .robot_carries
+            .values()
+            .map(|carry| carry.object_id)
+            .chain(self.drone_carries.values().map(|carry| carry.object_id))
+            .chain(self.helper_targets.values().copied())
+            .collect();
+        let mut reserved_centers: Vec<Vector2> = objects
+            .iter()
+            .filter(|object| reserved_objects.contains(&object.id))
+            .map(object_center)
+            .collect();
         for drone_id in drone_ids {
             let Some(drone_snapshot) = objects.iter().find(|object| object.id == drone_id) else {
                 continue;
             };
             if self.drag_controller.dragged_id() == Some(drone_id) || drone_snapshot.is_dragging {
+                self.helper_targets.remove(&drone_id);
                 self.drop_drone_carry(drone_id, Vector2::new(0.0, -40.0));
                 continue;
             }
 
             if let Some(carry) = self.drone_carries.get(&drone_id).copied() {
-                if self.frame_clock.elapsed_seconds - carry.picked_up_at > 12.0 {
+                self.helper_targets.remove(&drone_id);
+                if self.frame_clock.elapsed_seconds - carry.picked_up_at > DRONE_MAX_CARRY_SECONDS {
                     self.drop_drone_carry(drone_id, Vector2::new(0.0, 80.0));
                     continue;
                 }
-                let target = self.drone_drop_target();
+                let delivery_index = delivery_order
+                    .iter()
+                    .position(|(candidate, _)| *candidate == drone_id)
+                    .unwrap_or(0);
+                let may_enter_drop_lane = delivery_index == 0;
+                let target = if may_enter_drop_lane {
+                    self.drone_drop_target()
+                } else {
+                    self.drone_delivery_queue_target(delivery_index.max(1))
+                };
+                let target = if may_enter_drop_lane {
+                    target
+                } else {
+                    self.separated_drone_target(drone_id, target, &objects)
+                };
                 self.fly_drone_toward(drone_id, target, dt);
-                if let Some(updated_drone) = self.scene.objects().iter().find(|object| object.id == drone_id).cloned() {
+                if let Some(updated_drone) = self
+                    .scene
+                    .objects()
+                    .iter()
+                    .find(|object| object.id == drone_id)
+                    .cloned()
+                {
                     self.position_drone_carry(&updated_drone, carry.object_id);
                 }
                 let drone_center = self
@@ -2079,52 +3230,117 @@ impl NativeApp {
                     .find(|object| object.id == drone_id)
                     .map(object_center)
                     .unwrap_or_else(|| object_center(drone_snapshot));
-                if (drone_center - target).length_squared()
-                    <= DRONE_BIN_RELEASE_RADIUS_PIXELS * DRONE_BIN_RELEASE_RADIUS_PIXELS
+                if may_enter_drop_lane
+                    && (drone_center - self.drone_drop_target()).length_squared()
+                        <= DRONE_BIN_RELEASE_RADIUS_PIXELS * DRONE_BIN_RELEASE_RADIUS_PIXELS
                 {
-                    self.drop_drone_carry(drone_id, Vector2::new(0.0, 115.0));
+                    self.drop_drone_carry(drone_id, Vector2::new(0.0, 175.0));
                 }
                 continue;
             }
 
             let drone_center = object_center(drone_snapshot);
-            let nearest = objects
-                .iter()
-                .filter(|object| self.is_drone_carry_candidate(drone_id, object))
-                .map(|object| {
-                    let center = object_center(object);
-                    let distance = (center - drone_center).length_squared();
-                    let priority = if object.visual_kind == ObjectVisualKind::BitCrystal { 0.18 } else { 1.0 };
-                    (object.id, center, distance, distance * priority)
-                })
-                .min_by(|(_, _, _, left), (_, _, _, right)| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+            let nearest = if self.drone_drop_cooldowns.contains_key(&drone_id) {
+                None
+            } else if let Some(target_id) = self.helper_targets.get(&drone_id).copied() {
+                objects
+                    .iter()
+                    .find(|object| object.id == target_id)
+                    .filter(|object| self.is_drone_carry_candidate(drone_id, object))
+                    .map(|object| {
+                        let center = object_center(object);
+                        let distance = (center - drone_center).length_squared();
+                        let priority = if object.visual_kind == ObjectVisualKind::BitCrystal {
+                            0.18
+                        } else {
+                            1.0
+                        };
+                        (object.id, center, distance, distance * priority)
+                    })
+            } else {
+                objects
+                    .iter()
+                    .filter(|object| !reserved_objects.contains(&object.id))
+                    .filter(|object| {
+                        let center = object_center(object);
+                        reserved_centers.iter().all(|reserved| {
+                            (center - *reserved).length_squared()
+                                > HELPER_TARGET_RESERVATION_RADIUS_PIXELS
+                                    * HELPER_TARGET_RESERVATION_RADIUS_PIXELS
+                        })
+                    })
+                    .filter(|object| self.is_drone_carry_candidate(drone_id, object))
+                    .map(|object| {
+                        let center = object_center(object);
+                        let distance = (center - drone_center).length_squared();
+                        let priority = if object.visual_kind == ObjectVisualKind::BitCrystal {
+                            0.18
+                        } else {
+                            1.0
+                        };
+                        (object.id, center, distance, distance * priority)
+                    })
+                    .min_by(|(_, _, _, left), (_, _, _, right)| {
+                        left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            };
 
             if let Some((object_id, object_center, distance, _)) = nearest {
-                let target = object_center + Vector2::new(0.0, -80.0);
+                self.helper_targets.insert(drone_id, object_id);
+                reserved_objects.insert(object_id);
+                reserved_centers.push(object_center);
+                let target = self.separated_drone_target(
+                    drone_id,
+                    object_center + Vector2::new(0.0, -80.0),
+                    &objects,
+                );
                 let reached_pickup_hover = self.fly_drone_toward(drone_id, target, dt);
-                if reached_pickup_hover || distance <= DRONE_PICKUP_RADIUS_PIXELS * DRONE_PICKUP_RADIUS_PIXELS {
-                    self.drone_carries.insert(
-                        drone_id,
-                        DroneCarry {
-                            object_id,
-                            picked_up_at: self.frame_clock.elapsed_seconds,
-                        },
-                    );
-                    if let Some(updated_drone) = self.scene.objects().iter().find(|object| object.id == drone_id).cloned() {
-                        self.position_drone_carry(&updated_drone, object_id);
+                if reached_pickup_hover
+                    || distance <= DRONE_PICKUP_RADIUS_PIXELS * DRONE_PICKUP_RADIUS_PIXELS
+                {
+                    let already_claimed = self
+                        .robot_carries
+                        .values()
+                        .any(|carry| carry.object_id == object_id)
+                        || self
+                            .drone_carries
+                            .values()
+                            .any(|carry| carry.object_id == object_id);
+                    if !already_claimed && !self.drone_carries.contains_key(&drone_id) {
+                        self.helper_targets.remove(&drone_id);
+                        self.drone_carries.insert(
+                            drone_id,
+                            DroneCarry {
+                                object_id,
+                                picked_up_at: self.frame_clock.elapsed_seconds,
+                            },
+                        );
+                        if let Some(updated_drone) = self
+                            .scene
+                            .objects()
+                            .iter()
+                            .find(|object| object.id == drone_id)
+                            .cloned()
+                        {
+                            self.position_drone_carry(&updated_drone, object_id);
+                        }
                     }
                 }
                 continue;
             }
 
-            let patrol_phase = (self.frame_clock.elapsed_seconds * 0.45 + drone_id as f64 * 0.11).sin() as f32;
+            self.helper_targets.remove(&drone_id);
+            let patrol_phase =
+                (self.frame_clock.elapsed_seconds * 0.45 + drone_id as f64 * 0.11).sin() as f32;
             let bounds = self.scene_bounds();
             let target = Vector2::new(
                 (bounds.width * 0.58 + patrol_phase * 190.0).clamp(120.0, bounds.right() - 120.0),
                 (bounds.height * 0.22).clamp(90.0, bounds.bottom() - 220.0),
             );
+            let target = self.separated_drone_target(drone_id, target, &objects);
             self.fly_drone_toward(drone_id, target, dt);
         }
+        self.resolve_drone_overlaps();
     }
 
     fn is_drone_carry_candidate(&self, drone_id: u64, object: &ObjectState) -> bool {
@@ -2143,12 +3359,16 @@ impl NativeApp {
             && object.body.height <= 150.0
             && !in_bin_zone
             && !self.robot_bin_ids.contains(&object.id)
-            && !self.robot_carries.values().any(|carry| carry.object_id == object.id)
-            && !self.drone_carries.values().any(|carry| carry.object_id == object.id)
             && !self
-                .drone_drop_cooldowns
-                .get(&drone_id)
-                .is_some_and(|cooldown| cooldown.object_id == object.id)
+                .robot_carries
+                .values()
+                .any(|carry| carry.object_id == object.id)
+            && !self
+                .drone_carries
+                .values()
+                .any(|carry| carry.object_id == object.id)
+            && !self.helper_release_protection.contains_key(&object.id)
+            && !self.drone_drop_cooldowns.contains_key(&drone_id)
             && !matches!(
                 object.visual_kind,
                 ObjectVisualKind::RobotBuddy
@@ -2164,7 +3384,12 @@ impl NativeApp {
     }
 
     fn fly_drone_toward(&mut self, drone_id: u64, target: Vector2, dt: f32) -> bool {
-        let Some(drone) = self.scene.objects_mut().iter_mut().find(|object| object.id == drone_id) else {
+        let Some(drone) = self
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == drone_id)
+        else {
             return false;
         };
         let center = object_center(drone);
@@ -2208,9 +3433,15 @@ impl NativeApp {
     }
 
     fn position_drone_carry(&mut self, drone: &ObjectState, object_id: u64) {
-        if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == object_id) {
+        if let Some(object) = self
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == object_id)
+        {
             object.is_dragging = true;
             object.body.is_dragging = true;
+            object.body.collidable = false;
             object.body.is_sleeping = false;
             object.body.velocity = Vector2::ZERO;
             let drone_center = object_center(drone);
@@ -2231,12 +3462,19 @@ impl NativeApp {
     }
 
     fn drop_drone_carry(&mut self, drone_id: u64, release_velocity: Vector2) {
+        self.helper_targets.remove(&drone_id);
         let Some(carry) = self.drone_carries.remove(&drone_id) else {
             return;
         };
-        if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == carry.object_id) {
+        if let Some(object) = self
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == carry.object_id)
+        {
             object.is_dragging = false;
             object.body.is_dragging = false;
+            object.body.collidable = true;
             object.body.is_sleeping = false;
             object.body.velocity = release_velocity;
             object.body.gravity_scale = 1.0;
@@ -2248,11 +3486,240 @@ impl NativeApp {
                 dropped_at: self.frame_clock.elapsed_seconds,
             },
         );
+        self.helper_release_protection
+            .insert(carry.object_id, self.frame_clock.elapsed_seconds);
+    }
+
+    fn reconcile_helper_cargo_claims(&mut self) {
+        let objects = self.scene.objects().to_vec();
+        let mut claims =
+            self.robot_carries
+                .iter()
+                .map(|(helper_id, carry)| (carry.picked_up_at, 0_u8, *helper_id, carry.object_id))
+                .chain(self.drone_carries.iter().map(|(helper_id, carry)| {
+                    (carry.picked_up_at, 1_u8, *helper_id, carry.object_id)
+                }))
+                .collect::<Vec<_>>();
+        claims.sort_by(|left, right| {
+            left.0
+                .partial_cmp(&right.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| left.1.cmp(&right.1))
+                .then_with(|| left.2.cmp(&right.2))
+        });
+        let mut claimed_objects = std::collections::HashSet::new();
+        let mut rejected_robots = Vec::new();
+        let mut rejected_drones = Vec::new();
+        for (_, helper_kind, helper_id, object_id) in claims {
+            let expected_kind = if helper_kind == 0 {
+                ObjectVisualKind::RobotBuddy
+            } else {
+                ObjectVisualKind::QuadDrone
+            };
+            let helper_exists = objects
+                .iter()
+                .any(|object| object.id == helper_id && object.visual_kind == expected_kind);
+            let cargo_exists =
+                helper_id != object_id && objects.iter().any(|object| object.id == object_id);
+            if helper_exists && cargo_exists && claimed_objects.insert(object_id) {
+                continue;
+            }
+            if helper_kind == 0 {
+                rejected_robots.push(helper_id);
+            } else {
+                rejected_drones.push(helper_id);
+            }
+        }
+        for helper_id in rejected_robots {
+            self.robot_carries.remove(&helper_id);
+        }
+        for helper_id in rejected_drones {
+            self.drone_carries.remove(&helper_id);
+        }
+
+        let active_helpers: std::collections::HashSet<u64> = self
+            .robot_carries
+            .keys()
+            .chain(self.drone_carries.keys())
+            .copied()
+            .collect();
+        let active_cargo: std::collections::HashSet<u64> = self
+            .robot_carries
+            .values()
+            .map(|carry| carry.object_id)
+            .chain(self.drone_carries.values().map(|carry| carry.object_id))
+            .collect();
+        for object in self.scene.objects_mut() {
+            if !object.body.collidable
+                && (object.is_dragging || object.body.is_dragging)
+                && !active_cargo.contains(&object.id)
+                && !matches!(
+                    object.visual_kind,
+                    ObjectVisualKind::QuadDrone | ObjectVisualKind::Fan
+                )
+                && self.drag_controller.dragged_id() != Some(object.id)
+            {
+                object.is_dragging = false;
+                object.body.is_dragging = false;
+                object.body.collidable = true;
+                object.body.gravity_scale = 1.0;
+                object.body.is_sleeping = false;
+            }
+        }
+
+        let helper_ids: std::collections::HashSet<u64> = objects
+            .iter()
+            .filter(|object| {
+                matches!(
+                    object.visual_kind,
+                    ObjectVisualKind::RobotBuddy | ObjectVisualKind::QuadDrone
+                )
+            })
+            .map(|object| object.id)
+            .collect();
+        let mut targets = self
+            .helper_targets
+            .iter()
+            .map(|(helper_id, object_id)| (*helper_id, *object_id))
+            .collect::<Vec<_>>();
+        targets.sort_unstable();
+        let mut targeted_objects = std::collections::HashSet::new();
+        self.helper_targets.clear();
+        for (helper_id, object_id) in targets {
+            let target_is_available = objects.iter().any(|object| {
+                object.id == object_id
+                    && object.body.collidable
+                    && !object.is_dragging
+                    && !object.body.is_dragging
+            });
+            if helper_ids.contains(&helper_id)
+                && !active_helpers.contains(&helper_id)
+                && !active_cargo.contains(&object_id)
+                && targeted_objects.insert(object_id)
+                && target_is_available
+            {
+                self.helper_targets.insert(helper_id, object_id);
+            }
+        }
     }
 
     fn drone_drop_target(&self) -> Vector2 {
         let bin = self.robot_bin_rect();
-        Vector2::new(bin.x + bin.width * 0.5, bin.y - 225.0)
+        Vector2::new(bin.x + bin.width * 0.62, bin.y - 92.0)
+    }
+
+    fn drone_delivery_queue_target(&self, delivery_index: usize) -> Vector2 {
+        let drop = self.drone_drop_target();
+        let slot = delivery_index.saturating_sub(1);
+        let row = slot / 2;
+        let side = if slot.is_multiple_of(2) { 1.0 } else { -1.0 };
+        Vector2::new(
+            drop.x + side * (105.0 + row as f32 * 24.0),
+            drop.y - 155.0 - row as f32 * 135.0,
+        )
+    }
+
+    fn separated_drone_target(
+        &self,
+        drone_id: u64,
+        target: Vector2,
+        objects: &[ObjectState],
+    ) -> Vector2 {
+        let Some(drone) = objects.iter().find(|object| object.id == drone_id) else {
+            return target;
+        };
+        let center = object_center(drone);
+        let mut separation = Vector2::ZERO;
+        for other in objects.iter().filter(|other| {
+            other.id != drone_id && other.visual_kind == ObjectVisualKind::QuadDrone
+        }) {
+            let mut delta = center - object_center(other);
+            let mut distance = delta.length_squared().sqrt();
+            if distance >= DRONE_SEPARATION_RADIUS_PIXELS {
+                continue;
+            }
+            if distance < 0.5 {
+                delta = if drone_id < other.id {
+                    Vector2::new(-1.0, -0.35)
+                } else {
+                    Vector2::new(1.0, 0.35)
+                };
+                distance = 1.0;
+            }
+            separation += delta / distance * (DRONE_SEPARATION_RADIUS_PIXELS - distance) * 1.15;
+        }
+        let bounds = self.scene_bounds();
+        Vector2::new(
+            (target.x + separation.x).clamp(80.0, bounds.right() - 80.0),
+            (target.y + separation.y).clamp(70.0, bounds.bottom() - 150.0),
+        )
+    }
+
+    fn resolve_drone_overlaps(&mut self) {
+        for _ in 0..2 {
+            let drones = self
+                .scene
+                .objects()
+                .iter()
+                .filter(|object| object.visual_kind == ObjectVisualKind::QuadDrone)
+                .map(|object| (object.id, object_center(object)))
+                .collect::<Vec<_>>();
+            let mut corrections: HashMap<u64, Vector2> = HashMap::new();
+            for left_index in 0..drones.len() {
+                for right_index in left_index + 1..drones.len() {
+                    let (left_id, left_center) = drones[left_index];
+                    let (right_id, right_center) = drones[right_index];
+                    let mut delta = right_center - left_center;
+                    let mut distance = delta.length_squared().sqrt();
+                    if distance >= DRONE_MIN_CENTER_SEPARATION_PIXELS {
+                        continue;
+                    }
+                    if distance < 0.5 {
+                        delta = if left_id < right_id {
+                            Vector2::new(1.0, 0.22)
+                        } else {
+                            Vector2::new(-1.0, -0.22)
+                        };
+                        distance = delta.length_squared().sqrt();
+                    }
+                    let direction = delta / distance;
+                    let correction =
+                        direction * ((DRONE_MIN_CENTER_SEPARATION_PIXELS - distance) * 0.52);
+                    *corrections.entry(left_id).or_insert(Vector2::ZERO) -= correction;
+                    *corrections.entry(right_id).or_insert(Vector2::ZERO) += correction;
+                }
+            }
+            if corrections.is_empty() {
+                break;
+            }
+            let bounds = self.scene_bounds();
+            for drone in self
+                .scene
+                .objects_mut()
+                .iter_mut()
+                .filter(|object| object.visual_kind == ObjectVisualKind::QuadDrone)
+            {
+                let Some(correction) = corrections.get(&drone.id).copied() else {
+                    continue;
+                };
+                let center = object_center(drone) + correction;
+                let center = Vector2::new(
+                    center.x.clamp(
+                        drone.body.width * 0.5,
+                        bounds.right() - drone.body.width * 0.5,
+                    ),
+                    center.y.clamp(
+                        drone.body.height * 0.5,
+                        bounds.bottom() - drone.body.height * 0.5,
+                    ),
+                );
+                drone.body.position = Vector2::new(
+                    center.x - drone.body.width * 0.5,
+                    center.y - drone.body.height * 0.5,
+                );
+                drone.body.velocity += correction * 3.0;
+            }
+        }
     }
 
     fn stabilize_quad_drones(&mut self) {
@@ -2279,11 +3746,13 @@ impl NativeApp {
     fn update_portals(&mut self, dt: f32) {
         let now = self.frame_clock.elapsed_seconds;
         let bounds = self.scene_bounds();
-        let teleports = self
-            .portal_pair_tool
-            .teleport_candidates(self.scene.objects(), bounds, dt, now);
+        let teleports =
+            self.portal_pair_tool
+                .teleport_candidates(self.scene.objects(), bounds, dt, now);
         for teleport in teleports {
-            let _ = self.scene.teleport_object(teleport.id, teleport.position, teleport.velocity);
+            let _ = self
+                .scene
+                .teleport_object(teleport.id, teleport.position, teleport.velocity);
         }
         self.portal_pair_tool
             .rebuild_render_cells(self.cursor_local, bounds, now);
@@ -2311,7 +3780,9 @@ impl NativeApp {
         self.selected_id = None;
         self.slingshot_game = SlingshotGame::new(bounds);
         self.build_slingshot_level(bounds);
-        self.push_status_message("Slingshot game: pull the orb back, release to fire. F3 resets, F10 exits.".to_string());
+        self.push_status_message(
+            "Slingshot game: pull the orb back, release to fire. F3 resets, F10 exits.".to_string(),
+        );
     }
 
     fn build_slingshot_level(&mut self, bounds: RectF) {
@@ -2323,7 +3794,10 @@ impl NativeApp {
             ObjectVisualKind::GamePlank,
         );
         self.spawn_static_game_object(
-            Vector2::new((bounds.width * 0.66).max(anchor.x + 340.0) - 28.0, bounds.bottom() - 34.0),
+            Vector2::new(
+                (bounds.width * 0.66).max(anchor.x + 340.0) - 28.0,
+                bounds.bottom() - 34.0,
+            ),
             Vector2::new(500.0, 34.0),
             AppColor::from_rgb(84, 130, 68),
             ObjectVisualKind::GamePlank,
@@ -2368,7 +3842,12 @@ impl NativeApp {
         );
         self.slingshot_game.projectile_id = Some(projectile);
         self.selected_id = Some(projectile);
-        if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == projectile) {
+        if let Some(object) = self
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == projectile)
+        {
             object.body.is_dragging = true;
             object.is_dragging = true;
             object.body.restitution = 0.42;
@@ -2452,12 +3931,23 @@ impl NativeApp {
         friction: f32,
         restitution: f32,
     ) -> u64 {
-        let id = self.scene.spawn_custom_object(position, size, color, visual_kind, shape);
-        if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == id) {
+        let id = self
+            .scene
+            .spawn_custom_object(position, size, color, visual_kind, shape);
+        if let Some(object) = self
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == id)
+        {
             object.body.friction = friction;
             object.body.restitution = restitution;
             object.body.linear_damping = 0.988;
-            object.body.mass = if shape == CollisionShape::Circle { 1.15 } else { 1.6 };
+            object.body.mass = if shape == CollisionShape::Circle {
+                1.15
+            } else {
+                1.6
+            };
         }
         id
     }
@@ -2469,10 +3959,15 @@ impl NativeApp {
         color: AppColor,
         visual_kind: ObjectVisualKind,
     ) -> u64 {
-        let id = self
+        let id =
+            self.scene
+                .spawn_custom_object(position, size, color, visual_kind, CollisionShape::Box);
+        if let Some(object) = self
             .scene
-            .spawn_custom_object(position, size, color, visual_kind, CollisionShape::Box);
-        if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == id) {
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == id)
+        {
             object.body.is_dragging = true;
             object.is_dragging = true;
             object.body.gravity_scale = 0.0;
@@ -2489,10 +3984,15 @@ impl NativeApp {
         color: AppColor,
         visual_kind: ObjectVisualKind,
     ) -> u64 {
-        let id = self
+        let id =
+            self.scene
+                .spawn_custom_object(position, size, color, visual_kind, CollisionShape::Box);
+        if let Some(object) = self
             .scene
-            .spawn_custom_object(position, size, color, visual_kind, CollisionShape::Box);
-        if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == id) {
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == id)
+        {
             object.body.is_dragging = true;
             object.is_dragging = true;
             object.body.gravity_scale = 0.0;
@@ -2542,10 +4042,16 @@ impl NativeApp {
     fn aim_slingshot_projectile(&mut self, projectile_id: u64) {
         let anchor = self.slingshot_game.anchor;
         let pull = clamp_vector(self.cursor_local - anchor, 142.0);
-        let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == projectile_id) else {
+        let Some(object) = self
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == projectile_id)
+        else {
             return;
         };
-        object.body.position = anchor + pull - Vector2::new(object.body.width * 0.5, object.body.height * 0.5);
+        object.body.position =
+            anchor + pull - Vector2::new(object.body.width * 0.5, object.body.height * 0.5);
         object.body.velocity = Vector2::ZERO;
         object.body.is_dragging = true;
         object.is_dragging = true;
@@ -2559,7 +4065,12 @@ impl NativeApp {
 
     fn fire_slingshot_projectile(&mut self, projectile_id: u64) {
         let pull = self.slingshot_game.pull;
-        let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == projectile_id) else {
+        let Some(object) = self
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == projectile_id)
+        else {
             return;
         };
         object.body.is_dragging = false;
@@ -2591,8 +4102,89 @@ impl NativeApp {
             self.slingshot_game.won = true;
         }
 
-        if !self.slingshot_game.ready && !self.slingshot_game.won && self.projectile_should_reload() {
+        if !self.slingshot_game.ready && !self.slingshot_game.won && self.projectile_should_reload()
+        {
             self.reload_slingshot_projectile();
+        }
+    }
+
+    // ----- case opening -----
+
+    fn update_case_opening(&mut self, dt: f32) {
+        self.case_director.publish_status(&self.case_status, dt);
+        if let Some(result) = self.case_director.update(dt) {
+            let mut line = format!(
+                "{} unboxed {} [{}]",
+                result.viewer, result.reward_name, result.tier_name
+            );
+            if let Some(prize) = &result.wheel_prize {
+                line.push_str(&format!(" -> {prize}"));
+            }
+            self.status_message = Some(line.clone());
+            // stdout is the durable record; the HUD line is transient.
+            println!("case: {line}");
+        }
+    }
+
+    /// Queues an opening for a viewer. `payload` accepts the same fields the
+    /// dashboard overlay's `/api/open` takes, so an existing Streamer.bot
+    /// action can point here with only a URL change.
+    fn open_case_from_payload(&mut self, payload: Option<&serde_json::Value>) {
+        let field = |names: &[&str]| -> Option<String> {
+            let payload = payload?;
+            names.iter().find_map(|name| {
+                payload
+                    .get(name)
+                    .and_then(serde_json::Value::as_str)
+                    .map(|text| text.trim().to_string())
+                    .filter(|text| !text.is_empty())
+            })
+        };
+        let request = CaseRequest {
+            viewer: field(&["user", "userName", "viewer", "displayName"])
+                .unwrap_or_else(|| "VIEWER".to_string()),
+            forced_tier: field(&["rarity", "tier"]),
+            forced_reward: field(&["reward", "prize"]),
+            seed: payload
+                .and_then(|value| value.get("seed"))
+                .and_then(serde_json::Value::as_u64),
+            // Overwritten by the director, which owns streak bookkeeping.
+            streak: 0,
+        };
+        self.queue_case_opening(request);
+    }
+
+    fn queue_case_opening(&mut self, request: CaseRequest) {
+        let viewer = request.viewer.clone();
+        if !self.case_director.request(request) {
+            self.status_message = Some(format!("Case queue is full, skipped {viewer}"));
+        }
+    }
+
+    /// Opens a case for the streamer, for testing without Twitch attached.
+    fn open_test_case(&mut self) {
+        self.queue_case_opening(CaseRequest::for_viewer("STREAMER"));
+    }
+
+    fn load_case_config_from_payload(&mut self, payload: Option<&serde_json::Value>) {
+        let Some(path) = payload
+            .and_then(|value| value.get("path"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        else {
+            self.push_status_message("load_case_config needs a path.".to_string());
+            return;
+        };
+        let profile = payload
+            .and_then(|value| value.get("profile"))
+            .and_then(serde_json::Value::as_str);
+        match self.case_director.load_config(Path::new(path), profile) {
+            Ok(()) => {
+                let message = format!("Loaded case: {}", self.case_director.case_name());
+                self.push_status_message(message);
+            }
+            Err(error) => self.push_status_message(format!("Case config failed: {error}")),
         }
     }
 
@@ -2612,7 +4204,12 @@ impl NativeApp {
         let Some(projectile_id) = self.slingshot_game.projectile_id else {
             return false;
         };
-        let Some(object) = self.scene.objects().iter().find(|object| object.id == projectile_id) else {
+        let Some(object) = self
+            .scene
+            .objects()
+            .iter()
+            .find(|object| object.id == projectile_id)
+        else {
             return false;
         };
         object.body.is_sleeping
@@ -2626,10 +4223,18 @@ impl NativeApp {
             return;
         };
         let anchor = self.slingshot_game.anchor;
-        let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == projectile_id) else {
+        let Some(object) = self
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == projectile_id)
+        else {
             return;
         };
-        object.body.position = Vector2::new(anchor.x - object.body.width * 0.5, anchor.y - object.body.height * 0.5);
+        object.body.position = Vector2::new(
+            anchor.x - object.body.width * 0.5,
+            anchor.y - object.body.height * 0.5,
+        );
         object.body.velocity = Vector2::ZERO;
         object.body.is_dragging = true;
         object.is_dragging = true;
@@ -2642,28 +4247,45 @@ impl NativeApp {
     fn update_slingshot_bands(&mut self) {
         let anchor = self.slingshot_game.anchor;
         let projectile_center = if self.slingshot_game.aiming || self.slingshot_game.ready {
-            self
-            .slingshot_game
-            .projectile_id
-            .and_then(|id| self.scene.objects().iter().find(|object| object.id == id))
-            .map(|object| {
-                Vector2::new(
-                    object.body.position.x + object.body.width * 0.5,
-                    object.body.position.y + object.body.height * 0.5,
-                )
-            })
-            .unwrap_or(anchor)
+            self.slingshot_game
+                .projectile_id
+                .and_then(|id| self.scene.objects().iter().find(|object| object.id == id))
+                .map(|object| {
+                    Vector2::new(
+                        object.body.position.x + object.body.width * 0.5,
+                        object.body.position.y + object.body.height * 0.5,
+                    )
+                })
+                .unwrap_or(anchor)
         } else {
             anchor
         };
-        let forks = [Vector2::new(anchor.x - 31.0, anchor.y + 8.0), Vector2::new(anchor.x + 31.0, anchor.y + 8.0)];
-        for (index, band_id) in self.slingshot_game.band_ids.iter().flatten().copied().enumerate() {
+        let forks = [
+            Vector2::new(anchor.x - 31.0, anchor.y + 8.0),
+            Vector2::new(anchor.x + 31.0, anchor.y + 8.0),
+        ];
+        for (index, band_id) in self
+            .slingshot_game
+            .band_ids
+            .iter()
+            .flatten()
+            .copied()
+            .enumerate()
+        {
             let from = forks[index.min(1)];
             let delta = projectile_center - from;
             let length = delta.length_squared().sqrt().max(8.0);
             let angle = delta.y.atan2(delta.x).to_degrees() as f64;
-            if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == band_id) {
-                object.body.position = Vector2::new(from.x + delta.x * 0.5 - length * 0.5, from.y + delta.y * 0.5 - 3.0);
+            if let Some(object) = self
+                .scene
+                .objects_mut()
+                .iter_mut()
+                .find(|object| object.id == band_id)
+            {
+                object.body.position = Vector2::new(
+                    from.x + delta.x * 0.5 - length * 0.5,
+                    from.y + delta.y * 0.5 - 3.0,
+                );
                 object.body.width = length;
                 object.body.height = 6.0;
                 object.rotation_z = angle;
@@ -2696,7 +4318,8 @@ impl NativeApp {
         self.basketball_game = BasketballGame::new(bounds);
         self.build_basketball_court();
         self.push_status_message(
-            "Basketball: grab the ball and flick it up toward the hoop. F3 resets, F12 exits.".to_string(),
+            "Basketball: grab the ball and flick it up toward the hoop. F3 resets, F12 exits."
+                .to_string(),
         );
     }
 
@@ -2714,14 +4337,19 @@ impl NativeApp {
                 hoop_center.y + geometry.backboard_center_y,
                 -BASKETBALL_HOOP_DEPTH + geometry.backboard_front_z - 8.0,
             ),
-            (geometry.backboard_width * 0.5, geometry.backboard_height * 0.5, 8.0),
+            (
+                geometry.backboard_width * 0.5,
+                geometry.backboard_height * 0.5,
+                8.0,
+            ),
             0.3,
             0.62,
         );
 
         // Rim: a ring of static spheres approximating the torus, open in the middle.
         for index in 0..BASKETBALL_RIM_COLLIDER_COUNT {
-            let angle = std::f32::consts::TAU * (index as f32 / BASKETBALL_RIM_COLLIDER_COUNT as f32);
+            let angle =
+                std::f32::consts::TAU * (index as f32 / BASKETBALL_RIM_COLLIDER_COUNT as f32);
             self.scene.add_static_sphere_collider(
                 (
                     hoop_center.x + geometry.rim_radius * angle.cos(),
@@ -2737,7 +4365,11 @@ impl NativeApp {
         // Invisible walls keeping rebounds inside the play space: one deep
         // behind the hoop, one just in front of the screen plane.
         self.scene.add_static_box_collider(
-            (bounds.width * 0.5, bounds.height * 0.5, -BASKETBALL_HOOP_DEPTH - 360.0),
+            (
+                bounds.width * 0.5,
+                bounds.height * 0.5,
+                -BASKETBALL_HOOP_DEPTH - 360.0,
+            ),
             (bounds.width, bounds.height, 24.0),
             0.4,
             0.5,
@@ -2763,7 +4395,12 @@ impl NativeApp {
             ObjectVisualKind::BasketballHoop,
             CollisionShape::Box,
         );
-        if let Some(hoop) = self.scene.objects_mut().iter_mut().find(|object| object.id == hoop_id) {
+        if let Some(hoop) = self
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == hoop_id)
+        {
             hoop.body.is_dragging = true;
             hoop.is_dragging = true;
             hoop.body.gravity_scale = 0.0;
@@ -2781,7 +4418,12 @@ impl NativeApp {
             ObjectVisualKind::Basketball,
             CollisionShape::Circle,
         );
-        if let Some(ball) = self.scene.objects_mut().iter_mut().find(|object| object.id == ball_id) {
+        if let Some(ball) = self
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == ball_id)
+        {
             ball.body.is_dragging = true;
             ball.is_dragging = true;
             ball.body.restitution = 0.7;
@@ -2799,7 +4441,11 @@ impl NativeApp {
             return;
         };
 
-        if is_left_down && !self.was_left_down && self.basketball_game.ready && self.cursor_is_over_basketball(ball_id) {
+        if is_left_down
+            && !self.was_left_down
+            && self.basketball_game.ready
+            && self.cursor_is_over_basketball(ball_id)
+        {
             self.basketball_game.aiming = true;
             self.basketball_game.grab_offset = self
                 .scene
@@ -2847,10 +4493,16 @@ impl NativeApp {
         let target_center = self.cursor_local - self.basketball_game.grab_offset;
         self.basketball_tracker
             .add_sample(self.cursor_local, self.frame_clock.elapsed_seconds);
-        let Some(ball) = self.scene.objects_mut().iter_mut().find(|object| object.id == ball_id) else {
+        let Some(ball) = self
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == ball_id)
+        else {
             return;
         };
-        ball.body.position = target_center - Vector2::new(ball.body.width * 0.5, ball.body.height * 0.5);
+        ball.body.position =
+            target_center - Vector2::new(ball.body.width * 0.5, ball.body.height * 0.5);
         ball.body.velocity = Vector2::ZERO;
         ball.body.is_dragging = true;
         ball.is_dragging = true;
@@ -2865,14 +4517,21 @@ impl NativeApp {
     fn launch_basketball(&mut self, ball_id: u64) {
         self.basketball_tracker
             .add_sample(self.cursor_local, self.frame_clock.elapsed_seconds);
-        let flick = self.basketball_tracker.estimate_velocity(0.085, 1.0, 3200.0);
+        let flick = self
+            .basketball_tracker
+            .estimate_velocity(0.085, 1.0, 3200.0);
         self.basketball_tracker.clear();
         self.basketball_game.aiming = false;
 
         let up_speed = (-flick.y).clamp(0.0, BASKETBALL_MAX_UP_SPEED);
         let is_shot = up_speed >= BASKETBALL_MIN_SHOT_UP_SPEED;
 
-        let Some(ball) = self.scene.objects_mut().iter_mut().find(|object| object.id == ball_id) else {
+        let Some(ball) = self
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == ball_id)
+        else {
             return;
         };
         ball.body.is_dragging = false;
@@ -2883,10 +4542,13 @@ impl NativeApp {
             // Throw: the flick's upward speed sets the arc, and also drives the
             // ball backwards into the scene toward the hoop.
             ball.body.velocity = Vector2::new(
-                flick.x.clamp(-BASKETBALL_MAX_SIDE_SPEED, BASKETBALL_MAX_SIDE_SPEED),
+                flick
+                    .x
+                    .clamp(-BASKETBALL_MAX_SIDE_SPEED, BASKETBALL_MAX_SIDE_SPEED),
                 -up_speed,
             );
-            ball.depth_velocity = -(BASKETBALL_DEPTH_BASE_SPEED + up_speed * BASKETBALL_DEPTH_UP_FACTOR);
+            ball.depth_velocity =
+                -(BASKETBALL_DEPTH_BASE_SPEED + up_speed * BASKETBALL_DEPTH_UP_FACTOR);
             self.basketball_game.shots += 1;
         } else {
             // Too gentle to count as a shot: just let the ball drop at the front.
@@ -2921,7 +4583,12 @@ impl NativeApp {
         let rim_center_y = hoop_center.y + geometry.rim_center_y;
         let rim_z = -BASKETBALL_HOOP_DEPTH + geometry.rim_center_z;
 
-        let Some(ball) = self.scene.objects().iter().find(|object| object.id == ball_id) else {
+        let Some(ball) = self
+            .scene
+            .objects()
+            .iter()
+            .find(|object| object.id == ball_id)
+        else {
             return;
         };
         let ball_center = Vector2::new(
@@ -2933,7 +4600,8 @@ impl NativeApp {
         let falling = ball.body.velocity.y > 0.0;
         let previous_y = self.basketball_game.last_ball_y;
         self.basketball_game.last_ball_y = ball_center.y;
-        self.basketball_game.min_depth_this_shot = self.basketball_game.min_depth_this_shot.min(ball_depth);
+        self.basketball_game.min_depth_this_shot =
+            self.basketball_game.min_depth_this_shot.min(ball_depth);
 
         let crossed_rim_height = previous_y <= rim_center_y && ball_center.y > rim_center_y;
         if crossed_rim_height && falling && !self.basketball_game.scored_this_shot {
@@ -2941,7 +4609,11 @@ impl NativeApp {
             let delta_z = ball_depth - rim_z;
             let planar_distance = ((delta_x * delta_x) + (delta_z * delta_z)).sqrt();
             if planar_distance <= (geometry.rim_radius - ball_radius).max(8.0) + 12.0 {
-                self.score_basketball(Vector2::new(hoop_center.x, rim_center_y), rim_z, geometry.backboard_front_z);
+                self.score_basketball(
+                    Vector2::new(hoop_center.x, rim_center_y),
+                    rim_z,
+                    geometry.backboard_front_z,
+                );
             }
         }
 
@@ -2989,11 +4661,17 @@ impl NativeApp {
                 ObjectVisualKind::Cube,
                 CollisionShape::Box,
             );
-            if let Some(piece) = self.scene.objects_mut().iter_mut().find(|object| object.id == id) {
+            if let Some(piece) = self
+                .scene
+                .objects_mut()
+                .iter_mut()
+                .find(|object| object.id == id)
+            {
                 piece.depth_unlocked = true;
                 piece.depth_z = depth;
                 piece.depth_velocity = angle.sin() * 190.0;
-                piece.body.velocity = Vector2::new(angle.cos() * 300.0, -260.0 - ((index % 4) as f32 * 110.0));
+                piece.body.velocity =
+                    Vector2::new(angle.cos() * 300.0, -260.0 - ((index % 4) as f32 * 110.0));
                 piece.body.restitution = 0.55;
                 piece.body.friction = 0.5;
                 piece.body.mass = 0.25;
@@ -3021,7 +4699,12 @@ impl NativeApp {
     }
 
     fn basketball_shot_is_over(&self, ball_id: u64) -> bool {
-        let Some(ball) = self.scene.objects().iter().find(|object| object.id == ball_id) else {
+        let Some(ball) = self
+            .scene
+            .objects()
+            .iter()
+            .find(|object| object.id == ball_id)
+        else {
             return false;
         };
         let bounds = self.scene_bounds();
@@ -3034,10 +4717,18 @@ impl NativeApp {
 
     fn reload_basketball(&mut self, ball_id: u64) {
         let tee = self.basketball_game.tee;
-        let Some(ball) = self.scene.objects_mut().iter_mut().find(|object| object.id == ball_id) else {
+        let Some(ball) = self
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == ball_id)
+        else {
             return;
         };
-        ball.body.position = Vector2::new(tee.x - ball.body.width * 0.5, tee.y - ball.body.height * 0.5);
+        ball.body.position = Vector2::new(
+            tee.x - ball.body.width * 0.5,
+            tee.y - ball.body.height * 0.5,
+        );
         ball.body.velocity = Vector2::ZERO;
         ball.body.is_dragging = true;
         ball.is_dragging = true;
@@ -3056,10 +4747,9 @@ impl NativeApp {
     fn end_drag_and_apply_spin(&mut self, now_seconds: f64) {
         let rotated_while_held = self.is_rotation_dragging;
         let selected_id = self.selected_id;
-        let quick_bit_click = self
-            .bit_pointer_press
-            .take()
-            .is_some_and(|press| is_quick_bit_click(press, selected_id, self.cursor_local, now_seconds));
+        let quick_bit_click = self.bit_pointer_press.take().is_some_and(|press| {
+            is_quick_bit_click(press, selected_id, self.cursor_local, now_seconds)
+        });
         let throw_sensitivity = self.scene.config().throw_sensitivity;
         let max_throw_speed = self.scene.config().max_throw_speed;
         let throw_velocity = self.drag_controller.end_drag(
@@ -3110,7 +4800,7 @@ impl NativeApp {
         self.finish_window_capture(selected_id);
     }
 
-    fn simulate_twitch_cheer(&mut self, payload: Option<&serde_json::Value>) {
+    fn simulate_twitch_cheer(&mut self, payload: Option<&serde_json::Value>, simulated: bool) {
         if payload.and_then(|value| value.get("width")).is_some() {
             self.set_spawn_monitor(payload);
         }
@@ -3139,21 +4829,368 @@ impl NativeApp {
             .and_then(|value| value.get("message"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or("!!!");
-        self.spawn_cheer_drop(bits, donor, message, anonymous);
+        self.spawn_cheer_drop(bits, donor, message, anonymous, simulated);
     }
 
-    fn spawn_cheer_drop(&mut self, bits: u32, donor: String, message: &str, anonymous: bool) {
-        let bounds = self.spawn_bounds();
-        let center = Vector2::new(
-            bounds.x + bounds.width * 0.5,
-            bounds.y + 82.0,
+    fn simulate_twitch_chat(&mut self, payload: Option<&serde_json::Value>) {
+        if payload.and_then(|value| value.get("width")).is_some() {
+            self.set_spawn_monitor(payload);
+        }
+        let username = sanitized_chat_text(
+            payload
+                .and_then(|value| value.get("userName").or_else(|| value.get("donor")))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("GoblinFan42"),
+            18,
         );
+        let raw_message = sanitized_chat_text(
+            payload
+                .and_then(|value| value.get("text").or_else(|| value.get("message")))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("hello!"),
+            usize::MAX,
+        );
+        let (message, image_urls) = inline_chat_message(payload, &raw_message);
+        let inline_image_slots = image_urls
+            .iter()
+            .map(|(key, url, animated)| {
+                #[cfg(target_os = "windows")]
+                {
+                    self.d3d_renderer
+                        .as_mut()
+                        .and_then(|renderer| renderer.ensure_chat_image(key, url, *animated).ok())
+                        .unwrap_or(0)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = (key, url, animated);
+                    0
+                }
+            })
+            .collect();
+        let username = if username.trim().is_empty() {
+            "GoblinFan42".to_string()
+        } else {
+            username
+        };
+        let message = if message.trim().is_empty() {
+            "hello!".to_string()
+        } else {
+            message
+        };
+        // The chat command opens a case directly, so the overlay works without
+        // Streamer.bot in the loop. The message still flies onto the desktop.
+        if case_mode::chat_message_opens_a_case(&raw_message, self.case_director.chat_command()) {
+            self.queue_case_opening(CaseRequest::for_viewer(&username));
+        }
+        self.spawn_chat_message_with_images(username, message, inline_image_slots);
+    }
+
+    fn set_twitch_chat_stream(&mut self, payload: Option<&serde_json::Value>) {
+        if payload.and_then(|value| value.get("width")).is_some() {
+            self.set_spawn_monitor(payload);
+        }
+        self.chat_stream_active = payload
+            .and_then(|value| value.get("enabled"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(!self.chat_stream_active);
+        self.next_chat_stream_at = self.frame_clock.elapsed_seconds;
+        let state = if self.chat_stream_active {
+            "started"
+        } else {
+            "stopped"
+        };
+        self.push_status_message(format!("Continuous simulated Twitch chat {state}."));
+    }
+
+    fn spawn_continuous_chat_message(&mut self) {
+        const CHATTERS: [&str; 12] = [
+            "PixelGoblin",
+            "NeonMoth",
+            "ChairWizard",
+            "SoupDragon",
+            "LurkingLynx",
+            "CrystalWhale",
+            "TinyMeteor",
+            "MoonBunny",
+            "VHS_Pirate",
+            "CozyCryptid",
+            "TurboPigeon",
+            "CaffeinatedFox",
+        ];
+        const MESSAGES: [&str; 14] = [
+            "hello chat!",
+            "that bounce was perfect",
+            "drop another one",
+            "physics moment",
+            "WAIT WHAT",
+            "this is so cool",
+            "bonk",
+            "incoming!",
+            "the pile grows",
+            "I was here",
+            "gravity wins again",
+            "can it shatter?",
+            "absolute chaos",
+            "let's goooo!",
+        ];
+
+        self.chat_stream_sequence = self.chat_stream_sequence.wrapping_add(1);
+        let seed = mixed_chat_seed(self.chat_stream_sequence);
+        let username = CHATTERS[(seed as usize) % CHATTERS.len()].to_string();
+        let message = MESSAGES[((seed >> 16) as usize) % MESSAGES.len()].to_string();
+        self.spawn_chat_message(username, message);
+        let interval_seed = ((seed >> 40) & 0xff) as f64 / u8::MAX as f64;
+        self.next_chat_stream_at = self.frame_clock.elapsed_seconds
+            + CHAT_STREAM_MIN_INTERVAL_SECONDS
+            + interval_seed * CHAT_STREAM_INTERVAL_VARIANCE_SECONDS;
+    }
+
+    fn spawn_chat_message(&mut self, username: String, message: String) {
+        self.spawn_chat_message_with_images(username, message, Vec::new());
+    }
+
+    fn spawn_chat_message_with_images(
+        &mut self,
+        username: String,
+        message: String,
+        inline_image_slots: Vec<u16>,
+    ) {
+        let now = self.frame_clock.elapsed_seconds;
+        let bounds = self.spawn_bounds();
+        let message = wrap_chat_text(&message, CHAT_MESSAGE_LINE_CHARACTERS);
+        let message_line_count = message.lines().count().max(1);
+        let character_count = username
+            .chars()
+            .count()
+            .max(
+                message
+                    .lines()
+                    .map(|line| line.chars().count())
+                    .max()
+                    .unwrap_or(0),
+            )
+            .max(1) as f32;
+        let pixel_size = (bounds.width / (character_count * 8.0 + 32.0)).clamp(1.45, 3.4);
+        let half_width = character_count * 8.0 * pixel_size * 0.5;
+        let image_overhang = if inline_image_slots.is_empty() {
+            0.0
+        } else {
+            2.0 * pixel_size
+        };
+        let half_height = (message_line_count + 1) as f32 * 9.0 * pixel_size * 0.5 + image_overhang;
+        let username_hash = chat_text_hash(&username);
+        self.chat_spawn_sequence = self.chat_spawn_sequence.wrapping_add(1);
+        let spawn_seed = mixed_chat_seed(
+            username_hash
+                ^ self.chat_spawn_sequence.wrapping_mul(0x9e3779b97f4a7c15)
+                ^ now.to_bits(),
+        );
+        let available_left = bounds.x + half_width + 14.0;
+        let available_right = bounds.right() - half_width - 14.0;
+        let horizontal_range = (available_right - available_left).max(0.0);
+        let horizontal_seed = (spawn_seed & 0xffff) as f32 / u16::MAX as f32;
+        let center_x = if horizontal_range > 0.0 {
+            available_left + horizontal_range * horizontal_seed
+        } else {
+            bounds.x + bounds.width * 0.5
+        };
+        let speed_seed = ((spawn_seed >> 16) & 0xff) as f32 / u8::MAX as f32;
+        let spin_seed = ((spawn_seed >> 24) & 0xff) as f64 / u8::MAX as f64;
+        let tilt_seed = ((spawn_seed >> 32) & 0xff) as f64 / u8::MAX as f64;
+        let username_color = chat_message_color(username_hash);
+        let chat_message_id = self.next_chat_message_id;
+        self.next_chat_message_id = self.next_chat_message_id.wrapping_add(1).max(1);
+
+        self.chat_message_visuals.push(ChatMessageVisual {
+            id: chat_message_id,
+            center: Vector2::new(center_x, bounds.y - pixel_size * 20.0),
+            username,
+            message,
+            inline_image_slots,
+            username_color,
+            pixel_size,
+            opacity: 1.0,
+            scale: 1.0,
+            rotation_x: -16.0 + spin_seed * 32.0,
+            rotation_y: -24.0 + tilt_seed * 48.0,
+            rotation_z: -8.0 + spin_seed * 16.0,
+        });
+        self.falling_chat_messages.push(FallingChatMessage {
+            id: chat_message_id,
+            velocity: Vector2::new(-85.0 + speed_seed * 170.0, 85.0 + speed_seed * 75.0),
+            angular_velocity_x: 24.0 - spin_seed * 48.0,
+            angular_velocity_y: -30.0 + spin_seed * 60.0,
+            angular_velocity_z: -18.0 + spin_seed * 36.0,
+            floor_y: bounds.bottom() - half_height,
+            left: bounds.x + half_width,
+            right: bounds.right() - half_width,
+            half_width,
+            half_height,
+            fade_at: now + CHAT_MESSAGE_LIFETIME_SECONDS - CHAT_MESSAGE_FADE_SECONDS,
+            ends_at: now + CHAT_MESSAGE_LIFETIME_SECONDS,
+            bounces: 0,
+        });
+        while self.falling_chat_messages.len() > CHAT_MESSAGE_LIMIT {
+            let remove_index = self
+                .falling_chat_messages
+                .iter()
+                .position(|chat| Some(chat.id) != self.held_chat_message_id)
+                .unwrap_or(0);
+            self.falling_chat_messages.remove(remove_index);
+            self.chat_message_visuals.remove(remove_index);
+        }
+    }
+
+    fn update_chat_messages(&mut self, dt: f32, now: f64) {
+        if self.chat_stream_active && now >= self.next_chat_stream_at {
+            self.spawn_continuous_chat_message();
+        }
+        if self.falling_chat_messages.is_empty() {
+            return;
+        }
+
+        let dt_f64 = dt as f64;
+        let frame_scale_f32 = dt * 60.0;
+        let frame_scale_f64 = dt_f64 * 60.0;
+        let fade_scale_blend = 1.0 - (-8.0 * dt).exp();
+        let mut held_damping = None;
+        let mut floor_damping = None;
+        let drag_cursor = self.cursor_local;
+        let drag_offset = self.held_chat_grab_offset;
+        let mut index = 0usize;
+        while index < self.falling_chat_messages.len() {
+            let is_held = Some(self.falling_chat_messages[index].id) == self.held_chat_message_id;
+            if !is_held && now >= self.falling_chat_messages[index].ends_at {
+                self.falling_chat_messages.remove(index);
+                self.chat_message_visuals.remove(index);
+                continue;
+            }
+            let message = &mut self.falling_chat_messages[index];
+            let visual = &mut self.chat_message_visuals[index];
+            if is_held {
+                let (held_angular_damping, held_facing_blend, held_scale_blend) = *held_damping
+                    .get_or_insert_with(|| {
+                        (
+                            0.62_f64.powf(frame_scale_f64),
+                            1.0 - (-12.0 * dt_f64).exp(),
+                            1.0 - (-10.0 * dt).exp(),
+                        )
+                    });
+                message.fade_at += dt_f64;
+                message.ends_at += dt_f64;
+                let mut target = drag_cursor + drag_offset;
+                if message.left <= message.right {
+                    target.x = target.x.clamp(message.left, message.right);
+                }
+                target.y = target.y.clamp(0.0, message.floor_y.max(0.0));
+                let drag_delta = target - visual.center;
+                message.velocity = if dt > f32::EPSILON {
+                    clamp_vector(drag_delta / dt, 1_450.0)
+                } else {
+                    Vector2::ZERO
+                };
+                visual.center = target;
+                message.angular_velocity_x *= held_angular_damping;
+                message.angular_velocity_y *= held_angular_damping;
+                message.angular_velocity_z *= held_angular_damping;
+                visual.rotation_x += (0.0 - visual.rotation_x) * held_facing_blend;
+                visual.rotation_y += (0.0 - visual.rotation_y) * held_facing_blend;
+                visual.rotation_z += (0.0 - visual.rotation_z) * held_facing_blend;
+                visual.scale += (CHAT_HELD_SCALE - visual.scale) * held_scale_blend;
+                visual.opacity = 1.0;
+                index += 1;
+                continue;
+            }
+            message.velocity.y += CHAT_MESSAGE_GRAVITY * dt;
+            visual.center += message.velocity * dt;
+            visual.rotation_x += message.angular_velocity_x * dt as f64;
+            visual.rotation_y += message.angular_velocity_y * dt as f64;
+            visual.rotation_z += message.angular_velocity_z * dt as f64;
+            constrain_chat_rotation(
+                &mut visual.rotation_x,
+                &mut message.angular_velocity_x,
+                CHAT_MAX_PITCH_DEGREES,
+            );
+            constrain_chat_rotation(
+                &mut visual.rotation_y,
+                &mut message.angular_velocity_y,
+                CHAT_MAX_YAW_DEGREES,
+            );
+            constrain_chat_rotation(
+                &mut visual.rotation_z,
+                &mut message.angular_velocity_z,
+                CHAT_MAX_ROLL_DEGREES,
+            );
+
+            if message.left <= message.right {
+                if visual.center.x < message.left {
+                    visual.center.x = message.left;
+                    message.velocity.x = message.velocity.x.abs() * 0.58;
+                    message.angular_velocity_y *= -0.72;
+                } else if visual.center.x > message.right {
+                    visual.center.x = message.right;
+                    message.velocity.x = -message.velocity.x.abs() * 0.58;
+                    message.angular_velocity_y *= -0.72;
+                }
+            }
+
+            if visual.center.y >= message.floor_y {
+                visual.center.y = message.floor_y;
+                if message.bounces < 2 && message.velocity.y > 100.0 {
+                    message.velocity.y *= -0.34;
+                    message.velocity.x *= 0.72;
+                    message.angular_velocity_x *= -0.58;
+                    message.angular_velocity_z *= 0.62;
+                    message.bounces += 1;
+                } else {
+                    let (floor_linear_damping, floor_angular_damping) = *floor_damping
+                        .get_or_insert_with(|| {
+                            (
+                                0.90_f32.powf(frame_scale_f32),
+                                0.88_f64.powf(frame_scale_f64),
+                            )
+                        });
+                    message.velocity.y = 0.0;
+                    message.velocity.x *= floor_linear_damping;
+                    message.angular_velocity_x *= floor_angular_damping;
+                    message.angular_velocity_y *= floor_angular_damping;
+                    message.angular_velocity_z *= floor_angular_damping;
+                }
+            }
+
+            let remaining = (message.ends_at - now).max(0.0);
+            visual.opacity = if now < message.fade_at {
+                1.0
+            } else {
+                (remaining / CHAT_MESSAGE_FADE_SECONDS).clamp(0.0, 1.0) as f32
+            };
+            let target_scale = 0.72 + visual.opacity * 0.28;
+            visual.scale += (target_scale - visual.scale) * fade_scale_blend;
+            index += 1;
+        }
+    }
+
+    fn spawn_cheer_drop(
+        &mut self,
+        bits: u32,
+        donor: String,
+        message: &str,
+        anonymous: bool,
+        simulated: bool,
+    ) {
+        let bounds = self.spawn_bounds();
+        let center = Vector2::new(bounds.x + bounds.width * 0.5, bounds.y + 82.0);
         let count = bits.min(300) as usize;
         let crystal_value = bits.div_ceil(count as u32);
         let tier = crystal_value.ilog10().min(4);
         let color = cheer_tier_color(tier, anonymous);
         let size = (68.0 + tier as f32 * 8.0).clamp(68.0, 100.0);
-        let excitement = message.chars().filter(|character| matches!(character, '!' | '?')).count().min(8) as f32;
+        let excitement = message
+            .chars()
+            .filter(|character| matches!(character, '!' | '?'))
+            .count()
+            .min(8) as f32;
         let mass_per_crystal = ((bits as f32 / 100.0) / count as f32).clamp(0.35, 10.0);
         let base_value = bits / count as u32;
         let remainder = bits % count as u32;
@@ -3184,26 +5221,29 @@ impl NativeApp {
             ends_at: now + 4.8,
             anonymous,
         });
-        self.push_status_message(format!("{donor} cheered {bits} simulated Bits."));
+        let source = if simulated { "simulated Bits" } else { "Bits" };
+        self.push_status_message(format!("{donor} cheered {bits} {source}."));
     }
 
     fn update_cheer_drop_effects(&mut self, now: f64) {
         let mut emissions = Vec::new();
         for drop in &mut self.pending_cheer_drops {
             let progress = ((now - drop.started_at) / drop.emission_seconds).clamp(0.0, 1.0);
-            let target = ((drop.count as f64 * progress).floor() as usize).max(usize::from(drop.emitted == 0));
+            let target = ((drop.count as f64 * progress).floor() as usize)
+                .max(usize::from(drop.emitted == 0));
             while drop.emitted < target.min(drop.count) {
                 emissions.push((drop.clone(), drop.emitted));
                 drop.emitted += 1;
             }
         }
-        self.pending_cheer_drops.retain(|drop| drop.emitted < drop.count);
+        self.pending_cheer_drops
+            .retain(|drop| drop.emitted < drop.count);
         for (drop, index) in emissions {
             self.emit_cheer_crystal(&drop, index);
         }
 
-        self.cheer_drop_effects.retain(|effect| now < effect.ends_at);
-        self.bit_bursts.retain(|effect| now < effect.ends_at);
+        self.cheer_drop_effects
+            .retain(|effect| now < effect.ends_at);
         self.cheer_portals.clear();
         self.cheer_labels.clear();
         for effect in &self.cheer_drop_effects {
@@ -3227,22 +5267,15 @@ impl NativeApp {
                 let prefix = if effect.anonymous { "?" } else { "+" };
                 self.cheer_labels.push(ScreenLabel {
                     position: Vector2::new(effect.center.x, effect.center.y + 34.0),
-                    text: format!("{prefix} {}  {} BITS", effect.donor.to_uppercase(), effect.bits),
+                    text: format!(
+                        "{prefix} {}  {} BITS",
+                        effect.donor.to_uppercase(),
+                        effect.bits
+                    ),
                     color: AppColor::from_argb(alpha, 248, 244, 255),
                     scale: 2,
                 });
             }
-        }
-        for burst in &self.bit_bursts {
-            let duration = (burst.ends_at - burst.started_at).max(0.001);
-            let progress = ((now - burst.started_at) / duration).clamp(0.0, 1.0) as f32;
-            let intensity = (1.0 - progress).powf(0.65);
-            self.cheer_portals.push(CheerPortalVisual {
-                center: burst.center,
-                radius: 10.0 + progress * 44.0,
-                color: burst.color,
-                intensity,
-            });
         }
     }
 
@@ -3265,7 +5298,12 @@ impl NativeApp {
             CollisionShape::Diamond,
         );
         let source_value = drop.base_value + u32::from((index as u32) < drop.remainder);
-        if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == id) {
+        if let Some(object) = self
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == id)
+        {
             object.body.mass = drop.mass_per_crystal;
             object.body.restitution = (0.48 + drop.tier as f32 * 0.055).clamp(0.48, 0.82);
             object.body.friction = 0.58;
@@ -3288,13 +5326,26 @@ impl NativeApp {
                 expires_at: bit_crystal_expiry(spawned_at, source_value, id),
                 cracked: false,
                 shatter_at: None,
+                impact_armed: false,
+                last_velocity: self
+                    .scene
+                    .objects()
+                    .iter()
+                    .find(|object| object.id == id)
+                    .map(|object| object.body.velocity)
+                    .unwrap_or(Vector2::ZERO),
             },
         );
         self.selected_id = Some(id);
     }
 
     fn update_bit_crystal_lifecycle(&mut self, now: f64) {
-        let existing_ids: Vec<u64> = self.scene.objects().iter().map(|object| object.id).collect();
+        let existing_ids: Vec<u64> = self
+            .scene
+            .objects()
+            .iter()
+            .map(|object| object.id)
+            .collect();
         self.bit_crystals.retain(|id, _| existing_ids.contains(id));
 
         let thrown_shatters: Vec<u64> = self
@@ -3318,6 +5369,35 @@ impl NativeApp {
             self.remove_bit_crystal(id, now, true);
         }
 
+        let mut impact_shatters = Vec::new();
+        for (&id, lifecycle) in &mut self.bit_crystals {
+            if lifecycle.shatter_at.is_some() {
+                continue;
+            }
+            let Some(object) = self.scene.objects().iter().find(|object| object.id == id) else {
+                continue;
+            };
+            let velocity = object.body.velocity;
+            let dragging = object.is_dragging || object.body.is_dragging;
+            if dragging {
+                lifecycle.last_velocity = velocity;
+                continue;
+            }
+            if object.body.is_sleeping {
+                lifecycle.impact_armed = true;
+                lifecycle.last_velocity = velocity;
+                continue;
+            }
+            if is_significant_bit_impact(lifecycle.impact_armed, lifecycle.last_velocity, velocity)
+            {
+                impact_shatters.push(id);
+            }
+            lifecycle.last_velocity = velocity;
+        }
+        for id in impact_shatters {
+            self.remove_bit_crystal(id, now, true);
+        }
+
         let over_limit = self.bit_crystals.len() > BIT_GLOBAL_LIMIT;
         let interval = if over_limit {
             BIT_OVER_LIMIT_CLEANUP_INTERVAL_SECONDS
@@ -3338,7 +5418,7 @@ impl NativeApp {
                 }
             });
         if let Some(id) = candidate {
-            self.remove_bit_crystal(id, now, true);
+            self.remove_bit_crystal(id, now, false);
             self.last_bit_cleanup_at = now;
         }
     }
@@ -3362,7 +5442,11 @@ impl NativeApp {
                 }
                 Some((id, lifecycle.spawned_at))
             })
-            .min_by(|left, right| left.1.partial_cmp(&right.1).unwrap_or(std::cmp::Ordering::Equal))
+            .min_by(|left, right| {
+                left.1
+                    .partial_cmp(&right.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
             .map(|(id, _)| id)
     }
 
@@ -3375,8 +5459,6 @@ impl NativeApp {
             .source_owner
             .clone()
             .unwrap_or_else(|| "viewer".to_string());
-        let center = object_center(object);
-        let color = object.base_color;
         let should_crack = value >= BIT_TOUGH_VALUE
             && self
                 .bit_crystals
@@ -3398,12 +5480,6 @@ impl NativeApp {
                 object.angular_velocity_z += 220.0;
                 object.body.velocity.y -= 120.0;
             }
-            self.bit_bursts.push(BitBurstEffect {
-                center,
-                color,
-                started_at: now,
-                ends_at: now + 0.24,
-            });
             self.push_status_message(format!(
                 "Cracked {owner}'s {value}-Bit crystal. Click it once more to pop it."
             ));
@@ -3424,6 +5500,9 @@ impl NativeApp {
         }
         let center = object_center(object);
         let color = object.base_color;
+        let size = Vector2::new(object.body.width, object.body.height);
+        let velocity = object.body.velocity;
+        let z_index = object.z_index;
 
         let _ = self.scene.remove_object(id);
         self.bit_crystals.remove(&id);
@@ -3434,17 +5513,112 @@ impl NativeApp {
         self.drone_carries.retain(|_, carry| carry.object_id != id);
         self.drone_drop_cooldowns
             .retain(|_, cooldown| cooldown.object_id != id);
+        self.helper_targets
+            .retain(|helper_id, object_id| *helper_id != id && *object_id != id);
         if self.selected_id == Some(id) {
             self.selected_id = None;
         }
         if burst {
-            self.bit_bursts.push(BitBurstEffect {
-                center,
+            self.spawn_bit_crystal_shards(id, center, size, velocity, color, z_index, now);
+        }
+    }
+
+    fn spawn_bit_crystal_shards(
+        &mut self,
+        source_id: u64,
+        center: Vector2,
+        source_size: Vector2,
+        source_velocity: Vector2,
+        color: AppColor,
+        z_index: i32,
+        now: f64,
+    ) {
+        let seed_phase = source_id as f32 * 0.173;
+        for index in 0..BIT_SHARD_COUNT {
+            let phase = seed_phase + index as f32 / BIT_SHARD_COUNT as f32 * std::f32::consts::TAU;
+            let direction = Vector2::new(phase.cos(), phase.sin());
+            let scale = 0.28 + (index % 3) as f32 * 0.055;
+            let shard_size = Vector2::new(
+                (source_size.x * scale).max(7.0),
+                (source_size.y * (scale + 0.035)).max(10.0),
+            );
+            let position = center - shard_size * 0.5;
+            let shard_id = self.scene.spawn_custom_object(
+                position,
+                shard_size,
                 color,
+                ObjectVisualKind::BitCrystal,
+                CollisionShape::Diamond,
+            );
+            if let Some(shard) = self
+                .scene
+                .objects_mut()
+                .iter_mut()
+                .find(|object| object.id == shard_id)
+            {
+                let speed = 250.0 + (index % 4) as f32 * 42.0;
+                shard.body.velocity =
+                    source_velocity * 0.28 + direction * speed + Vector2::new(0.0, -175.0);
+                shard.body.mass = 0.08;
+                shard.body.gravity_scale = 0.82;
+                shard.body.linear_damping = 0.985;
+                shard.body.collidable = false;
+                shard.depth_z = -1.01;
+                shard.z_index = z_index + 1;
+                shard.rotation_x = phase as f64 * 48.0;
+                shard.rotation_y = phase as f64 * 71.0;
+                shard.angular_velocity_x = direction.y as f64 * 520.0;
+                shard.angular_velocity_y = direction.x as f64 * 610.0;
+                shard.angular_velocity_z = (index as f64 - BIT_SHARD_COUNT as f64 * 0.5) * 95.0;
+            }
+            self.bit_shards.push(BitShardEffect {
+                object_id: shard_id,
                 started_at: now,
-                ends_at: now + 0.42,
+                ends_at: now + BIT_SHARD_LIFETIME_SECONDS,
+                last_updated_at: now,
             });
         }
+    }
+
+    fn update_bit_shard_effects(&mut self, now: f64) {
+        let mut expired = Vec::new();
+        for effect in &mut self.bit_shards {
+            let duration = (effect.ends_at - effect.started_at).max(0.001);
+            let progress = ((now - effect.started_at) / duration).clamp(0.0, 1.0) as f32;
+            if progress >= 1.0 {
+                expired.push(effect.object_id);
+                continue;
+            }
+
+            let scale = (1.0 - progress).powf(0.72).max(0.025);
+            if let Some(shard) = self
+                .scene
+                .objects_mut()
+                .iter_mut()
+                .find(|object| object.id == effect.object_id)
+            {
+                let dt = (now - effect.last_updated_at).clamp(0.0, 0.05) as f32;
+                effect.last_updated_at = now;
+                shard.body.velocity.y += 1_450.0 * dt;
+                shard.body.position += shard.body.velocity * dt;
+                shard.rotation_x += shard.angular_velocity_x * dt as f64;
+                shard.rotation_y += shard.angular_velocity_y * dt as f64;
+                shard.rotation_z += shard.angular_velocity_z * dt as f64;
+                let angular_damping = 0.985f64.powf(dt as f64 * 60.0);
+                shard.angular_velocity_x *= angular_damping;
+                shard.angular_velocity_y *= angular_damping;
+                shard.angular_velocity_z *= angular_damping;
+                shard.visual_scale = scale;
+                shard.visual_opacity = (1.0 - progress).powf(1.35);
+            } else {
+                expired.push(effect.object_id);
+            }
+        }
+        for id in &expired {
+            let _ = self.scene.remove_object(*id);
+        }
+        self.bit_shards
+            .retain(|effect| !expired.contains(&effect.object_id));
     }
 
     fn finish_window_capture(&mut self, object_id: u64) {
@@ -3460,7 +5634,9 @@ impl NativeApp {
                     self.window_captures.insert(object_id, previous);
                     self.constrain_object_to_window(object_id, client_rect, Vector2::ZERO);
                 } else {
-                    self.push_status_message("Released object from its window terrarium.".to_string());
+                    self.push_status_message(
+                        "Released object from its window terrarium.".to_string(),
+                    );
                 }
             }
             return;
@@ -3484,7 +5660,9 @@ impl NativeApp {
             },
         );
         self.constrain_object_to_window(object_id, target.client_rect, Vector2::ZERO);
-        self.push_status_message(format!("Captured object in {title}. Drag it outside a window to release."));
+        self.push_status_message(format!(
+            "Captured object in {title}. Drag it outside a window to release."
+        ));
     }
 
     fn enforce_window_captures(&mut self) {
@@ -3505,14 +5683,24 @@ impl NativeApp {
                 continue;
             };
             if !target.is_visible {
-                if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == object_id) {
+                if let Some(object) = self
+                    .scene
+                    .objects_mut()
+                    .iter_mut()
+                    .find(|object| object.id == object_id)
+                {
                     object.is_visible = false;
                     object.body.collidable = false;
                     object.body.velocity = Vector2::ZERO;
                 }
                 continue;
             }
-            if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == object_id) {
+            if let Some(object) = self
+                .scene
+                .objects_mut()
+                .iter_mut()
+                .find(|object| object.id == object_id)
+            {
                 object.is_visible = true;
                 object.body.collidable = capture.object_collidable;
             }
@@ -3529,7 +5717,12 @@ impl NativeApp {
 
         for (object_id, title, object_collidable) in missing {
             self.window_captures.remove(&object_id);
-            if let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == object_id) {
+            if let Some(object) = self
+                .scene
+                .objects_mut()
+                .iter_mut()
+                .find(|object| object.id == object_id)
+            {
                 object.is_visible = true;
                 object.body.collidable = object_collidable;
             }
@@ -3537,9 +5730,19 @@ impl NativeApp {
         }
     }
 
-    fn constrain_object_to_window(&mut self, object_id: u64, client_rect_screen: RectF, window_delta: Vector2) {
+    fn constrain_object_to_window(
+        &mut self,
+        object_id: u64,
+        client_rect_screen: RectF,
+        window_delta: Vector2,
+    ) {
         let local_rect = self.screen_rect_to_local(client_rect_screen);
-        let Some(object) = self.scene.objects().iter().find(|object| object.id == object_id) else {
+        let Some(object) = self
+            .scene
+            .objects()
+            .iter()
+            .find(|object| object.id == object_id)
+        else {
             self.window_captures.remove(&object_id);
             return;
         };
@@ -3570,7 +5773,12 @@ impl NativeApp {
     }
 
     fn screen_rect_to_local(&self, rect: RectF) -> RectF {
-        RectF::new(rect.x - self.bounds.x, rect.y - self.bounds.y, rect.width, rect.height)
+        RectF::new(
+            rect.x - self.bounds.x,
+            rect.y - self.bounds.y,
+            rect.width,
+            rect.height,
+        )
     }
 
     fn update_held_object_rotation(&mut self, is_right_down: bool) {
@@ -3579,7 +5787,12 @@ impl NativeApp {
             return;
         };
 
-        let Some(object) = self.scene.objects_mut().iter_mut().find(|object| object.id == selected_id) else {
+        let Some(object) = self
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == selected_id)
+        else {
             self.is_rotation_dragging = false;
             return;
         };
@@ -3656,7 +5869,14 @@ impl NativeApp {
 
             let lines = vec![
                 PanelLine {
-                    text: format!("ForceInteractive: {}", if self.force_interactive_for_debug { "ON" } else { "off" }),
+                    text: format!(
+                        "ForceInteractive: {}",
+                        if self.force_interactive_for_debug {
+                            "ON"
+                        } else {
+                            "off"
+                        }
+                    ),
                     selected: false,
                 },
                 PanelLine {
@@ -3664,16 +5884,28 @@ impl NativeApp {
                         "Cursor: ({:.1},{:.1}) hit={}",
                         self.cursor_local.x,
                         self.cursor_local.y,
-                        if self.debug_hit_primary_cursor { "yes" } else { "no" }
+                        if self.debug_hit_primary_cursor {
+                            "yes"
+                        } else {
+                            "no"
+                        }
                     ),
                     selected: false,
                 },
                 PanelLine {
-                    text: format!("LMB: {} WasDown: {}", if self.debug_left_down { "down" } else { "up" }, self.was_left_down),
+                    text: format!(
+                        "LMB: {} WasDown: {}",
+                        if self.debug_left_down { "down" } else { "up" },
+                        self.was_left_down
+                    ),
                     selected: false,
                 },
                 PanelLine {
-                    text: format!("RMB: {} Rotating: {}", if self.debug_right_down { "down" } else { "up" }, self.is_rotation_dragging),
+                    text: format!(
+                        "RMB: {} Rotating: {}",
+                        if self.debug_right_down { "down" } else { "up" },
+                        self.is_rotation_dragging
+                    ),
                     selected: false,
                 },
                 PanelLine {
@@ -3689,6 +5921,42 @@ impl NativeApp {
                 title: "Debug".to_string(),
                 lines,
                 footer: Vec::new(),
+            });
+        }
+
+        // Case state lives in the control UI; keep this panel behind the debug HUD
+        // so openings stay clean on stream.
+        if self.debug_visible
+            && (self.case_director.is_active() || self.case_director.queue_len() > 0)
+        {
+            let mut lines: Vec<PanelLine> = self
+                .case_director
+                .status_lines()
+                .into_iter()
+                .map(|text| PanelLine {
+                    text,
+                    selected: false,
+                })
+                .collect();
+            if let Some(session) = self.case_director.session() {
+                lines.push(PanelLine {
+                    text: format!(
+                        "{}  {}",
+                        session.tier().name.to_uppercase(),
+                        session.config().reward(session.outcome()).name
+                    ),
+                    // Highlight the loud tiers so the streamer can see them
+                    // land even with the overlay behind a fullscreen game.
+                    selected: session.intensity() >= 0.5,
+                });
+            }
+            panels.push(OverlayPanel {
+                title: "Case".to_string(),
+                lines,
+                footer: vec![
+                    "C opens a test case.".to_string(),
+                    self.case_director.cost_summary(),
+                ],
             });
         }
 
@@ -3861,7 +6129,9 @@ impl NativeApp {
         }
 
         if self.portal_pair_tool.needs_interactive() || self.portal_pair_tool.has_portal_pair() {
-            let status = if self.portal_pair_tool.needs_interactive() && self.portal_pair_tool.first.is_none() {
+            let status = if self.portal_pair_tool.needs_interactive()
+                && self.portal_pair_tool.first.is_none()
+            {
                 "Click a screen edge for Portal A."
             } else if self.portal_pair_tool.needs_interactive() {
                 "Click another edge for Portal B."
@@ -3884,7 +6154,8 @@ impl NativeApp {
                 lines: vec![
                     PanelLine {
                         text: format!("Shots: {}", self.shatter_gun.shots_fired),
-                        selected: self.frame_clock.elapsed_seconds - self.shatter_gun.last_fire_at < 0.45,
+                        selected: self.frame_clock.elapsed_seconds - self.shatter_gun.last_fire_at
+                            < 0.45,
                     },
                     PanelLine {
                         text: "Click to fracture the screen.".to_string(),
@@ -3920,7 +6191,10 @@ impl NativeApp {
             .window
             .as_ref()
             .map(|window| window.inner_size())
-            .unwrap_or(winit::dpi::PhysicalSize::new(self.bounds.width as u32, self.bounds.height as u32));
+            .unwrap_or(winit::dpi::PhysicalSize::new(
+                self.bounds.width as u32,
+                self.bounds.height as u32,
+            ));
         let scene = RenderScene {
             bounds: scene_bounds,
             elapsed_seconds: self.frame_clock.elapsed_seconds,
@@ -3939,15 +6213,25 @@ impl NativeApp {
                 .map(|target| self.screen_rect_to_local(target.client_rect)),
             cheer_portals: &self.cheer_portals,
             screen_labels: &self.cheer_labels,
+            chat_messages: &self.chat_message_visuals,
+            // Staged on the spawn monitor, so a two-screen overlay does not
+            // split the case down the bezel.
+            case_opening: self.case_director.session().map(|session| CaseView {
+                session,
+                stage: self.spawn_bounds(),
+            }),
             hud: &self.hud,
         };
-        let vertices = self.renderer.build_vertices(size.width, size.height, &scene)?;
+        let vertices = self
+            .renderer
+            .build_vertices(size.width, size.height, &scene)?;
 
         #[cfg(target_os = "windows")]
         {
             let Some(d3d_renderer) = &mut self.d3d_renderer else {
                 return Ok(());
             };
+            d3d_renderer.update_chat_animations(self.frame_clock.elapsed_seconds)?;
             return d3d_renderer.render(&vertices);
         }
 
@@ -3992,33 +6276,48 @@ impl NativeApp {
         if let Some(mut child) = self.control_ui_process.take() {
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    self.push_status_message(format!("Control UI exited with {status}; relaunching."));
-                },
+                    self.push_status_message(format!(
+                        "Control UI exited with {status}; relaunching."
+                    ));
+                }
                 Ok(None) => {
                     self.control_ui_process = Some(child);
                     match request_control_ui_show() {
-                        Ok(()) => self.push_status_message("Control UI brought forward.".to_string()),
+                        Ok(()) => {
+                            self.push_status_message("Control UI brought forward.".to_string())
+                        }
                         Err(error) => {
-                            self.push_status_message(format!("Control UI is already running; show request failed: {error}."));
-                        },
+                            self.push_status_message(format!(
+                                "Control UI is already running; show request failed: {error}."
+                            ));
+                        }
                     }
                     return;
-                },
+                }
                 Err(error) => {
-                    self.push_status_message(format!("Control UI status check failed: {error}; relaunching."));
-                },
+                    self.push_status_message(format!(
+                        "Control UI status check failed: {error}; relaunching."
+                    ));
+                }
             }
         }
 
+        let bridge_token = self
+            .room_bridge
+            .as_ref()
+            .map(|bridge| bridge.token.as_str())
+            .unwrap_or("");
         if let Some(control_ui_exe) = find_packaged_control_ui_exe() {
-            match spawn_control_ui_exe(&control_ui_exe) {
+            match spawn_control_ui_exe(&control_ui_exe, bridge_token) {
                 Ok(child) => {
                     self.control_ui_process = Some(child);
                     self.push_status_message("Packaged Control UI launched from tray.".to_string());
-                },
+                }
                 Err(error) => {
-                    self.push_status_message(format!("Packaged Control UI launch failed: {error:#}."));
-                },
+                    self.push_status_message(format!(
+                        "Packaged Control UI launch failed: {error:#}."
+                    ));
+                }
             }
             return;
         }
@@ -4028,14 +6327,14 @@ impl NativeApp {
             return;
         };
 
-        match spawn_control_ui(&control_ui_dir) {
+        match spawn_control_ui(&control_ui_dir, bridge_token) {
             Ok(child) => {
                 self.control_ui_process = Some(child);
                 self.push_status_message("Control UI launched from tray.".to_string());
-            },
+            }
             Err(error) => {
                 self.push_status_message(format!("Control UI launch failed: {error:#}."));
-            },
+            }
         }
     }
 
@@ -4043,70 +6342,77 @@ impl NativeApp {
         match action {
             AppAction::ShowControlUi => {
                 self.show_control_ui();
-            },
+            }
             AppAction::ToggleDebug => {
                 self.debug_visible = !self.debug_visible;
-            },
+            }
             AppAction::SpawnObject => {
                 let id = self.scene.spawn_next_object(self.default_spawn_position());
                 self.selected_id = Some(id);
-            },
+            }
             AppAction::SpawnCrystal => {
-                let id = self.scene.spawn_random_crystal(self.default_spawn_position());
+                let id = self
+                    .scene
+                    .spawn_random_crystal(self.default_spawn_position());
                 self.selected_id = Some(id);
-            },
+            }
             AppAction::SpawnDvdLogo => {
-                let id = self.scene.spawn_random_dvd_logo(self.default_spawn_position());
+                let id = self
+                    .scene
+                    .spawn_random_dvd_logo(self.default_spawn_position());
                 self.selected_id = Some(id);
-            },
+            }
             AppAction::SpawnStressCubes => {
                 self.spawn_stress_cubes();
-            },
+            }
             AppAction::SpawnRobotBuddy => {
                 self.spawn_robot_buddy();
-            },
+            }
             AppAction::ToggleSlingshotGame => {
                 self.toggle_slingshot_game();
-            },
+            }
             AppAction::ToggleBasketballGame => {
                 self.toggle_basketball_game();
-            },
+            }
+            AppAction::OpenTestCase => {
+                self.open_test_case();
+            }
             AppAction::Reset => {
                 self.reset_everything();
-            },
+            }
             AppAction::ToggleSettings => {
                 self.settings_panel.visible = !self.settings_panel.visible;
                 if self.settings_panel.visible {
                     self.import_panel = None;
                 }
-            },
+            }
             AppAction::ToggleWeather => {
                 self.toggle_weather_world();
-            },
+            }
             AppAction::ToggleSand => {
                 self.toggle_sand_world();
-            },
+            }
             AppAction::ToggleMeasureTool => {
                 self.toggle_measure_tool();
-            },
+            }
             AppAction::ToggleSpotlight => {
                 self.toggle_spotlight();
-            },
+            }
             AppAction::ToggleLassoTool => {
                 self.toggle_lasso_tool();
-            },
+            }
             AppAction::ToggleShatterGun => {
                 self.toggle_shatter_gun();
-            },
+            }
             AppAction::ShatterScreen => {
                 self.trigger_screen_shatter();
-            },
+            }
             AppAction::RequestImport => {
                 if let Some(path) = pick_model_file() {
                     self.import_panel = Some(ImportPanel::new(path.display().to_string()));
                     self.settings_panel.visible = false;
                 }
-            },
+            }
             AppAction::Exit => event_loop.exit(),
         }
     }
@@ -4127,7 +6433,11 @@ impl NativeApp {
         self.cheer_labels.clear();
         self.bit_crystals.clear();
         self.bit_pointer_press = None;
-        self.bit_bursts.clear();
+        self.bit_shards.clear();
+        self.falling_chat_messages.clear();
+        self.chat_message_visuals.clear();
+        self.held_chat_message_id = None;
+        self.held_chat_grab_offset = Vector2::ZERO;
         self.last_bit_cleanup_at = now;
         self.weather_world.clear();
         self.sand_world.clear();
@@ -4143,6 +6453,7 @@ impl NativeApp {
         self.fan_yaws.clear();
         self.drone_carries.clear();
         self.drone_drop_cooldowns.clear();
+        self.helper_targets.clear();
         self.import_panel = None;
         self.settings_panel.visible = false;
         self.is_rotation_dragging = false;
@@ -4150,12 +6461,19 @@ impl NativeApp {
         self.push_status_message("Reset everything.".to_string());
     }
 
-    fn handle_keyboard(&mut self, key_code: KeyCode, state: ElementState, event_loop: &ActiveEventLoop) {
+    fn handle_keyboard(
+        &mut self,
+        key_code: KeyCode,
+        state: ElementState,
+        event_loop: &ActiveEventLoop,
+    ) {
         if state != ElementState::Pressed {
             return;
         }
 
-        if self.keyboard_modifiers.control_key() && matches!(key_code, KeyCode::KeyC | KeyCode::KeyQ) {
+        if self.keyboard_modifiers.control_key()
+            && matches!(key_code, KeyCode::KeyC | KeyCode::KeyQ)
+        {
             self.handle_action(AppAction::Exit, event_loop);
             return;
         }
@@ -4165,7 +6483,10 @@ impl NativeApp {
         }
 
         if self.settings_panel.visible {
-            if self.settings_panel.handle_key(key_code, self.scene.config_mut()) {
+            if self
+                .settings_panel
+                .handle_key(key_code, self.scene.config_mut())
+            {
                 self.scene.apply_runtime_physics_config();
                 return;
             }
@@ -4192,8 +6513,9 @@ impl NativeApp {
             KeyCode::KeyL => self.handle_action(AppAction::ToggleSpotlight, event_loop),
             KeyCode::KeyR => self.handle_action(AppAction::ToggleLassoTool, event_loop),
             KeyCode::KeyB => self.handle_action(AppAction::ToggleShatterGun, event_loop),
+            KeyCode::KeyC => self.handle_action(AppAction::OpenTestCase, event_loop),
             KeyCode::Escape => self.handle_action(AppAction::Exit, event_loop),
-            _ => {},
+            _ => {}
         }
     }
 
@@ -4217,22 +6539,26 @@ impl NativeApp {
                 self.selected_id = Some(id);
                 self.status_message = Some(format!("Imported model: {}", panel.path));
                 true
-            },
+            }
             KeyCode::Escape => {
                 self.import_panel = None;
                 true
-            },
+            }
             _ => false,
         }
     }
 
     fn default_spawn_position(&self) -> Vector2 {
         let bounds = self.spawn_bounds();
-        Vector2::new(bounds.x + bounds.width * 0.5, bounds.y + bounds.height * 0.5)
+        Vector2::new(
+            bounds.x + bounds.width * 0.5,
+            bounds.y + bounds.height * 0.5,
+        )
     }
 
     fn spawn_bounds(&self) -> RectF {
-        self.spawn_monitor_bounds.unwrap_or_else(|| self.scene_bounds())
+        self.spawn_monitor_bounds
+            .unwrap_or_else(|| self.scene_bounds())
     }
 
     fn set_spawn_monitor(&mut self, payload: Option<&serde_json::Value>) {
@@ -4244,7 +6570,12 @@ impl NativeApp {
         let screen_y = payload_f32(payload, "y", self.bounds.y, -100_000.0, 100_000.0);
         let width = payload_f32(payload, "width", desktop.width, 1.0, desktop.width);
         let height = payload_f32(payload, "height", desktop.height, 1.0, desktop.height);
-        let local = RectF::new(screen_x - self.bounds.x, screen_y - self.bounds.y, width, height);
+        let local = RectF::new(
+            screen_x - self.bounds.x,
+            screen_y - self.bounds.y,
+            width,
+            height,
+        );
         let left = local.x.clamp(0.0, desktop.right() - 1.0);
         let top = local.y.clamp(0.0, desktop.bottom() - 1.0);
         let right = local.right().clamp(left + 1.0, desktop.right());
@@ -4281,8 +6612,16 @@ fn desktop_bounds(event_loop: &ActiveEventLoop) -> Option<RectF> {
     ))
 }
 
-const CONTROL_IPC_ADDR: &str = "127.0.0.1:47731";
-const CONTROL_UI_WINDOW_IPC_ADDR: &str = "127.0.0.1:47732";
+const DEFAULT_CONTROL_IPC_ADDR: &str = "127.0.0.1:47731";
+const DEFAULT_CONTROL_UI_WINDOW_IPC_ADDR: &str = "127.0.0.1:47732";
+fn control_ipc_addr() -> String {
+    env::var("SCREEN_OVERLAY_ENGINE_IPC_ADDR")
+        .unwrap_or_else(|_| DEFAULT_CONTROL_IPC_ADDR.to_string())
+}
+fn control_ui_window_ipc_addr() -> String {
+    env::var("SCREEN_OVERLAY_WINDOW_IPC_ADDR")
+        .unwrap_or_else(|_| DEFAULT_CONTROL_UI_WINDOW_IPC_ADDR.to_string())
+}
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -4295,37 +6634,156 @@ fn control_visual_kind(kind: &str) -> Option<(ObjectVisualKind, Option<AppColor>
 
     match normalized.as_str() {
         "cube" => Some((ObjectVisualKind::Cube, None, "cube")),
-        "dice" => Some((ObjectVisualKind::Dice, Some(AppColor::from_rgb(245, 245, 240)), "dice")),
-        "crystal" => Some((ObjectVisualKind::Crystal, Some(AppColor::from_rgb(108, 241, 255)), "crystal")),
-        "satellite" => Some((ObjectVisualKind::Satellite, Some(AppColor::from_rgb(88, 160, 255)), "satellite")),
-        "dvd" | "dvdlogo" => Some((ObjectVisualKind::DvdLogo, Some(AppColor::from_rgb(244, 78, 255)), "DVD logo")),
-        "ball" => Some((ObjectVisualKind::Ball, Some(AppColor::from_rgb(90, 205, 255)), "ball")),
-        "softball" => Some((ObjectVisualKind::SoftBall, Some(AppColor::from_rgb(106, 236, 188)), "soft ball")),
-        "glass" | "glassmarble" => Some((ObjectVisualKind::GlassMarble, Some(AppColor::from_rgb(220, 246, 255)), "glass marble")),
-        "plasma" | "plasmaorb" => Some((ObjectVisualKind::PlasmaOrb, Some(AppColor::from_rgb(160, 88, 255)), "plasma orb")),
-        "portal" | "portalorb" => Some((ObjectVisualKind::PortalOrb, Some(AppColor::from_rgb(80, 180, 255)), "portal orb")),
-        "bubble" | "soapbubble" => Some((ObjectVisualKind::SoapBubble, Some(AppColor::from_rgb(245, 255, 255)), "soap bubble")),
-        "shield" | "forcefield" | "forcefieldorb" => {
-            Some((ObjectVisualKind::ForcefieldOrb, Some(AppColor::from_rgb(78, 240, 255)), "forcefield orb"))
-        },
-        "raycube" | "raymarchcube" => Some((ObjectVisualKind::RaymarchCube, Some(AppColor::from_rgb(130, 92, 255)), "raymarch cube")),
-        "pyramid" => Some((ObjectVisualKind::Pyramid, Some(AppColor::from_rgb(255, 176, 92)), "pyramid")),
-        "barrel" => Some((ObjectVisualKind::Barrel, Some(AppColor::from_rgb(126, 226, 168)), "barrel")),
-        "ring" => Some((ObjectVisualKind::Ring, Some(AppColor::from_rgb(255, 118, 210)), "ring")),
-        "star" => Some((ObjectVisualKind::Star, Some(AppColor::from_rgb(255, 224, 92)), "star")),
-        "plank" | "gameplank" => Some((ObjectVisualKind::GamePlank, Some(AppColor::from_rgb(255, 176, 92)), "game plank")),
-        "target" | "gametarget" => Some((ObjectVisualKind::GameTarget, Some(AppColor::from_rgb(255, 224, 92)), "target")),
-        "fox" | "foxbuddy" => Some((ObjectVisualKind::FoxBuddy, Some(AppColor::from_rgb(255, 160, 90)), "fox buddy")),
-        "robot" | "robotbuddy" => Some((ObjectVisualKind::RobotBuddy, Some(AppColor::from_rgb(150, 220, 245)), "robot buddy")),
-        "snail" => Some((ObjectVisualKind::Snail, Some(AppColor::from_rgb(166, 214, 124)), "snail")),
-        "fan" => Some((ObjectVisualKind::Fan, Some(AppColor::from_rgb(105, 230, 255)), "fan")),
-        "drone" | "quaddrone" | "quadcopter" | "quadcopterdrone" => {
-            Some((ObjectVisualKind::QuadDrone, Some(AppColor::from_rgb(248, 250, 252)), "quadcopter drone"))
-        },
-        "basketball" => Some((ObjectVisualKind::Basketball, Some(AppColor::from_rgb(232, 113, 38)), "basketball")),
-        "hoop" | "basketballhoop" => Some((ObjectVisualKind::BasketballHoop, Some(AppColor::from_rgb(245, 245, 245)), "basketball hoop")),
+        "dice" => Some((
+            ObjectVisualKind::Dice,
+            Some(AppColor::from_rgb(245, 245, 240)),
+            "dice",
+        )),
+        "crystal" => Some((
+            ObjectVisualKind::Crystal,
+            Some(AppColor::from_rgb(108, 241, 255)),
+            "crystal",
+        )),
+        "satellite" => Some((
+            ObjectVisualKind::Satellite,
+            Some(AppColor::from_rgb(88, 160, 255)),
+            "satellite",
+        )),
+        "dvd" | "dvdlogo" => Some((
+            ObjectVisualKind::DvdLogo,
+            Some(AppColor::from_rgb(244, 78, 255)),
+            "DVD logo",
+        )),
+        "ball" => Some((
+            ObjectVisualKind::Ball,
+            Some(AppColor::from_rgb(90, 205, 255)),
+            "ball",
+        )),
+        "softball" => Some((
+            ObjectVisualKind::SoftBall,
+            Some(AppColor::from_rgb(106, 236, 188)),
+            "soft ball",
+        )),
+        "glass" | "glassmarble" => Some((
+            ObjectVisualKind::GlassMarble,
+            Some(AppColor::from_rgb(220, 246, 255)),
+            "glass marble",
+        )),
+        "plasma" | "plasmaorb" => Some((
+            ObjectVisualKind::PlasmaOrb,
+            Some(AppColor::from_rgb(160, 88, 255)),
+            "plasma orb",
+        )),
+        "portal" | "portalorb" => Some((
+            ObjectVisualKind::PortalOrb,
+            Some(AppColor::from_rgb(80, 180, 255)),
+            "portal orb",
+        )),
+        "bubble" | "soapbubble" => Some((
+            ObjectVisualKind::SoapBubble,
+            Some(AppColor::from_rgb(245, 255, 255)),
+            "soap bubble",
+        )),
+        "shield" | "forcefield" | "forcefieldorb" => Some((
+            ObjectVisualKind::ForcefieldOrb,
+            Some(AppColor::from_rgb(78, 240, 255)),
+            "forcefield orb",
+        )),
+        "raycube" | "raymarchcube" => Some((
+            ObjectVisualKind::RaymarchCube,
+            Some(AppColor::from_rgb(130, 92, 255)),
+            "raymarch cube",
+        )),
+        "pyramid" => Some((
+            ObjectVisualKind::Pyramid,
+            Some(AppColor::from_rgb(255, 176, 92)),
+            "pyramid",
+        )),
+        "barrel" => Some((
+            ObjectVisualKind::Barrel,
+            Some(AppColor::from_rgb(126, 226, 168)),
+            "barrel",
+        )),
+        "ring" => Some((
+            ObjectVisualKind::Ring,
+            Some(AppColor::from_rgb(255, 118, 210)),
+            "ring",
+        )),
+        "star" => Some((
+            ObjectVisualKind::Star,
+            Some(AppColor::from_rgb(255, 224, 92)),
+            "star",
+        )),
+        "plank" | "gameplank" => Some((
+            ObjectVisualKind::GamePlank,
+            Some(AppColor::from_rgb(255, 176, 92)),
+            "game plank",
+        )),
+        "target" | "gametarget" => Some((
+            ObjectVisualKind::GameTarget,
+            Some(AppColor::from_rgb(255, 224, 92)),
+            "target",
+        )),
+        "fox" | "foxbuddy" => Some((
+            ObjectVisualKind::FoxBuddy,
+            Some(AppColor::from_rgb(255, 160, 90)),
+            "fox buddy",
+        )),
+        "robot" | "robotbuddy" => Some((
+            ObjectVisualKind::RobotBuddy,
+            Some(AppColor::from_rgb(150, 220, 245)),
+            "robot buddy",
+        )),
+        "snail" => Some((
+            ObjectVisualKind::Snail,
+            Some(AppColor::from_rgb(166, 214, 124)),
+            "snail",
+        )),
+        "fan" => Some((
+            ObjectVisualKind::Fan,
+            Some(AppColor::from_rgb(105, 230, 255)),
+            "fan",
+        )),
+        "drone" | "quaddrone" | "quadcopter" | "quadcopterdrone" => Some((
+            ObjectVisualKind::QuadDrone,
+            Some(AppColor::from_rgb(248, 250, 252)),
+            "quadcopter drone",
+        )),
+        "basketball" => Some((
+            ObjectVisualKind::Basketball,
+            Some(AppColor::from_rgb(232, 113, 38)),
+            "basketball",
+        )),
+        "hoop" | "basketballhoop" => Some((
+            ObjectVisualKind::BasketballHoop,
+            Some(AppColor::from_rgb(245, 245, 245)),
+            "basketball hoop",
+        )),
+        "text" => Some((
+            ObjectVisualKind::Text,
+            Some(AppColor::from_rgb(248, 248, 252)),
+            "text",
+        )),
         _ => None,
     }
+}
+
+fn text_size_scale(size: &str) -> f32 {
+    match size.to_ascii_lowercase().as_str() {
+        "small" => 1.0,
+        "large" => 1.9,
+        "xlarge" | "x-large" => 2.6,
+        _ => 1.4,
+    }
+}
+
+fn room_target_bounds(payload: Option<&serde_json::Value>, desktop: RectF) -> Option<RectF> {
+    let display = payload?.get("targetDisplay")?;
+    let x = display.get("x")?.as_f64()? as f32 - desktop.x;
+    let y = display.get("y")?.as_f64()? as f32 - desktop.y;
+    let width = display.get("width")?.as_f64()? as f32;
+    let height = display.get("height")?.as_f64()? as f32;
+    (width > 0.0 && height > 0.0).then_some(RectF::new(x, y, width, height))
 }
 
 fn payload_f32(payload: &serde_json::Value, key: &str, fallback: f32, min: f32, max: f32) -> f32 {
@@ -4347,6 +6805,169 @@ fn cheer_tier_color(tier: u32, anonymous: bool) -> AppColor {
         3 => AppColor::from_rgb(255, 78, 112),
         _ => AppColor::from_rgb(255, 204, 72),
     }
+}
+
+fn sanitized_chat_text(value: &str, max_characters: usize) -> String {
+    value
+        .trim()
+        .chars()
+        .filter(|character| !character.is_control())
+        .map(|character| {
+            let codepoint = character as u32;
+            if character.is_ascii()
+                || matches!(codepoint, 0x1f000..=0x1faff | 0x2600..=0x27bf | 0x2300..=0x23ff)
+                || matches!(codepoint, 0x200d | 0x20e3 | 0xfe0f)
+            {
+                character
+            } else {
+                '?'
+            }
+        })
+        .take(max_characters)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn inline_chat_message(
+    payload: Option<&serde_json::Value>,
+    fallback_text: &str,
+) -> (String, Vec<(String, String, bool)>) {
+    let mut text = String::new();
+    let mut images = Vec::new();
+    if let Some(fragments) = payload
+        .and_then(|value| value.get("fragments"))
+        .and_then(serde_json::Value::as_array)
+    {
+        for fragment in fragments {
+            let fragment_text = fragment
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if let Some(id) = fragment.get("emoteId").and_then(serde_json::Value::as_str) {
+                text.push('\u{fffc}');
+                images.push((
+                    format!("twitch:{id}"),
+                    format!(
+                        "https://static-cdn.jtvnw.net/emoticons/v2/{id}/{}/dark/2.0",
+                        if fragment
+                            .get("animated")
+                            .and_then(serde_json::Value::as_bool)
+                            .unwrap_or(false)
+                        {
+                            "animated"
+                        } else {
+                            "static"
+                        }
+                    ),
+                    fragment
+                        .get("animated")
+                        .and_then(serde_json::Value::as_bool)
+                        .unwrap_or(false),
+                ));
+            } else {
+                append_text_and_emoji(&mut text, &mut images, fragment_text);
+            }
+        }
+    } else {
+        append_text_and_emoji(&mut text, &mut images, fallback_text);
+    }
+    (text, images)
+}
+
+fn append_text_and_emoji(text: &mut String, images: &mut Vec<(String, String, bool)>, value: &str) {
+    for grapheme in value.graphemes(true) {
+        if is_emoji_grapheme(grapheme) {
+            let codepoints = grapheme
+                .chars()
+                .filter(|character| *character != '\u{fe0f}')
+                .map(|character| format!("{:x}", character as u32))
+                .collect::<Vec<_>>()
+                .join("-");
+            text.push('\u{fffc}');
+            images.push((
+                format!("emoji:{codepoints}"),
+                format!("https://cdn.jsdelivr.net/gh/jdecked/twemoji@16.0.1/assets/72x72/{codepoints}.png"),
+                false,
+            ));
+        } else {
+            text.push_str(grapheme);
+        }
+    }
+}
+
+fn is_emoji_grapheme(value: &str) -> bool {
+    value.chars().any(|character| {
+        matches!(character as u32,
+            0x1f000..=0x1faff | 0x2600..=0x27bf | 0x2300..=0x23ff | 0x20e3 | 0xfe0f)
+    })
+}
+
+fn wrap_chat_text(value: &str, max_characters: usize) -> String {
+    let max_characters = max_characters.max(1);
+    let mut lines = Vec::new();
+    let mut line = String::new();
+
+    for word in value.split_whitespace() {
+        let word_length = word.chars().count();
+        if !line.is_empty() && line.chars().count() + 1 + word_length <= max_characters {
+            line.push(' ');
+            line.push_str(word);
+            continue;
+        }
+        if !line.is_empty() {
+            lines.push(std::mem::take(&mut line));
+        }
+
+        let mut chunk = String::new();
+        for character in word.chars() {
+            chunk.push(character);
+            if chunk.chars().count() == max_characters {
+                lines.push(std::mem::take(&mut chunk));
+            }
+        }
+        line = chunk;
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines.join("\n")
+}
+
+fn chat_text_hash(text: &str) -> u64 {
+    text.bytes().fold(0xcbf29ce484222325, |hash, byte| {
+        (hash ^ byte as u64).wrapping_mul(0x100000001b3)
+    })
+}
+
+fn mixed_chat_seed(mut seed: u64) -> u64 {
+    seed ^= seed >> 30;
+    seed = seed.wrapping_mul(0xbf58476d1ce4e5b9);
+    seed ^= seed >> 27;
+    seed = seed.wrapping_mul(0x94d049bb133111eb);
+    seed ^ (seed >> 31)
+}
+
+fn constrain_chat_rotation(angle: &mut f64, angular_velocity: &mut f64, limit: f64) {
+    if *angle > limit {
+        *angle = limit;
+        *angular_velocity = -angular_velocity.abs() * 0.48;
+    } else if *angle < -limit {
+        *angle = -limit;
+        *angular_velocity = angular_velocity.abs() * 0.48;
+    }
+}
+
+fn chat_message_color(hash: u64) -> AppColor {
+    const COLORS: [AppColor; 6] = [
+        AppColor::from_rgb(168, 112, 255),
+        AppColor::from_rgb(69, 220, 255),
+        AppColor::from_rgb(255, 92, 174),
+        AppColor::from_rgb(255, 188, 68),
+        AppColor::from_rgb(104, 238, 160),
+        AppColor::from_rgb(255, 112, 92),
+    ];
+    COLORS[(hash as usize) % COLORS.len()]
 }
 
 fn bit_crystal_expiry(spawned_at: f64, value: u32, id: u64) -> f64 {
@@ -4377,23 +6998,34 @@ fn is_quick_bit_click(
             <= BIT_CLICK_MAX_TRAVEL_PIXELS * BIT_CLICK_MAX_TRAVEL_PIXELS
 }
 
+fn is_significant_bit_impact(armed: bool, previous_velocity: Vector2, velocity: Vector2) -> bool {
+    armed
+        && (velocity - previous_velocity).length_squared()
+            >= BIT_IMPACT_SHATTER_DELTA_SPEED * BIT_IMPACT_SHATTER_DELTA_SPEED
+}
+
 #[derive(Debug, Deserialize)]
 struct ControlIpcCommand {
     command: String,
     payload: Option<serde_json::Value>,
 }
 
-fn start_control_ipc_server() -> Result<Receiver<ControlIpcCommand>> {
-    let listener = TcpListener::bind(CONTROL_IPC_ADDR)
-        .with_context(|| format!("failed to bind {CONTROL_IPC_ADDR}"))?;
-    let (sender, receiver) = mpsc::channel();
+/// Binds the control IPC port. `case_status` is the board this thread answers
+/// case queries from, since it cannot reach the app's own state.
+fn start_control_ipc_server(
+    case_status: Arc<CaseStatusBoard>,
+) -> Result<Receiver<ControlIpcCommand>> {
+    let address = control_ipc_addr();
+    let listener =
+        TcpListener::bind(&address).with_context(|| format!("failed to bind {address}"))?;
+    let (sender, receiver) = mpsc::sync_channel(CONTROL_IPC_QUEUE_CAPACITY);
 
     thread::Builder::new()
         .name("control-ui-ipc".to_string())
         .spawn(move || {
             for stream in listener.incoming() {
                 match stream {
-                    Ok(stream) => handle_control_ipc_stream(stream, &sender),
+                    Ok(stream) => handle_control_ipc_stream(stream, &sender, &case_status),
                     Err(error) => eprintln!("Control UI IPC accept failed: {error}"),
                 }
             }
@@ -4412,7 +7044,12 @@ fn find_control_ui_dir() -> Option<PathBuf> {
         candidates.push(current_dir.join("..").join("..").join("control-ui"));
     }
 
-    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("control-ui"));
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("control-ui"),
+    );
 
     if let Ok(current_exe) = env::current_exe() {
         for ancestor in current_exe.ancestors() {
@@ -4433,6 +7070,35 @@ fn find_packaged_control_ui_exe() -> Option<PathBuf> {
     ];
 
     let mut candidates = Vec::new();
+    if let Ok(current_dir) = env::current_dir() {
+        candidates.push(
+            current_dir
+                .join("control-ui")
+                .join("src-tauri")
+                .join("target")
+                .join("release")
+                .join("screen-overlay-control.exe"),
+        );
+        candidates.push(
+            current_dir
+                .join("..")
+                .join("control-ui")
+                .join("src-tauri")
+                .join("target")
+                .join("release")
+                .join("screen-overlay-control.exe"),
+        );
+    }
+    candidates.push(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("control-ui")
+            .join("src-tauri")
+            .join("target")
+            .join("release")
+            .join("screen-overlay-control.exe"),
+    );
     if let Ok(current_exe) = env::current_exe() {
         for ancestor in current_exe.ancestors() {
             for name in CONTROL_UI_EXE_NAMES {
@@ -4441,23 +7107,32 @@ fn find_packaged_control_ui_exe() -> Option<PathBuf> {
         }
     }
 
-    candidates
-        .into_iter()
-        .find(|candidate| candidate.is_file() && env::current_exe().map(|current| current != *candidate).unwrap_or(true))
+    candidates.into_iter().find(|candidate| {
+        candidate.is_file()
+            && env::current_exe()
+                .map(|current| current != *candidate)
+                .unwrap_or(true)
+    })
 }
 
-fn spawn_control_ui_exe(control_ui_exe: &Path) -> Result<Child> {
+fn spawn_control_ui_exe(control_ui_exe: &Path, bridge_token: &str) -> Result<Child> {
     let mut command = Command::new(control_ui_exe);
     configure_hidden_process(&mut command);
+    command.env("SCREEN_OVERLAY_ROOM_BRIDGE_TOKEN", bridge_token);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .with_context(|| format!("failed to start packaged Control UI at {}", control_ui_exe.display()))
+        .with_context(|| {
+            format!(
+                "failed to start packaged Control UI at {}",
+                control_ui_exe.display()
+            )
+        })
 }
 
-fn spawn_control_ui(control_ui_dir: &PathBuf) -> Result<Child> {
+fn spawn_control_ui(control_ui_dir: &PathBuf, bridge_token: &str) -> Result<Child> {
     let mut command = control_ui_command();
     configure_hidden_process(&mut command);
     command
@@ -4465,6 +7140,7 @@ fn spawn_control_ui(control_ui_dir: &PathBuf) -> Result<Child> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    command.env("SCREEN_OVERLAY_ROOM_BRIDGE_TOKEN", bridge_token);
 
     command
         .spawn()
@@ -4472,14 +7148,16 @@ fn spawn_control_ui(control_ui_dir: &PathBuf) -> Result<Child> {
 }
 
 fn request_control_ui_show() -> Result<()> {
-    let addr: SocketAddr = CONTROL_UI_WINDOW_IPC_ADDR
+    let addr: SocketAddr = control_ui_window_ipc_addr()
         .parse()
         .map_err(|error| anyhow::anyhow!("bad Control UI window endpoint: {error}"))?;
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(180))
         .map_err(|error| anyhow::anyhow!("connect failed: {error}"))?;
     let _ = stream.set_write_timeout(Some(Duration::from_millis(180)));
     writeln!(stream, "show").context("failed to send Control UI show request")?;
-    stream.flush().context("failed to flush Control UI show request")
+    stream
+        .flush()
+        .context("failed to flush Control UI show request")
 }
 
 #[cfg(target_os = "windows")]
@@ -4503,27 +7181,37 @@ fn configure_hidden_process(command: &mut Command) {
     }
 }
 
-fn handle_control_ipc_stream(stream: TcpStream, sender: &Sender<ControlIpcCommand>) {
+fn handle_control_ipc_stream(
+    stream: TcpStream,
+    sender: &SyncSender<ControlIpcCommand>,
+    case_status: &CaseStatusBoard,
+) {
     let mut writer = match stream.try_clone() {
         Ok(writer) => writer,
         Err(error) => {
             eprintln!("Control UI IPC clone failed: {error}");
             return;
-        },
+        }
     };
     let _ = writer.set_write_timeout(Some(Duration::from_millis(500)));
 
-    let response = match read_control_ipc_command(stream, sender) {
-        Ok(()) => b"{\"ok\":true}\n".as_slice(),
+    let response = match read_control_ipc_command(stream, sender, case_status) {
+        Ok(response) => response,
         Err(error) => {
             eprintln!("Control UI IPC command failed: {error:#}");
-            b"{\"ok\":false}\n".as_slice()
-        },
+            b"{\"ok\":false}\n".to_vec()
+        }
     };
-    let _ = writer.write_all(response);
+    let _ = writer.write_all(&response);
 }
 
-fn read_control_ipc_command(stream: TcpStream, sender: &Sender<ControlIpcCommand>) -> Result<()> {
+/// Queues a command and returns the line to answer with. Queries are answered
+/// here instead of being queued, since they only read published state.
+fn read_control_ipc_command(
+    stream: TcpStream,
+    sender: &SyncSender<ControlIpcCommand>,
+    case_status: &CaseStatusBoard,
+) -> Result<Vec<u8>> {
     stream
         .set_read_timeout(Some(Duration::from_millis(500)))
         .context("failed to set control IPC read timeout")?;
@@ -4534,10 +7222,34 @@ fn read_control_ipc_command(stream: TcpStream, sender: &Sender<ControlIpcCommand
         .context("failed to read control IPC command")?;
     let command: ControlIpcCommand =
         serde_json::from_str(line.trim()).context("failed to parse control IPC command")?;
-    sender
-        .send(command)
-        .context("failed to queue control IPC command")?;
-    Ok(())
+    if command.command == "query_case" {
+        let report = case_status
+            .lock()
+            .map_err(|_| anyhow::anyhow!("case status board was poisoned"))?
+            .clone();
+        let mut response = serde_json::to_vec(&serde_json::json!({
+            "ok": true,
+            "case": report,
+        }))
+        .context("failed to encode case status")?;
+        response.push(b'\n');
+        return Ok(response);
+    }
+    let can_drop_when_saturated = matches!(
+        command.command.as_str(),
+        "simulate_twitch_chat" | "twitch_chat_message"
+    );
+    match sender.try_send(command) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) if can_drop_when_saturated => {}
+        Err(TrySendError::Full(command)) => sender
+            .send(command)
+            .context("failed to queue priority control IPC command")?,
+        Err(TrySendError::Disconnected(_)) => {
+            anyhow::bail!("control IPC command receiver disconnected")
+        }
+    }
+    Ok(b"{\"ok\":true}\n".to_vec())
 }
 
 #[cfg_attr(target_os = "windows", allow(dead_code))]
@@ -4571,7 +7283,9 @@ impl GpuState {
             backends,
             ..Default::default()
         });
-        let surface = instance.create_surface(window).context("Failed to create WGPU surface")?;
+        let surface = instance
+            .create_surface(window)
+            .context("Failed to create WGPU surface")?;
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -4583,10 +7297,16 @@ impl GpuState {
 
         let adapter_info = adapter.get_info();
         if cfg!(target_os = "macos") && adapter_info.backend != wgpu::Backend::Metal {
-            anyhow::bail!("Expected Metal backend on macOS, got {:?}", adapter_info.backend);
+            anyhow::bail!(
+                "Expected Metal backend on macOS, got {:?}",
+                adapter_info.backend
+            );
         }
         if cfg!(target_os = "windows") && adapter_info.backend != wgpu::Backend::Vulkan {
-            anyhow::bail!("Expected Vulkan backend on Windows, got {:?}", adapter_info.backend);
+            anyhow::bail!(
+                "Expected Vulkan backend on Windows, got {:?}",
+                adapter_info.backend
+            );
         }
 
         let (device, queue) = adapter
@@ -4608,11 +7328,21 @@ impl GpuState {
             .copied()
             .find(wgpu::TextureFormat::is_srgb)
             .unwrap_or(caps.formats[0]);
-        let alpha_mode = if cfg!(target_os = "windows") && caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied) {
+        let alpha_mode = if cfg!(target_os = "windows")
+            && caps
+                .alpha_modes
+                .contains(&wgpu::CompositeAlphaMode::PostMultiplied)
+        {
             wgpu::CompositeAlphaMode::PostMultiplied
-        } else if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PreMultiplied) {
+        } else if caps
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+        {
             wgpu::CompositeAlphaMode::PreMultiplied
-        } else if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::PostMultiplied) {
+        } else if caps
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::PostMultiplied)
+        {
             wgpu::CompositeAlphaMode::PostMultiplied
         } else {
             caps.alpha_modes[0]
@@ -5041,7 +7771,8 @@ fn shade_raymarch_cube(input: VertexOutput) -> vec4<f32> {
     for (var index: i32 = 0; index < 10; index = index + 1) {
         let fi = f32(index);
         var warped = ray_pos;
-        warped.xy = rotate2d(sin(warped.xy * 0.25), time * 0.5 + warped.z * 2.0);
+        let warped_xy = rotate2d(sin(warped.xy * 0.25), time * 0.5 + warped.z * 2.0);
+        warped = vec3<f32>(warped_xy, warped.z);
         var step_size = 0.001 + abs(gold_dot_noise(warped * 20.0) / 20.0 - gold_dot_noise(warped)) * 0.70;
         step_size += abs(ray_pos.y * 0.20 + sin(ray_pos.z * 2.0 + abs(ray_pos.x) * 0.50)) * 0.50;
         ray_pos += ray_dir * step_size;
@@ -5060,8 +7791,320 @@ fn shade_raymarch_cube(input: VertexOutput) -> vec4<f32> {
     return vec4<f32>(color * light, alpha);
 }
 
+fn chat_packed_row_pair(input: VertexOutput, pair_index: i32) -> u32 {
+    var packed = input.material.y;
+    if (pair_index == 1) {
+        packed = input.material.z;
+    } else if (pair_index == 2) {
+        packed = input.material.w;
+    } else if (pair_index == 3) {
+        packed = input.material_extra.x;
+    }
+    return u32(max(packed, 0.0) + 0.5);
+}
+
+fn chat_glyph_filled(input: VertexOutput, cell: vec2<i32>) -> bool {
+    if (cell.x < 0 || cell.y < 0 || cell.x >= 8 || cell.y >= 8) {
+        return false;
+    }
+    let packed = chat_packed_row_pair(input, cell.y / 2);
+    let shift = u32((cell.y % 2) * 8 + cell.x);
+    return (packed & (1u << shift)) != 0u;
+}
+
+fn chat_glyph_mask(input: VertexOutput, uv: vec2<f32>) -> bool {
+    let center_cell = vec2<i32>(i32(floor(uv.x)), i32(floor(uv.y)));
+    if (chat_glyph_filled(input, center_cell)) {
+        return true;
+    }
+    for (var row_offset: i32 = -1; row_offset <= 1; row_offset = row_offset + 1) {
+        for (var column_offset: i32 = -1; column_offset <= 1; column_offset = column_offset + 1) {
+            let cell = center_cell + vec2<i32>(column_offset, row_offset);
+            if (chat_glyph_filled(input, cell)) {
+                let cell_min = vec2<f32>(f32(cell.x), f32(cell.y));
+                let cell_max = cell_min + vec2<f32>(1.0);
+                let outside = max(max(cell_min - uv, uv - cell_max), vec2<f32>(0.0));
+                if (length(outside) <= 0.42) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+fn chat_extrusion_offset(input: VertexOutput) -> vec2<f32> {
+    let packed = u32(max(input.material_extra.w, 0.0) + 0.5);
+    let x = i32(packed & 255u) - 128;
+    let y = i32((packed >> 8u) & 255u) - 128;
+    return vec2<f32>(f32(x), f32(y)) / 16.0;
+}
+
+fn shade_chat_glyph(input: VertexOutput) -> vec4<f32> {
+    let uv = input.material_extra.yz;
+    let center_cell = vec2<i32>(i32(floor(uv.x)), i32(floor(uv.y)));
+    if (chat_glyph_filled(input, center_cell)) {
+        return input.color;
+    }
+    let outline_color = vec3<f32>(7.0 / 255.0, 8.0 / 255.0, 12.0 / 255.0);
+    if (chat_glyph_mask(input, uv)) {
+        return vec4<f32>(outline_color, input.color.a);
+    }
+    let extrusion = chat_extrusion_offset(input);
+    for (var layer: i32 = 1; layer <= 4; layer = layer + 1) {
+        let sample_uv = uv - extrusion * (f32(layer) * 0.25);
+        let sample_cell = vec2<i32>(i32(floor(sample_uv.x)), i32(floor(sample_uv.y)));
+        if (chat_glyph_filled(input, sample_cell)) {
+            return vec4<f32>(outline_color * 0.72, input.color.a);
+        }
+    }
+    discard;
+}
+
+// ---------------------------------------------------------------------------
+// Case opening materials (ids 10-14), mirroring the HLSL path. See
+// renderer/src/case_opening.rs for the packing contract.
+// ---------------------------------------------------------------------------
+
+/// The wgpu path blends with straight alpha into a UNORM target, which clamps
+/// fragment output before blending, so genuine additive output is unavailable
+/// here. Alpha-over with the glow colour is the closest match; overlapping
+/// glows accumulate less than they do on the premultiplied D3D path.
+///
+/// As on the D3D path, `color` must already be scaled by `coverage`, or the
+/// glow draws its own quad as a hard-edged block.
+fn case_emissive(color: vec3<f32>, coverage: f32) -> vec4<f32> {
+    return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), clamp(coverage, 0.0, 1.0));
+}
+
+fn case_opaque(color: vec3<f32>, alpha: f32) -> vec4<f32> {
+    return vec4<f32>(clamp(color, vec3<f32>(0.0), vec3<f32>(1.0)), clamp(alpha, 0.0, 1.0));
+}
+
+fn case_discard() -> vec4<f32> {
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
+}
+
+fn case_rolloff(color: vec3<f32>) -> vec3<f32> {
+    return (color / (vec3<f32>(1.0) + color * 0.22)) * 1.22;
+}
+
+fn case_hash(seed: vec2<f32>) -> f32 {
+    return fract(sin(dot(seed, vec2<f32>(41.31, 289.17))) * 43758.5453);
+}
+
+fn shade_case_glow(input: VertexOutput) -> vec4<f32> {
+    let uv = input.material.yz;
+    let shape = input.material.w;
+    let intensity = max(input.material_extra.x, 0.0);
+    let falloff = max(input.material_extra.y, 0.05);
+    let variant = input.material_extra.z;
+    let time = input.material_extra.w;
+    let master = input.color.a;
+
+    if (shape > 2.5) {
+        // Band: bright down the middle of the thin axis.
+        let across = pow(clamp(1.0 - abs(uv.x), 0.0, 1.0), falloff);
+        // Optional end taper, off for ring segments that must join seamlessly.
+        let tapered = smoothstep(0.0, 0.10, uv.y) * (1.0 - smoothstep(0.90, 1.0, uv.y));
+        let along = mix(1.0, tapered, clamp(variant, 0.0, 1.0));
+        let coverage = across * along * master;
+        return case_emissive(input.color.rgb * intensity * coverage, coverage);
+    }
+    if (shape > 1.5) {
+        // Rounded box, used for card auras and rarity bars.
+        let inside = clamp(vec2<f32>(1.0) - abs(uv), vec2<f32>(0.0), vec2<f32>(1.0));
+        let coverage = pow(inside.x * inside.y, falloff) * master;
+        return case_emissive(input.color.rgb * intensity * coverage, coverage);
+    }
+    if (shape > 0.5) {
+        // Vignette: darkens outward, and never lets the middle go fully clear.
+        let shade = 0.34 + 0.66 * smoothstep(0.10, 1.24, length(uv));
+        return case_opaque(input.color.rgb, shade * master);
+    }
+    // Round sprite. Particles flicker so a spark field never looks static.
+    let radius = length(uv);
+    let body = pow(clamp(1.0 - radius, 0.0, 1.0), falloff);
+    let core = pow(clamp(1.0 - radius, 0.0, 1.0), falloff * 3.5);
+    let flicker = 0.80 + 0.20 * sin(time * 31.0 + variant * 57.0);
+    let color = input.color.rgb * intensity * flicker + vec3<f32>(core * 0.55);
+    let coverage = clamp(body * 0.75 + core * 0.5, 0.0, 1.0) * master;
+    return case_emissive(color * coverage, coverage);
+}
+
+fn shade_case_card(input: VertexOutput) -> vec4<f32> {
+    let uv = input.material.yz;
+    let tier = clamp(input.material.w, 0.0, 1.0);
+    let time = input.material_extra.x;
+    let highlight = clamp(input.material_extra.y, 0.0, 1.0);
+    let seed = input.material_extra.z;
+    let dim = clamp(input.material_extra.w, 0.0, 1.0);
+    let rarity = input.color.rgb;
+
+    // Base gradient: cold slate at the top warming into the rarity colour.
+    var color = mix(vec3<f32>(0.052, 0.062, 0.084), rarity * 0.30, pow(uv.y, 1.5));
+
+    // Pool of rarity light behind the badge.
+    let pool = clamp(1.0 - length((uv - vec2<f32>(0.5, 0.40)) * vec2<f32>(1.30, 1.55)), 0.0, 1.0);
+    color = color + rarity * pow(pool, 2.2) * (0.30 + tier * 0.55);
+
+    // Brushed grain plus fine scanlines.
+    color = color * (0.93 + case_hash(vec2<f32>(uv.x * 37.0, uv.y * 173.0 + seed * 19.0)) * 0.14);
+    color = color * (0.965 + 0.035 * sin(uv.y * 250.0));
+
+    // Holographic sheen sweeping diagonally, faster and hotter on the winner.
+    // Kept well below white even on the winner: the badge and prize name are
+    // drawn on top in white and have to stay readable through it.
+    let sweep = fract((uv.x + uv.y) * 0.5 - time * (0.15 + highlight * 0.4) + seed);
+    let sheen = pow(clamp(1.0 - abs(sweep - 0.5) * 5.5, 0.0, 1.0), 3.0);
+    color = color + (rarity * 0.7 + vec3<f32>(0.3)) * sheen * (0.09 + highlight * 0.22);
+
+    // Inner border and the diagonal corner cut from the in-game item frame.
+    let edge = min(uv, vec2<f32>(1.0) - uv);
+    let nearest = min(edge.x, edge.y);
+    let border = 1.0 - smoothstep(0.009, 0.022, nearest);
+    color = mix(color, rarity * (1.15 + highlight * 0.9), border * (0.55 + highlight * 0.45));
+    color = color + rarity * clamp(1.0 - (uv.x + uv.y) * 7.0, 0.0, 1.0) * 0.5;
+
+    // Edge falloff so the face reads as inset rather than printed on.
+    color = color * (0.64 + smoothstep(0.0, 0.13, nearest) * 0.36);
+
+    color = color * (0.42 + dim * 0.58);
+    color = color * (1.0 + highlight * 0.22);
+    return case_opaque(case_rolloff(color), input.color.a);
+}
+
+fn shade_case_shell(input: VertexOutput) -> vec4<f32> {
+    let uv = input.material.yz;
+    let seam = clamp(input.material.w, 0.0, 1.0);
+    let normal = input.material_extra.xyz;
+    let kind = input.material_extra.w;
+    var color = input.color.rgb;
+
+    // Brushed metal: coarse streaks with a finer ripple over the top.
+    color = color * (0.90 + case_hash(vec2<f32>(floor(uv.y * 96.0), 3.0)) * 0.19);
+    color = color * (0.97 + 0.055 * sin(uv.y * 380.0 + uv.x * 7.0));
+
+    // Fresnel from the view-space normal: the eye looks along the basis' +Z,
+    // so grazing surfaces have a small |z|.
+    let fresnel = pow(1.0 - clamp(abs(normal.z), 0.0, 1.0), 3.0);
+    color = color + vec3<f32>(0.40, 0.50, 0.66) * fresnel * 0.55;
+
+    if (kind > 1.5) {
+        // Etched panel: recessed, with a bright machined lip.
+        let edge = min(uv, vec2<f32>(1.0) - uv);
+        let lip = 1.0 - smoothstep(0.0, 0.055, min(edge.x, edge.y));
+        color = color * 0.70;
+        color = color + vec3<f32>(0.48, 0.54, 0.62) * lip * 0.40;
+    } else if (kind > 0.5) {
+        // Chamfer: this is the seam, and it runs hot as the case charges.
+        let heat = seam * seam;
+        color = color + vec3<f32>(1.0, 0.62, 0.22) * heat * 2.0;
+        color = color + vec3<f32>(1.0, 0.90, 0.72) * heat * fresnel * 1.3;
+    }
+    return case_opaque(case_rolloff(color), input.color.a);
+}
+
+fn shade_case_ray(input: VertexOutput) -> vec4<f32> {
+    let along = clamp(input.material.y, 0.0, 1.0);
+    let across = clamp(1.0 - abs(input.material.z), 0.0, 1.0);
+    let softness = max(input.material.w, 0.2);
+    let intensity = max(input.material_extra.x, 0.0);
+    let index = input.material_extra.z;
+    let time = input.material_extra.w;
+
+    // Tapers to nothing at the tip and feathers off to the sides.
+    let body = pow(1.0 - along, 1.6) * pow(across, softness);
+    let shimmer = 0.70 + 0.30 * sin(time * 2.3 + index * 1.7 + along * 5.0);
+    let coverage = body * shimmer * input.color.a;
+    return case_emissive(input.color.rgb * intensity * coverage, coverage);
+}
+
+fn case_glyph_row_pair(input: VertexOutput, pair_index: i32) -> u32 {
+    var packed = input.material.y;
+    if (pair_index == 1) {
+        packed = input.material.z;
+    } else if (pair_index == 2) {
+        packed = input.material.w;
+    } else if (pair_index == 3) {
+        packed = input.material_extra.x;
+    }
+    return u32(max(packed, 0.0) + 0.5);
+}
+
+fn case_glyph_bit(input: VertexOutput, cell: vec2<i32>) -> f32 {
+    if (cell.x < 0 || cell.y < 0 || cell.x >= 8 || cell.y >= 8) {
+        return 0.0;
+    }
+    let packed = case_glyph_row_pair(input, cell.y / 2);
+    let shift = u32((cell.y % 2) * 8 + cell.x);
+    if ((packed & (1u << shift)) != 0u) {
+        return 1.0;
+    }
+    return 0.0;
+}
+
+/// Box-filters the bitmask over a 3x3 tap pattern. `radius` is in glyph cells,
+/// so at large sizes this anti-aliases the edge and at small sizes it acts as a
+/// minification filter, either way avoiding visible 8x8 blocks.
+fn case_glyph_coverage(input: VertexOutput, cell: vec2<f32>, radius: f32) -> f32 {
+    var total = 0.0;
+    for (var y: i32 = -1; y <= 1; y = y + 1) {
+        for (var x: i32 = -1; x <= 1; x = x + 1) {
+            let tap = cell + vec2<f32>(f32(x), f32(y)) * radius;
+            total = total + case_glyph_bit(input, vec2<i32>(i32(floor(tap.x)), i32(floor(tap.y))));
+        }
+    }
+    return total / 9.0;
+}
+
+fn shade_case_glyph(input: VertexOutput) -> vec4<f32> {
+    let cell = input.material_extra.yz;
+    let weight = input.material_extra.w;
+
+    // Pixel footprint in cell space, from the screen-space derivatives.
+    let span = vec2<f32>(
+        length(vec2<f32>(dpdx(cell.x), dpdy(cell.x))),
+        length(vec2<f32>(dpdx(cell.y), dpdy(cell.y)))
+    );
+    let radius = max(max(span.x, span.y) * 0.5, 0.03);
+
+    let fill = case_glyph_coverage(input, cell, radius);
+    // A dilated pass gives the dark outline that keeps text readable over
+    // whatever happens to be on the desktop.
+    let halo = case_glyph_coverage(input, cell, radius + 0.62);
+    if (fill + halo <= 0.002) {
+        return case_discard();
+    }
+
+    let outline = vec3<f32>(0.020, 0.026, 0.040);
+    var color = mix(outline, input.color.rgb * (1.0 + weight * 0.5), fill);
+    // Heavier weights bleed a little of their own colour into the outline.
+    color = color + input.color.rgb * weight * halo * (1.0 - fill) * 0.30;
+    let alpha = clamp(max(fill, halo * 0.88), 0.0, 1.0) * input.color.a;
+    return case_opaque(case_rolloff(color), alpha);
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    if (input.material.x > 13.5) {
+        return shade_case_glyph(input);
+    }
+    if (input.material.x > 12.5) {
+        return shade_case_ray(input);
+    }
+    if (input.material.x > 11.5) {
+        return shade_case_shell(input);
+    }
+    if (input.material.x > 10.5) {
+        return shade_case_card(input);
+    }
+    if (input.material.x > 9.5) {
+        return shade_case_glow(input);
+    }
+    if (input.material.x > 7.5) {
+        return shade_chat_glyph(input);
+    }
     if (input.material.x > 6.5) {
         let normal = normalize(input.material_extra.xyz);
         let key = clamp(dot(normal, normalize(vec3<f32>(-0.34, -0.46, 0.82))), 0.0, 1.0);
@@ -5098,19 +8141,20 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        let uniform_bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("screen-overlay-physics-uniform-layout"),
-            entries: &[wgpu::BindGroupLayoutEntry {
-                binding: 0,
-                visibility: wgpu::ShaderStages::VERTEX,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }],
-        });
+        let uniform_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("screen-overlay-physics-uniform-layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
         let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("screen-overlay-physics-uniform-bind-group"),
             layout: &uniform_bind_group_layout,
@@ -5120,11 +8164,12 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
             }],
         });
 
-        let render_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("screen-overlay-physics-pipeline-layout"),
-            bind_group_layouts: &[&uniform_bind_group_layout],
-            push_constant_ranges: &[],
-        });
+        let render_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("screen-overlay-physics-pipeline-layout"),
+                bind_group_layouts: &[&uniform_bind_group_layout],
+                push_constant_ranges: &[],
+            });
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("screen-overlay-physics-pipeline"),
             layout: Some(&render_pipeline_layout),
@@ -5219,12 +8264,14 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
                 self.surface
                     .get_current_texture()
                     .context("Failed to reacquire transparent surface")?
-            },
+            }
             Err(wgpu::SurfaceError::Timeout) => return Ok(()),
             Err(wgpu::SurfaceError::OutOfMemory) => anyhow::bail!("GPU surface ran out of memory"),
         };
 
-        let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -5311,13 +8358,20 @@ fn overlay_clear_color() -> wgpu::Color {
         r: 0.0,
         g: 0.0,
         b: 0.0,
-        a: if cfg!(target_os = "windows") { 1.0 } else { 0.0 },
+        a: if cfg!(target_os = "windows") {
+            1.0
+        } else {
+            0.0
+        },
     }
 }
 
 #[cfg(target_os = "windows")]
 struct WindowsD3dRenderer {
     hwnd: HWND,
+    is_visible: bool,
+    // Must be dropped before the D3D device whose pointer it borrows.
+    spout_sender: Option<spout2::dx::Sender>,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     dxgi_device: IDXGIDevice,
@@ -5336,6 +8390,11 @@ struct WindowsD3dRenderer {
     rasterizer_state: ID3D11RasterizerState,
     uniform_buffer: ID3D11Buffer,
     shatter_texture_view: ID3D11ShaderResourceView,
+    chat_atlas_view: ID3D11ShaderResourceView,
+    chat_atlas_texture: ID3D11Texture2D,
+    chat_atlas_pixels: Vec<u8>,
+    chat_image_slots: HashMap<String, u16>,
+    chat_animations: Vec<ChatAtlasAnimation>,
     shatter_sampler: ID3D11SamplerState,
     vertex_buffer: Option<ID3D11Buffer>,
     vertex_capacity: usize,
@@ -5344,23 +8403,128 @@ struct WindowsD3dRenderer {
 }
 
 #[cfg(target_os = "windows")]
+struct ChatAtlasAnimation {
+    slot: u16,
+    frames: Vec<Vec<u8>>,
+    frame_seconds: Vec<f64>,
+    frame_index: usize,
+    next_frame_at: f64,
+}
+
+#[cfg(target_os = "windows")]
+fn advance_chat_animation(animation: &mut ChatAtlasAnimation, now: f64) -> bool {
+    if animation.next_frame_at == 0.0 {
+        animation.next_frame_at = now + animation.frame_seconds[animation.frame_index];
+        return false;
+    }
+    if now < animation.next_frame_at {
+        return false;
+    }
+    animation.frame_index = (animation.frame_index + 1) % animation.frames.len();
+    animation.next_frame_at = now + animation.frame_seconds[animation.frame_index];
+    true
+}
+
+#[cfg(target_os = "windows")]
+const SPOUT_SENDER_NAME: &str = "ScreenOverlayPhysics";
+#[cfg(target_os = "windows")]
+const CHAT_IMAGE_ATLAS_CELLS: u16 = 16;
+#[cfg(target_os = "windows")]
+const CHAT_IMAGE_ATLAS_CELL_SIZE: u32 = 64;
+#[cfg(target_os = "windows")]
+const CHAT_IMAGE_ATLAS_SIZE: u32 = CHAT_IMAGE_ATLAS_CELLS as u32 * CHAT_IMAGE_ATLAS_CELL_SIZE;
+
+#[cfg(target_os = "windows")]
+fn download_chat_image(url: &str) -> Result<Vec<u8>> {
+    Ok(reqwest::blocking::get(url)
+        .with_context(|| format!("Failed to fetch chat image {url}"))?
+        .error_for_status()
+        .with_context(|| format!("Chat image request failed for {url}"))?
+        .bytes()
+        .context("Failed to read chat image response")?
+        .to_vec())
+}
+
+#[cfg(target_os = "windows")]
+fn chat_image_cell_pixels(rgba: image::RgbaImage) -> Vec<u8> {
+    let rgba = image::DynamicImage::ImageRgba8(rgba)
+        .resize_exact(
+            CHAT_IMAGE_ATLAS_CELL_SIZE,
+            CHAT_IMAGE_ATLAS_CELL_SIZE,
+            image::imageops::FilterType::Lanczos3,
+        )
+        .to_rgba8();
+    let mut pixels =
+        Vec::with_capacity((CHAT_IMAGE_ATLAS_CELL_SIZE * CHAT_IMAGE_ATLAS_CELL_SIZE * 4) as usize);
+    for source in rgba.pixels() {
+        let alpha = source[3] as u16;
+        let premultiply = |channel: u8| ((channel as u16 * alpha + 127) / 255) as u8;
+        pixels.extend_from_slice(&[
+            premultiply(source[2]),
+            premultiply(source[1]),
+            premultiply(source[0]),
+            source[3],
+        ]);
+    }
+    pixels
+}
+
+#[cfg(target_os = "windows")]
+fn write_chat_atlas_cell(atlas: &mut [u8], slot: u16, cell: &[u8]) {
+    let column = slot as u32 % CHAT_IMAGE_ATLAS_CELLS as u32;
+    let row = slot as u32 / CHAT_IMAGE_ATLAS_CELLS as u32;
+    let row_bytes = CHAT_IMAGE_ATLAS_CELL_SIZE as usize * 4;
+    for y in 0..CHAT_IMAGE_ATLAS_CELL_SIZE {
+        let atlas_x = column * CHAT_IMAGE_ATLAS_CELL_SIZE;
+        let atlas_y = row * CHAT_IMAGE_ATLAS_CELL_SIZE + y;
+        let target = ((atlas_y * CHAT_IMAGE_ATLAS_SIZE + atlas_x) * 4) as usize;
+        let source = y as usize * row_bytes;
+        atlas[target..target + row_bytes].copy_from_slice(&cell[source..source + row_bytes]);
+    }
+}
+
+#[cfg(target_os = "windows")]
 impl WindowsD3dRenderer {
     fn new(bounds: RectF) -> Result<Self> {
-        let hwnd = create_dcomp_overlay_window(bounds).context("Failed to create DirectComposition overlay window")?;
-        let (device, context) = create_d3d_device().context("Failed to create Direct3D 11 device")?;
+        let hwnd = create_dcomp_overlay_window(bounds)
+            .context("Failed to create DirectComposition overlay window")?;
+        let (device, context) =
+            create_d3d_device().context("Failed to create Direct3D 11 device")?;
         let dxgi_device: IDXGIDevice = device.cast().context("Failed to query IDXGIDevice")?;
-        let factory: IDXGIFactory2 = unsafe { CreateDXGIFactory1().context("Failed to create DXGI factory")? };
-        let dcomp_device: IDCompositionDevice =
-            unsafe { DCompositionCreateDevice(&dxgi_device).context("Failed to create DirectComposition device")? };
-        let (vertex_shader, pixel_shader, input_layout, blend_state, depth_stencil_state, rasterizer_state) =
-            create_d3d_pipeline(&device).context("Failed to create Direct3D pipeline")?;
-        let uniform_buffer = create_d3d_uniform_buffer(&device).context("Failed to create Direct3D uniform buffer")?;
+        let factory: IDXGIFactory2 =
+            unsafe { CreateDXGIFactory1().context("Failed to create DXGI factory")? };
+        let dcomp_device: IDCompositionDevice = unsafe {
+            DCompositionCreateDevice(&dxgi_device)
+                .context("Failed to create DirectComposition device")?
+        };
+        let (
+            vertex_shader,
+            pixel_shader,
+            input_layout,
+            blend_state,
+            depth_stencil_state,
+            rasterizer_state,
+        ) = create_d3d_pipeline(&device).context("Failed to create Direct3D pipeline")?;
+        let uniform_buffer = create_d3d_uniform_buffer(&device)
+            .context("Failed to create Direct3D uniform buffer")?;
         let shatter_texture_view = create_d3d_texture_view(&device, &[43, 43, 45, 255], 1, 1)
             .context("Failed to create fallback shatter texture")?;
-        let shatter_sampler = create_d3d_sampler(&device).context("Failed to create shatter sampler")?;
+        let chat_atlas_pixels =
+            vec![0; CHAT_IMAGE_ATLAS_SIZE as usize * CHAT_IMAGE_ATLAS_SIZE as usize * 4];
+        let (chat_atlas_texture, chat_atlas_view) = create_d3d_updatable_texture(
+            &device,
+            &chat_atlas_pixels,
+            CHAT_IMAGE_ATLAS_SIZE,
+            CHAT_IMAGE_ATLAS_SIZE,
+        )
+        .context("Failed to create chat image atlas")?;
+        let shatter_sampler =
+            create_d3d_sampler(&device).context("Failed to create shatter sampler")?;
 
         let mut renderer = Self {
             hwnd,
+            is_visible: false,
+            spout_sender: None,
             device,
             context,
             dxgi_device,
@@ -5379,6 +8543,11 @@ impl WindowsD3dRenderer {
             rasterizer_state,
             uniform_buffer,
             shatter_texture_view,
+            chat_atlas_view,
+            chat_atlas_texture,
+            chat_atlas_pixels,
+            chat_image_slots: HashMap::new(),
+            chat_animations: Vec::new(),
             shatter_sampler,
             vertex_buffer: None,
             vertex_capacity: 0,
@@ -5416,8 +8585,12 @@ impl WindowsD3dRenderer {
 
         let clear = [0.0f32, 0.0, 0.0, 0.0];
         unsafe {
-            self.context
-                .ClearRenderTargetView(self.render_target.as_ref().context("Missing D3D render target")?, &clear);
+            self.context.ClearRenderTargetView(
+                self.render_target
+                    .as_ref()
+                    .context("Missing D3D render target")?,
+                &clear,
+            );
             self.context.ClearDepthStencilView(
                 self.depth_view.as_ref().context("Missing D3D depth view")?,
                 D3D11_CLEAR_DEPTH.0 as u32,
@@ -5429,14 +8602,148 @@ impl WindowsD3dRenderer {
             }
         }
 
+        if let Err(error) = self.send_spout_frame() {
+            eprintln!("Spout output disabled after a send failure: {error:#}");
+            self.spout_sender = None;
+        }
+
         let Some(swap_chain) = &self.swap_chain else {
             anyhow::bail!("Missing D3D swap chain");
         };
         let present = unsafe { swap_chain.Present(0, 0) };
-        if present == HRESULT(0x087A0001u32 as i32) {
+        if present != HRESULT(0x087A0001u32 as i32) {
+            present.ok().context("Direct3D swap chain present failed")?;
+        }
+        if !self.is_visible {
+            unsafe {
+                ShowWindow(self.hwnd, SW_SHOWNA);
+            }
+            self.is_visible = true;
+        }
+        Ok(())
+    }
+
+    fn ensure_chat_image(&mut self, key: &str, url: &str, animated: bool) -> Result<u16> {
+        if let Some(slot) = self.chat_image_slots.get(key) {
+            return Ok(*slot);
+        }
+        let slot = (self.chat_image_slots.len() + 1) as u16;
+        if slot >= CHAT_IMAGE_ATLAS_CELLS * CHAT_IMAGE_ATLAS_CELLS {
+            anyhow::bail!("Chat image atlas is full");
+        }
+        let bytes = download_chat_image(url).or_else(|error| {
+            if animated {
+                let static_url = url.replace("/animated/", "/static/");
+                download_chat_image(&static_url).context(error)
+            } else {
+                Err(error)
+            }
+        })?;
+        let mut animation = None;
+        let first_frame = if animated {
+            use image::AnimationDecoder;
+            match image::codecs::gif::GifDecoder::new(std::io::Cursor::new(bytes.as_slice()))
+                .and_then(|decoder| decoder.into_frames().collect_frames())
+            {
+                Ok(decoded) if !decoded.is_empty() => {
+                    let mut frames = Vec::with_capacity(decoded.len());
+                    let mut frame_seconds = Vec::with_capacity(decoded.len());
+                    for frame in decoded {
+                        let (numerator, denominator) = frame.delay().numer_denom_ms();
+                        frame_seconds.push(
+                            (numerator as f64 / denominator.max(1) as f64 / 1_000.0)
+                                .clamp(0.02, 10.0),
+                        );
+                        frames.push(chat_image_cell_pixels(frame.into_buffer()));
+                    }
+                    let first = frames[0].clone();
+                    animation = Some(ChatAtlasAnimation {
+                        slot,
+                        frames,
+                        frame_seconds,
+                        frame_index: 0,
+                        next_frame_at: 0.0,
+                    });
+                    first
+                }
+                _ => chat_image_cell_pixels(
+                    image::load_from_memory(&bytes)
+                        .context("Failed to decode chat image")?
+                        .to_rgba8(),
+                ),
+            }
+        } else {
+            chat_image_cell_pixels(
+                image::load_from_memory(&bytes)
+                    .context("Failed to decode chat image")?
+                    .to_rgba8(),
+            )
+        };
+        write_chat_atlas_cell(&mut self.chat_atlas_pixels, slot, &first_frame);
+        update_d3d_chat_cell(&self.context, &self.chat_atlas_texture, slot, &first_frame);
+        self.chat_image_slots.insert(key.to_string(), slot);
+        if let Some(animation) = animation {
+            self.chat_animations.push(animation);
+        }
+        Ok(slot)
+    }
+
+    fn update_chat_animations(&mut self, now: f64) -> Result<()> {
+        let mut changed = false;
+        for animation in &mut self.chat_animations {
+            if advance_chat_animation(animation, now) {
+                write_chat_atlas_cell(
+                    &mut self.chat_atlas_pixels,
+                    animation.slot,
+                    &animation.frames[animation.frame_index],
+                );
+                changed = true;
+            }
+        }
+        if changed {
+            for animation in &self.chat_animations {
+                update_d3d_chat_cell(
+                    &self.context,
+                    &self.chat_atlas_texture,
+                    animation.slot,
+                    &animation.frames[animation.frame_index],
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn set_spout_enabled(&mut self, enabled: bool) -> Result<()> {
+        if !enabled {
+            self.spout_sender = None;
             return Ok(());
         }
-        present.ok().context("Direct3D swap chain present failed")
+        if self.spout_sender.is_some() {
+            return Ok(());
+        }
+
+        // The sender borrows this renderer's D3D11 device. It is declared
+        // before `device`, so Rust releases the sender first during field drop.
+        let device = self.device.as_raw() as *mut c_void;
+        let mut sender = unsafe { spout2::dx::Sender::with_device(SPOUT_SENDER_NAME, device) }
+            .context("Failed to initialize Spout2 with the renderer D3D11 device")?;
+        sender.set_format(spout2::dx::format::B8G8R8A8_UNORM);
+        self.spout_sender = Some(sender);
+        Ok(())
+    }
+
+    fn send_spout_frame(&mut self) -> Result<()> {
+        let Some(sender) = &mut self.spout_sender else {
+            return Ok(());
+        };
+        let swap_chain = self.swap_chain.as_ref().context("Missing D3D swap chain")?;
+        let back_buffer: ID3D11Texture2D = unsafe {
+            swap_chain
+                .GetBuffer(0)
+                .context("Failed to get Direct3D back buffer for Spout")?
+        };
+        unsafe { sender.send_texture(back_buffer.as_raw() as *mut c_void) }
+            .context("Failed to publish the Direct3D frame through Spout2")
     }
 
     fn capture_screen_texture(&mut self, bounds: RectF) -> Result<()> {
@@ -5500,7 +8807,10 @@ impl WindowsD3dRenderer {
             Height: height,
             Format: DXGI_FORMAT_B8G8R8A8_UNORM,
             Stereo: BOOL(0),
-            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
             BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
             BufferCount: 2,
             Scaling: DXGI_SCALING_STRETCH,
@@ -5538,14 +8848,19 @@ impl WindowsD3dRenderer {
 
     fn create_render_target(&mut self, width: u32, height: u32) -> Result<()> {
         let swap_chain = self.swap_chain.as_ref().context("Missing D3D swap chain")?;
-        let back_buffer: ID3D11Texture2D = unsafe { swap_chain.GetBuffer(0).context("Failed to get swap chain buffer")? };
+        let back_buffer: ID3D11Texture2D = unsafe {
+            swap_chain
+                .GetBuffer(0)
+                .context("Failed to get swap chain buffer")?
+        };
         let mut render_target = None;
         unsafe {
             self.device
                 .CreateRenderTargetView(&back_buffer, None, Some(&mut render_target))
                 .context("Failed to create render target view")?;
         }
-        self.render_target = Some(render_target.context("CreateRenderTargetView returned no target")?);
+        self.render_target =
+            Some(render_target.context("CreateRenderTargetView returned no target")?);
         self.depth_view = Some(create_d3d_depth_view(&self.device, width, height)?);
         self.width = width;
         self.height = height;
@@ -5584,7 +8899,13 @@ impl WindowsD3dRenderer {
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         unsafe {
             self.context
-                .Map(&self.uniform_buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(&mut mapped))
+                .Map(
+                    &self.uniform_buffer,
+                    0,
+                    D3D11_MAP_WRITE_DISCARD,
+                    0,
+                    Some(&mut mapped),
+                )
                 .context("Failed to map D3D uniform buffer")?;
             std::ptr::copy_nonoverlapping(
                 (&uniforms as *const RenderUniforms).cast::<u8>(),
@@ -5601,7 +8922,10 @@ impl WindowsD3dRenderer {
             return Ok(());
         }
 
-        let buffer = self.vertex_buffer.as_ref().context("Missing D3D vertex buffer")?;
+        let buffer = self
+            .vertex_buffer
+            .as_ref()
+            .context("Missing D3D vertex buffer")?;
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         unsafe {
             self.context
@@ -5635,13 +8959,18 @@ impl WindowsD3dRenderer {
         let strides = [stride];
         let offsets = [offset];
         let constant_buffers = [Some(self.uniform_buffer.clone())];
-        let shader_resources = [Some(self.shatter_texture_view.clone())];
+        let shader_resources = [
+            Some(self.shatter_texture_view.clone()),
+            Some(self.chat_atlas_view.clone()),
+        ];
         let samplers = [Some(self.shatter_sampler.clone())];
 
         unsafe {
-            self.context.OMSetRenderTargets(Some(&[render_target]), depth_view.as_ref());
+            self.context
+                .OMSetRenderTargets(Some(&[render_target]), depth_view.as_ref());
             self.context.RSSetViewports(Some(&[viewport]));
-            self.context.IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+            self.context
+                .IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             self.context.IASetInputLayout(&self.input_layout);
             self.context.IASetVertexBuffers(
                 0,
@@ -5651,9 +8980,11 @@ impl WindowsD3dRenderer {
                 Some(offsets.as_ptr()),
             );
             self.context.VSSetShader(&self.vertex_shader, None);
-            self.context.VSSetConstantBuffers(0, Some(&constant_buffers));
+            self.context
+                .VSSetConstantBuffers(0, Some(&constant_buffers));
             self.context.PSSetShader(&self.pixel_shader, None);
-            self.context.PSSetShaderResources(0, Some(&shader_resources));
+            self.context
+                .PSSetShaderResources(0, Some(&shader_resources));
             self.context.PSSetSamplers(0, Some(&samplers));
             self.context
                 .OMSetBlendState(&self.blend_state, Some(&blend_factor), u32::MAX);
@@ -5700,13 +9031,17 @@ fn create_dcomp_overlay_window(bounds: RectF) -> Result<HWND> {
         if hwnd.0 == 0 {
             anyhow::bail!("CreateWindowExW failed for DirectComposition overlay");
         }
-        ShowWindow(hwnd, SW_SHOWNA);
         Ok(hwnd)
     }
 }
 
 #[cfg(target_os = "windows")]
-extern "system" fn dcomp_overlay_wnd_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+extern "system" fn dcomp_overlay_wnd_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
     unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
 }
 
@@ -5767,14 +9102,21 @@ fn create_d3d_uniform_buffer(device: &ID3D11Device) -> Result<ID3D11Buffer> {
 }
 
 #[cfg(target_os = "windows")]
-fn create_d3d_depth_view(device: &ID3D11Device, width: u32, height: u32) -> Result<ID3D11DepthStencilView> {
+fn create_d3d_depth_view(
+    device: &ID3D11Device,
+    width: u32,
+    height: u32,
+) -> Result<ID3D11DepthStencilView> {
     let desc = D3D11_TEXTURE2D_DESC {
         Width: width.max(1),
         Height: height.max(1),
         MipLevels: 1,
         ArraySize: 1,
         Format: DXGI_FORMAT_D32_FLOAT,
-        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
         Usage: D3D11_USAGE_DEFAULT,
         BindFlags: D3D11_BIND_DEPTH_STENCIL.0 as u32,
         CPUAccessFlags: 0,
@@ -5831,7 +9173,9 @@ fn capture_desktop_bgra(bounds: RectF) -> Result<DesktopCapture> {
         }
 
         let previous = SelectObject(memory_dc, HGDIOBJ(bitmap.0));
-        if let Err(error) = BitBlt(memory_dc, 0, 0, width, height, screen_dc, source_x, source_y, SRCCOPY) {
+        if let Err(error) = BitBlt(
+            memory_dc, 0, 0, width, height, screen_dc, source_x, source_y, SRCCOPY,
+        ) {
             SelectObject(memory_dc, previous);
             DeleteObject(HGDIOBJ(bitmap.0));
             DeleteDC(memory_dc);
@@ -5906,7 +9250,10 @@ fn create_d3d_texture_view(
         MipLevels: 1,
         ArraySize: 1,
         Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
         Usage: D3D11_USAGE_IMMUTABLE,
         BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
         CPUAccessFlags: 0,
@@ -5931,6 +9278,80 @@ fn create_d3d_texture_view(
             .context("Failed to create D3D shatter texture view")?;
     }
     view.context("CreateShaderResourceView returned no shatter texture view")
+}
+
+#[cfg(target_os = "windows")]
+fn create_d3d_updatable_texture(
+    device: &ID3D11Device,
+    pixels_bgra: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<(ID3D11Texture2D, ID3D11ShaderResourceView)> {
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: width,
+        Height: height,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: DXGI_FORMAT_B8G8R8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC {
+            Count: 1,
+            Quality: 0,
+        },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+        ..Default::default()
+    };
+    let initial_data = D3D11_SUBRESOURCE_DATA {
+        pSysMem: pixels_bgra.as_ptr().cast(),
+        SysMemPitch: width * 4,
+        SysMemSlicePitch: width * height * 4,
+    };
+    let mut texture = None;
+    unsafe {
+        device
+            .CreateTexture2D(&desc, Some(&initial_data), Some(&mut texture))
+            .context("Failed to create updateable chat atlas")?;
+    }
+    let texture = texture.context("CreateTexture2D returned no chat atlas")?;
+    let mut view = None;
+    unsafe {
+        device
+            .CreateShaderResourceView(&texture, None, Some(&mut view))
+            .context("Failed to create chat atlas view")?;
+    }
+    Ok((
+        texture,
+        view.context("CreateShaderResourceView returned no chat atlas view")?,
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn update_d3d_chat_cell(
+    context: &ID3D11DeviceContext,
+    texture: &ID3D11Texture2D,
+    slot: u16,
+    pixels: &[u8],
+) {
+    let column = slot as u32 % CHAT_IMAGE_ATLAS_CELLS as u32;
+    let row = slot as u32 / CHAT_IMAGE_ATLAS_CELLS as u32;
+    let bounds = D3D11_BOX {
+        left: column * CHAT_IMAGE_ATLAS_CELL_SIZE,
+        top: row * CHAT_IMAGE_ATLAS_CELL_SIZE,
+        front: 0,
+        right: (column + 1) * CHAT_IMAGE_ATLAS_CELL_SIZE,
+        bottom: (row + 1) * CHAT_IMAGE_ATLAS_CELL_SIZE,
+        back: 1,
+    };
+    unsafe {
+        context.UpdateSubresource(
+            texture,
+            0,
+            Some(&bounds),
+            pixels.as_ptr().cast(),
+            CHAT_IMAGE_ATLAS_CELL_SIZE * 4,
+            0,
+        );
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -5966,6 +9387,7 @@ fn create_d3d_pipeline(
 )> {
     let shader_source = br#"
 Texture2D shatter_texture : register(t0);
+Texture2D chat_image_atlas : register(t1);
 SamplerState shatter_sampler : register(s0);
 
 cbuffer RenderUniforms : register(b0) {
@@ -6410,7 +9832,330 @@ float4 shade_screen_shard(PSInput input) {
     return float4(color, 1.0f);
 }
 
+uint chat_packed_row_pair(PSInput input, int pair_index) {
+    float packed = input.material.y;
+    if (pair_index == 1) {
+        packed = input.material.z;
+    } else if (pair_index == 2) {
+        packed = input.material.w;
+    } else if (pair_index == 3) {
+        packed = input.material_extra.x;
+    }
+    return (uint)(max(packed, 0.0f) + 0.5f);
+}
+
+bool chat_glyph_filled(PSInput input, int2 cell) {
+    if (cell.x < 0 || cell.y < 0 || cell.x >= 8 || cell.y >= 8) {
+        return false;
+    }
+    uint packed = chat_packed_row_pair(input, cell.y / 2);
+    uint shift = (uint)((cell.y % 2) * 8 + cell.x);
+    return (packed & (1u << shift)) != 0u;
+}
+
+bool chat_glyph_mask(PSInput input, float2 uv) {
+    int2 center_cell = (int2)floor(uv);
+    if (chat_glyph_filled(input, center_cell)) {
+        return true;
+    }
+    [unroll]
+    for (int row_offset = -1; row_offset <= 1; ++row_offset) {
+        [unroll]
+        for (int column_offset = -1; column_offset <= 1; ++column_offset) {
+            int2 cell = center_cell + int2(column_offset, row_offset);
+            if (chat_glyph_filled(input, cell)) {
+                float2 cell_min = (float2)cell;
+                float2 cell_max = cell_min + 1.0f;
+                float2 outside = max(max(cell_min - uv, uv - cell_max), 0.0f);
+                if (length(outside) <= 0.42f) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+float2 chat_extrusion_offset(PSInput input) {
+    uint packed = (uint)(max(input.material_extra.w, 0.0f) + 0.5f);
+    int x = (int)(packed & 255u) - 128;
+    int y = (int)((packed >> 8u) & 255u) - 128;
+    return float2((float)x, (float)y) / 16.0f;
+}
+
+float4 shade_chat_glyph(PSInput input) {
+    float2 uv = input.material_extra.yz;
+    int2 center_cell = (int2)floor(uv);
+    if (chat_glyph_filled(input, center_cell)) {
+        return float4(input.color.rgb * input.color.a, input.color.a);
+    }
+    float3 outline_color = float3(7.0f / 255.0f, 8.0f / 255.0f, 12.0f / 255.0f);
+    if (chat_glyph_mask(input, uv)) {
+        return float4(outline_color * input.color.a, input.color.a);
+    }
+    float2 extrusion = chat_extrusion_offset(input);
+    [unroll]
+    for (int layer = 1; layer <= 4; ++layer) {
+        float2 sample_uv = uv - extrusion * ((float)layer * 0.25f);
+        if (chat_glyph_filled(input, (int2)floor(sample_uv))) {
+            return float4(outline_color * (0.72f * input.color.a), input.color.a);
+        }
+    }
+    clip(-1.0f);
+    return 0.0f;
+}
+
+// ---------------------------------------------------------------------------
+// Case opening materials (ids 10-14). See renderer/src/case_opening.rs for the
+// packing contract. This target blends premultiplied (ONE / INV_SRC_ALPHA), so
+// returning more colour than alpha reads as additive.
+// ---------------------------------------------------------------------------
+
+/// `color` is premultiplied brightness, so it must already be scaled by
+/// `coverage`. A glow that keeps any brightness where coverage reaches zero
+/// draws its own quad as a hard-edged block.
+float4 case_emissive(float3 color, float coverage) {
+    return float4(max(color, 0.0f), saturate(coverage));
+}
+
+float4 case_opaque(float3 color, float alpha) {
+    float a = saturate(alpha);
+    return float4(saturate(color) * a, a);
+}
+
+/// Fully transparent, which the premultiplied blend leaves as a no-op. Cheaper
+/// than clip() because it does not break early-Z for the rest of the frame.
+float4 case_discard() {
+    return float4(0.0f, 0.0f, 0.0f, 0.0f);
+}
+
+/// Soft highlight rolloff so hot seams and winner cards compress instead of
+/// clipping to flat white.
+float3 case_rolloff(float3 color) {
+    return (color / (1.0f + color * 0.22f)) * 1.22f;
+}
+
+float case_hash(float2 seed) {
+    return frac(sin(dot(seed, float2(41.31f, 289.17f))) * 43758.5453f);
+}
+
+float4 shade_case_glow(PSInput input) {
+    float2 uv = input.material.yz;
+    float shape = input.material.w;
+    float intensity = max(input.material_extra.x, 0.0f);
+    float falloff = max(input.material_extra.y, 0.05f);
+    float variant = input.material_extra.z;
+    float time = input.material_extra.w;
+    float master = input.color.a;
+
+    if (shape > 2.5f) {
+        // Band: bright down the middle of the thin axis.
+        float across = pow(saturate(1.0f - abs(uv.x)), falloff);
+        // Optional end taper, off for ring segments that must join seamlessly.
+        float along = lerp(
+            1.0f,
+            smoothstep(0.0f, 0.10f, uv.y) * (1.0f - smoothstep(0.90f, 1.0f, uv.y)),
+            saturate(variant)
+        );
+        float coverage = across * along * master;
+        return case_emissive(input.color.rgb * intensity * coverage, coverage);
+    }
+    if (shape > 1.5f) {
+        // Rounded box, used for card auras and rarity bars.
+        float2 inside = saturate(1.0f - abs(uv));
+        float coverage = pow(inside.x * inside.y, falloff) * master;
+        return case_emissive(input.color.rgb * intensity * coverage, coverage);
+    }
+    if (shape > 0.5f) {
+        // Vignette: darkens outward, and never lets the middle go fully clear.
+        float radius = length(uv);
+        float shade = 0.34f + 0.66f * smoothstep(0.10f, 1.24f, radius);
+        return case_opaque(input.color.rgb, shade * master);
+    }
+    // Round sprite. Particles flicker so a spark field never looks static.
+    float radius = length(uv);
+    float body = pow(saturate(1.0f - radius), falloff);
+    float core = pow(saturate(1.0f - radius), falloff * 3.5f);
+    float flicker = 0.80f + 0.20f * sin(time * 31.0f + variant * 57.0f);
+    float3 color = input.color.rgb * intensity * flicker + core * 0.55f;
+    float coverage = saturate(body * 0.75f + core * 0.5f) * master;
+    return case_emissive(color * coverage, coverage);
+}
+
+float4 shade_case_card(PSInput input) {
+    float2 uv = input.material.yz;
+    float tier = saturate(input.material.w);
+    float time = input.material_extra.x;
+    float highlight = saturate(input.material_extra.y);
+    float seed = input.material_extra.z;
+    float dim = saturate(input.material_extra.w);
+    float3 rarity = input.color.rgb;
+
+    // Base gradient: cold slate at the top warming into the rarity colour.
+    float3 color = lerp(float3(0.052f, 0.062f, 0.084f), rarity * 0.30f, pow(uv.y, 1.5f));
+
+    // Pool of rarity light behind the badge.
+    float pool = saturate(1.0f - length((uv - float2(0.5f, 0.40f)) * float2(1.30f, 1.55f)));
+    color += rarity * pow(pool, 2.2f) * (0.30f + tier * 0.55f);
+
+    // Brushed grain plus fine scanlines.
+    color *= 0.93f + case_hash(float2(uv.x * 37.0f, uv.y * 173.0f + seed * 19.0f)) * 0.14f;
+    color *= 0.965f + 0.035f * sin(uv.y * 250.0f);
+
+    // Holographic sheen sweeping diagonally, faster and hotter on the winner.
+    // Kept well below white even on the winner: the badge and prize name are
+    // drawn on top in white and have to stay readable through it.
+    float sweep = frac((uv.x + uv.y) * 0.5f - time * (0.15f + highlight * 0.4f) + seed);
+    float sheen = pow(saturate(1.0f - abs(sweep - 0.5f) * 5.5f), 3.0f);
+    color += (rarity * 0.7f + 0.3f) * sheen * (0.09f + highlight * 0.22f);
+
+    // Inner border and the diagonal corner cut from the in-game item frame.
+    float2 edge = min(uv, 1.0f - uv);
+    float nearest = min(edge.x, edge.y);
+    float border = 1.0f - smoothstep(0.009f, 0.022f, nearest);
+    color = lerp(color, rarity * (1.15f + highlight * 0.9f), border * (0.55f + highlight * 0.45f));
+    color += rarity * saturate(1.0f - (uv.x + uv.y) * 7.0f) * 0.5f;
+
+    // Edge falloff so the face reads as inset rather than printed on.
+    color *= 0.64f + smoothstep(0.0f, 0.13f, nearest) * 0.36f;
+
+    color *= 0.42f + dim * 0.58f;
+    color *= 1.0f + highlight * 0.22f;
+    return case_opaque(case_rolloff(color), input.color.a);
+}
+
+float4 shade_case_shell(PSInput input) {
+    float2 uv = input.material.yz;
+    float seam = saturate(input.material.w);
+    float3 normal = input.material_extra.xyz;
+    float kind = input.material_extra.w;
+    float3 color = input.color.rgb;
+
+    // Brushed metal: coarse streaks with a finer ripple over the top.
+    color *= 0.90f + case_hash(float2(floor(uv.y * 96.0f), 3.0f)) * 0.19f;
+    color *= 0.97f + 0.055f * sin(uv.y * 380.0f + uv.x * 7.0f);
+
+    // Fresnel from the view-space normal: the eye looks along the basis' +Z,
+    // so grazing surfaces have a small |z|.
+    float fresnel = pow(1.0f - saturate(abs(normal.z)), 3.0f);
+    color += float3(0.40f, 0.50f, 0.66f) * fresnel * 0.55f;
+
+    if (kind > 1.5f) {
+        // Etched panel: recessed, with a bright machined lip.
+        float2 edge = min(uv, 1.0f - uv);
+        float lip = 1.0f - smoothstep(0.0f, 0.055f, min(edge.x, edge.y));
+        color *= 0.70f;
+        color += float3(0.48f, 0.54f, 0.62f) * lip * 0.40f;
+    } else if (kind > 0.5f) {
+        // Chamfer: this is the seam, and it runs hot as the case charges.
+        float heat = seam * seam;
+        color += float3(1.0f, 0.62f, 0.22f) * heat * 2.0f;
+        color += float3(1.0f, 0.90f, 0.72f) * heat * fresnel * 1.3f;
+    }
+    return case_opaque(case_rolloff(color), input.color.a);
+}
+
+float4 shade_case_ray(PSInput input) {
+    float along = saturate(input.material.y);
+    float across = saturate(1.0f - abs(input.material.z));
+    float softness = max(input.material.w, 0.2f);
+    float intensity = max(input.material_extra.x, 0.0f);
+    float index = input.material_extra.z;
+    float time = input.material_extra.w;
+
+    // Tapers to nothing at the tip and feathers off to the sides.
+    float body = pow(1.0f - along, 1.6f) * pow(across, softness);
+    float shimmer = 0.70f + 0.30f * sin(time * 2.3f + index * 1.7f + along * 5.0f);
+    float coverage = body * shimmer * input.color.a;
+    return case_emissive(input.color.rgb * intensity * coverage, coverage);
+}
+
+uint case_glyph_row_pair(PSInput input, int pair_index) {
+    float packed = input.material.y;
+    if (pair_index == 1) {
+        packed = input.material.z;
+    } else if (pair_index == 2) {
+        packed = input.material.w;
+    } else if (pair_index == 3) {
+        packed = input.material_extra.x;
+    }
+    return (uint)(max(packed, 0.0f) + 0.5f);
+}
+
+float case_glyph_bit(PSInput input, int2 cell) {
+    if (cell.x < 0 || cell.y < 0 || cell.x >= 8 || cell.y >= 8) {
+        return 0.0f;
+    }
+    uint packed = case_glyph_row_pair(input, cell.y / 2);
+    uint shift = (uint)((cell.y % 2) * 8 + cell.x);
+    return (packed & (1u << shift)) != 0u ? 1.0f : 0.0f;
+}
+
+/// Box-filters the bitmask over a 3x3 tap pattern. `radius` is in glyph cells,
+/// so at large sizes this anti-aliases the edge and at small sizes it acts as a
+/// minification filter, either way avoiding visible 8x8 blocks.
+float case_glyph_coverage(PSInput input, float2 cell, float radius) {
+    float total = 0.0f;
+    [unroll]
+    for (int y = -1; y <= 1; ++y) {
+        [unroll]
+        for (int x = -1; x <= 1; ++x) {
+            float2 tap = cell + float2((float)x, (float)y) * radius;
+            total += case_glyph_bit(input, int2((int)floor(tap.x), (int)floor(tap.y)));
+        }
+    }
+    return total / 9.0f;
+}
+
+float4 shade_case_glyph(PSInput input) {
+    float2 cell = input.material_extra.yz;
+    float weight = input.material_extra.w;
+
+    // Pixel footprint in cell space, from the screen-space derivatives.
+    float2 span = float2(
+        length(float2(ddx(cell.x), ddy(cell.x))),
+        length(float2(ddx(cell.y), ddy(cell.y)))
+    );
+    float radius = max(max(span.x, span.y) * 0.5f, 0.03f);
+
+    float fill = case_glyph_coverage(input, cell, radius);
+    // A dilated pass gives the dark outline that keeps text readable over
+    // whatever happens to be on the desktop.
+    float halo = case_glyph_coverage(input, cell, radius + 0.62f);
+    if (fill + halo <= 0.002f) {
+        return case_discard();
+    }
+
+    float3 outline = float3(0.020f, 0.026f, 0.040f);
+    float3 color = lerp(outline, input.color.rgb * (1.0f + weight * 0.5f), fill);
+    // Heavier weights bleed a little of their own colour into the outline.
+    color += input.color.rgb * weight * halo * (1.0f - fill) * 0.30f;
+    float alpha = saturate(max(fill, halo * 0.88f)) * input.color.a;
+    return case_opaque(case_rolloff(color), alpha);
+}
+
 float4 ps_main(PSInput input) : SV_TARGET {
+    if (input.material.x > 13.5f) {
+        return shade_case_glyph(input);
+    }
+    if (input.material.x > 12.5f) {
+        return shade_case_ray(input);
+    }
+    if (input.material.x > 11.5f) {
+        return shade_case_shell(input);
+    }
+    if (input.material.x > 10.5f) {
+        return shade_case_card(input);
+    }
+    if (input.material.x > 9.5f) {
+        return shade_case_glow(input);
+    }
+    if (input.material.x > 8.5f) {
+        return chat_image_atlas.Sample(shatter_sampler, input.material.yz) * input.color.a;
+    }
+    if (input.material.x > 7.5f) {
+        return shade_chat_glyph(input);
+    }
     if (input.material.x > 6.5f) {
         return shade_screen_shard(input);
     }
@@ -6583,7 +10328,10 @@ fn compile_shader(source: &[u8], entry: &str, target: &str) -> Result<ID3DBlob> 
     if let Err(error) = result {
         if let Some(errors) = errors {
             let message = unsafe {
-                let bytes = std::slice::from_raw_parts(errors.GetBufferPointer().cast::<u8>(), errors.GetBufferSize());
+                let bytes = std::slice::from_raw_parts(
+                    errors.GetBufferPointer().cast::<u8>(),
+                    errors.GetBufferSize(),
+                );
                 String::from_utf8_lossy(bytes).into_owned()
             };
             anyhow::bail!("Shader compile failed: {message}");
@@ -6592,7 +10340,6 @@ fn compile_shader(source: &[u8], entry: &str, target: &str) -> Result<ID3DBlob> 
     }
     blob.context("D3DCompile returned no bytecode")
 }
-
 
 #[cfg_attr(target_os = "windows", allow(dead_code))]
 fn gpu_vertices_as_bytes(vertices: &[GpuVertex]) -> &[u8] {
@@ -6629,7 +10376,12 @@ impl ApplicationHandler for NativeApp {
         }
     }
 
-    fn window_event(&mut self, event_loop: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+    fn window_event(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window_id: WindowId,
+        event: WindowEvent,
+    ) {
         if self.window_id != Some(window_id) {
             return;
         }
@@ -6642,27 +10394,27 @@ impl ApplicationHandler for NativeApp {
                     show_error_dialog("Render Error", &format!("{error:#}"));
                     event_loop.exit();
                 }
-            },
+            }
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(code) = event.physical_key {
                     self.handle_keyboard(code, event.state, event_loop);
                 }
-            },
+            }
             WindowEvent::ModifiersChanged(modifiers) => {
                 self.keyboard_modifiers = modifiers.state();
-            },
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_local = Vector2::new(position.x as f32, position.y as f32);
-            },
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 let is_down = state == ElementState::Pressed;
                 match button {
                     MouseButton::Left => self.fallback_left_down = is_down,
                     MouseButton::Right => self.fallback_right_down = is_down,
-                    _ => {},
+                    _ => {}
                 }
-            },
-            _ => {},
+            }
+            _ => {}
         }
     }
 
@@ -6735,6 +10487,7 @@ enum AppAction {
     SpawnRobotBuddy,
     ToggleSlingshotGame,
     ToggleBasketballGame,
+    OpenTestCase,
     Reset,
     ToggleSettings,
     ToggleWeather,
@@ -6806,11 +10559,44 @@ impl ShatterGunTool {
         } else {
             AppColor::from_argb(210, 128, 222, 241)
         };
-        push_tool_rect(&mut self.render_cells, cursor.x - 18.0, cursor.y - 1.0, 10, 2, reticle);
-        push_tool_rect(&mut self.render_cells, cursor.x + 8.0, cursor.y - 1.0, 10, 2, reticle);
-        push_tool_rect(&mut self.render_cells, cursor.x - 1.0, cursor.y - 18.0, 2, 10, reticle);
-        push_tool_rect(&mut self.render_cells, cursor.x - 1.0, cursor.y + 8.0, 2, 10, reticle);
-        push_lasso_dot(&mut self.render_cells, cursor, if flash { 7 } else { 5 }, AppColor::from_argb(120, 255, 255, 255));
+        push_tool_rect(
+            &mut self.render_cells,
+            cursor.x - 18.0,
+            cursor.y - 1.0,
+            10,
+            2,
+            reticle,
+        );
+        push_tool_rect(
+            &mut self.render_cells,
+            cursor.x + 8.0,
+            cursor.y - 1.0,
+            10,
+            2,
+            reticle,
+        );
+        push_tool_rect(
+            &mut self.render_cells,
+            cursor.x - 1.0,
+            cursor.y - 18.0,
+            2,
+            10,
+            reticle,
+        );
+        push_tool_rect(
+            &mut self.render_cells,
+            cursor.x - 1.0,
+            cursor.y + 8.0,
+            2,
+            10,
+            reticle,
+        );
+        push_lasso_dot(
+            &mut self.render_cells,
+            cursor,
+            if flash { 7 } else { 5 },
+            AppColor::from_argb(120, 255, 255, 255),
+        );
 
         let x = cursor.x + 22.0;
         let y = cursor.y - 38.0;
@@ -6828,8 +10614,22 @@ impl ShatterGunTool {
         push_tool_rect(&mut self.render_cells, x + 5.0, y + 3.0, 16, 5, accent);
         push_tool_rect(&mut self.render_cells, x + 34.0, y + 17.0, 8, 4, body_dark);
         if flash {
-            push_tool_rect(&mut self.render_cells, cursor.x + 10.0, cursor.y - 3.0, 18, 6, AppColor::from_argb(235, 255, 171, 77));
-            push_tool_rect(&mut self.render_cells, cursor.x + 15.0, cursor.y - 8.0, 8, 16, AppColor::from_argb(225, 255, 226, 98));
+            push_tool_rect(
+                &mut self.render_cells,
+                cursor.x + 10.0,
+                cursor.y - 3.0,
+                18,
+                6,
+                AppColor::from_argb(235, 255, 171, 77),
+            );
+            push_tool_rect(
+                &mut self.render_cells,
+                cursor.x + 15.0,
+                cursor.y - 8.0,
+                8,
+                16,
+                AppColor::from_argb(225, 255, 226, 98),
+            );
         }
     }
 
@@ -6914,7 +10714,9 @@ impl PortalPairTool {
                 self.second = Some(anchor);
                 self.placing = false;
                 self.cooldown_until.clear();
-                message = Some("Portal pair linked. Objects can now travel between the mouths.".to_string());
+                message = Some(
+                    "Portal pair linked. Objects can now travel between the mouths.".to_string(),
+                );
             }
         }
 
@@ -7051,19 +10853,39 @@ impl PortalAnchor {
         }
 
         let half_len = match wall {
-            PortalWall::Left | PortalWall::Right => PORTAL_HALF_LENGTH_PIXELS.min(bounds.height * 0.42),
-            PortalWall::Top | PortalWall::Bottom => PORTAL_HALF_LENGTH_PIXELS.min(bounds.width * 0.42),
+            PortalWall::Left | PortalWall::Right => {
+                PORTAL_HALF_LENGTH_PIXELS.min(bounds.height * 0.42)
+            }
+            PortalWall::Top | PortalWall::Bottom => {
+                PORTAL_HALF_LENGTH_PIXELS.min(bounds.width * 0.42)
+            }
         };
         let edge_padding = half_len + 10.0;
         let center = match wall {
-            PortalWall::Left => Vector2::new(bounds.left(), cursor.y.clamp(bounds.top() + edge_padding, bounds.bottom() - edge_padding)),
-            PortalWall::Right => {
-                Vector2::new(bounds.right(), cursor.y.clamp(bounds.top() + edge_padding, bounds.bottom() - edge_padding))
-            },
-            PortalWall::Top => Vector2::new(cursor.x.clamp(bounds.left() + edge_padding, bounds.right() - edge_padding), bounds.top()),
-            PortalWall::Bottom => {
-                Vector2::new(cursor.x.clamp(bounds.left() + edge_padding, bounds.right() - edge_padding), bounds.bottom())
-            },
+            PortalWall::Left => Vector2::new(
+                bounds.left(),
+                cursor
+                    .y
+                    .clamp(bounds.top() + edge_padding, bounds.bottom() - edge_padding),
+            ),
+            PortalWall::Right => Vector2::new(
+                bounds.right(),
+                cursor
+                    .y
+                    .clamp(bounds.top() + edge_padding, bounds.bottom() - edge_padding),
+            ),
+            PortalWall::Top => Vector2::new(
+                cursor
+                    .x
+                    .clamp(bounds.left() + edge_padding, bounds.right() - edge_padding),
+                bounds.top(),
+            ),
+            PortalWall::Bottom => Vector2::new(
+                cursor
+                    .x
+                    .clamp(bounds.left() + edge_padding, bounds.right() - edge_padding),
+                bounds.bottom(),
+            ),
         };
         Self {
             wall,
@@ -7135,7 +10957,9 @@ fn portal_teleport_from_object(
     let current_distance = vector_dot(center - source.center, normal) - half_normal;
     let predicted_center = center + velocity * dt.max(1.0 / 240.0);
     let predicted_distance = vector_dot(predicted_center - source.center, normal) - half_normal;
-    if current_distance > PORTAL_EDGE_MARGIN_PIXELS && predicted_distance > PORTAL_EDGE_MARGIN_PIXELS {
+    if current_distance > PORTAL_EDGE_MARGIN_PIXELS
+        && predicted_distance > PORTAL_EDGE_MARGIN_PIXELS
+    {
         return None;
     }
 
@@ -7148,10 +10972,12 @@ fn portal_teleport_from_object(
     let exit_tangent = destination.wall.tangent();
     let half_exit_normal = object_half_extent_along(object, exit_normal);
     let half_exit_tangent = object_half_extent_along(object, exit_tangent);
-    let max_exit_offset = (destination.half_len - half_exit_tangent.min(destination.half_len * 0.72)).max(0.0);
+    let max_exit_offset =
+        (destination.half_len - half_exit_tangent.min(destination.half_len * 0.72)).max(0.0);
     let exit_offset = tangent_offset.clamp(-max_exit_offset, max_exit_offset);
-    let exit_center =
-        destination.center + exit_tangent * exit_offset + exit_normal * (half_exit_normal + PORTAL_EXIT_OFFSET_PIXELS);
+    let exit_center = destination.center
+        + exit_tangent * exit_offset
+        + exit_normal * (half_exit_normal + PORTAL_EXIT_OFFSET_PIXELS);
     let tangent_velocity = vector_dot(velocity, tangent);
     let new_velocity = exit_normal * incoming_speed.max(180.0) + exit_tangent * tangent_velocity;
 
@@ -7198,7 +11024,7 @@ fn push_portal_anchor_cells(
             push_tool_rect(cells, x + 2.0, y, 8, len, core);
             push_tool_rect(cells, x + 5.0, anchor.center.y - 18.0, 3, 36, hot);
             push_lasso_dot(cells, anchor.center + anchor.wall.normal() * 16.0, 7, hot);
-        },
+        }
         PortalWall::Top | PortalWall::Bottom => {
             let x = anchor.center.x - anchor.half_len;
             let y = if anchor.wall == PortalWall::Top {
@@ -7210,7 +11036,7 @@ fn push_portal_anchor_cells(
             push_tool_rect(cells, x, y + 2.0, len, 8, core);
             push_tool_rect(cells, anchor.center.x - 18.0, y + 5.0, 36, 3, hot);
             push_lasso_dot(cells, anchor.center + anchor.wall.normal() * 16.0, 7, hot);
-        },
+        }
     }
 }
 
@@ -7329,8 +11155,16 @@ impl MeasureTool {
             AppColor::from_argb(235, 255, 226, 98),
             2,
         );
-        push_measure_handle(&mut self.render_cells, self.start, AppColor::from_argb(245, 118, 232, 180));
-        push_measure_handle(&mut self.render_cells, self.end, AppColor::from_argb(245, 255, 128, 96));
+        push_measure_handle(
+            &mut self.render_cells,
+            self.start,
+            AppColor::from_argb(245, 118, 232, 180),
+        );
+        push_measure_handle(
+            &mut self.render_cells,
+            self.end,
+            AppColor::from_argb(245, 255, 128, 96),
+        );
     }
 }
 
@@ -7479,7 +11313,12 @@ impl LassoTool {
         outcome
     }
 
-    fn compute_velocity_deltas(&mut self, objects: &[ObjectState], cursor: Vector2, dt: f32) -> Vec<(u64, Vector2)> {
+    fn compute_velocity_deltas(
+        &mut self,
+        objects: &[ObjectState],
+        cursor: Vector2,
+        dt: f32,
+    ) -> Vec<(u64, Vector2)> {
         if self.captured_ids.is_empty() {
             self.previous_anchor = cursor;
             self.rope_anchor = cursor;
@@ -7498,7 +11337,11 @@ impl LassoTool {
                 continue;
             };
             let current_center = object_center(object);
-            let rope_length = self.rope_lengths.get(index).copied().unwrap_or(Self::MIN_ROPE_LENGTH);
+            let rope_length = self
+                .rope_lengths
+                .get(index)
+                .copied()
+                .unwrap_or(Self::MIN_ROPE_LENGTH);
             let anchor_to_object = current_center - self.rope_anchor;
             let distance = anchor_to_object.length_squared().sqrt();
             if distance <= f32::EPSILON {
@@ -7509,11 +11352,13 @@ impl LassoTool {
             let stretch = distance - rope_length;
             let relative_velocity = object.body.velocity - self.anchor_velocity;
             let radial_speed = (relative_velocity.x * unit.x) + (relative_velocity.y * unit.y);
-            let tangent_anchor = self.anchor_velocity - unit * ((self.anchor_velocity.x * unit.x) + (self.anchor_velocity.y * unit.y));
+            let tangent_anchor = self.anchor_velocity
+                - unit * ((self.anchor_velocity.x * unit.x) + (self.anchor_velocity.y * unit.y));
 
             let mut delta = tangent_anchor * Self::TANGENTIAL_COUPLING;
             if stretch > 0.0 {
-                let correction_speed = (stretch * Self::TENSION_STIFFNESS) + radial_speed.max(0.0) * Self::TENSION_DAMPING;
+                let correction_speed = (stretch * Self::TENSION_STIFFNESS)
+                    + radial_speed.max(0.0) * Self::TENSION_DAMPING;
                 delta -= unit * correction_speed;
             }
 
@@ -7526,7 +11371,12 @@ impl LassoTool {
         deltas
     }
 
-    fn rebuild_render_cells(&mut self, cursor: Vector2, objects: &[ObjectState], elapsed_seconds: f64) {
+    fn rebuild_render_cells(
+        &mut self,
+        cursor: Vector2,
+        objects: &[ObjectState],
+        elapsed_seconds: f64,
+    ) {
         self.render_cells.clear();
         if !self.active {
             return;
@@ -7557,12 +11407,20 @@ impl LassoTool {
                     2,
                 );
             }
-            push_lasso_knot(&mut self.render_cells, cursor, AppColor::from_argb(235, 255, 246, 174));
+            push_lasso_knot(
+                &mut self.render_cells,
+                cursor,
+                AppColor::from_argb(235, 255, 246, 174),
+            );
             return;
         }
 
         if self.has_capture() {
-            push_lasso_knot(&mut self.render_cells, cursor, AppColor::from_argb(245, 255, 250, 196));
+            push_lasso_knot(
+                &mut self.render_cells,
+                cursor,
+                AppColor::from_argb(245, 255, 250, 196),
+            );
             for (index, id) in self.captured_ids.iter().copied().enumerate() {
                 let Some(object) = objects.iter().find(|object| object.id == id) else {
                     continue;
@@ -7605,7 +11463,12 @@ impl LassoTool {
         }
     }
 
-    fn capture_objects(&mut self, objects: &[ObjectState], hit_tester: &HitTester, cursor: Vector2) -> usize {
+    fn capture_objects(
+        &mut self,
+        objects: &[ObjectState],
+        hit_tester: &HitTester,
+        cursor: Vector2,
+    ) -> usize {
         self.captured_ids.clear();
         self.rope_lengths.clear();
         self.rope_anchor = cursor;
@@ -7616,7 +11479,9 @@ impl LassoTool {
         if self.path.len() >= 3 && polygon_area_abs(&self.path) >= Self::MIN_POLYGON_AREA {
             let mut hits: Vec<(i32, u64)> = objects
                 .iter()
-                .filter(|object| object_is_lassoable(object) && object_touches_lasso(object, &self.path))
+                .filter(|object| {
+                    object_is_lassoable(object) && object_touches_lasso(object, &self.path)
+                })
                 .map(|object| (object.z_index, object.id))
                 .collect();
             hits.sort_by(|left, right| right.0.cmp(&left.0));
@@ -7624,7 +11489,10 @@ impl LassoTool {
         }
 
         if ids.is_empty() {
-            if let Some(id) = hit_tester.hit_test_topmost(objects, cursor).map(|object| object.id) {
+            if let Some(id) = hit_tester
+                .hit_test_topmost(objects, cursor)
+                .map(|object| object.id)
+            {
                 ids.push(id);
             }
         }
@@ -7635,8 +11503,12 @@ impl LassoTool {
             };
             let center = object_center(object);
             self.captured_ids.push(id);
-            self.rope_lengths
-                .push((center - cursor).length_squared().sqrt().clamp(Self::MIN_ROPE_LENGTH, Self::MAX_ROPE_LENGTH));
+            self.rope_lengths.push(
+                (center - cursor)
+                    .length_squared()
+                    .sqrt()
+                    .clamp(Self::MIN_ROPE_LENGTH, Self::MAX_ROPE_LENGTH),
+            );
         }
 
         self.captured_ids.len()
@@ -7772,8 +11644,12 @@ fn push_spotlight_shadow_outside(
             });
         } else {
             let clear_half_width = radius_x.max(1.0) * (1.0 - normalized_y * normalized_y).sqrt();
-            let left_width = (center_x - clear_half_width).floor().clamp(0.0, width as f32) as i32;
-            let right_start = (center_x + clear_half_width).ceil().clamp(0.0, width as f32) as i32;
+            let left_width = (center_x - clear_half_width)
+                .floor()
+                .clamp(0.0, width as f32) as i32;
+            let right_start = (center_x + clear_half_width)
+                .ceil()
+                .clamp(0.0, width as f32) as i32;
             if left_width > 0 {
                 cells.push(SandRenderCell {
                     x: 0,
@@ -7833,7 +11709,13 @@ fn push_spotlight_fill(
     }
 }
 
-fn push_measure_line(cells: &mut Vec<SandRenderCell>, start: Vector2, end: Vector2, color: AppColor, thickness: i32) {
+fn push_measure_line(
+    cells: &mut Vec<SandRenderCell>,
+    start: Vector2,
+    end: Vector2,
+    color: AppColor,
+    thickness: i32,
+) {
     let delta = end - start;
     let steps = delta.x.abs().max(delta.y.abs()).ceil().max(1.0) as i32;
     let thickness = thickness.max(1);
@@ -7969,7 +11851,12 @@ fn polygon_area_abs(points: &[Vector2]) -> f32 {
     (area * 0.5).abs()
 }
 
-fn push_lasso_polyline(cells: &mut Vec<SandRenderCell>, points: &[Vector2], time: f32, closed: bool) {
+fn push_lasso_polyline(
+    cells: &mut Vec<SandRenderCell>,
+    points: &[Vector2],
+    time: f32,
+    closed: bool,
+) {
     for pair in points.windows(2) {
         push_lasso_rope_line(
             cells,
@@ -8025,7 +11912,8 @@ fn push_lasso_rope_line(
         for step in 0..=steps {
             let t = step as f32 / steps as f32;
             let taper = (t * 3.1415927).sin().max(0.18);
-            let wave = ((t * 9.0 + time * 2.8 + phase) * 6.2831855).sin() * 3.2 * taper + pass_offset;
+            let wave =
+                ((t * 9.0 + time * 2.8 + phase) * 6.2831855).sin() * 3.2 * taper + pass_offset;
             let point = start + delta * t + normal * wave;
             push_lasso_dot(cells, point, pass_thickness, pass_color);
         }
@@ -8041,7 +11929,10 @@ fn push_lasso_object_ring(cells: &mut Vec<SandRenderCell>, object: &ObjectState,
     for index in 0..=segment_count {
         let theta = index as f32 / segment_count as f32 * 6.2831855 + time.sin() * 0.08;
         let wobble = 1.0 + (theta * 3.0 + time * 3.2).sin() * 0.045;
-        let point = Vector2::new(center.x + theta.cos() * radius_x * wobble, center.y + theta.sin() * radius_y * wobble);
+        let point = Vector2::new(
+            center.x + theta.cos() * radius_x * wobble,
+            center.y + theta.sin() * radius_y * wobble,
+        );
         if let Some(previous) = previous {
             push_lasso_rope_line(
                 cells,
@@ -8084,7 +11975,12 @@ fn push_lasso_idle_coil(cells: &mut Vec<SandRenderCell>, cursor: Vector2, time: 
 fn push_lasso_knot(cells: &mut Vec<SandRenderCell>, center: Vector2, color: AppColor) {
     push_lasso_dot(cells, center, 7, AppColor::from_argb(105, 4, 7, 10));
     push_lasso_dot(cells, center, 4, color);
-    push_lasso_dot(cells, center + Vector2::new(1.0, -1.0), 1, AppColor::from_argb(245, 255, 255, 240));
+    push_lasso_dot(
+        cells,
+        center + Vector2::new(1.0, -1.0),
+        1,
+        AppColor::from_argb(245, 255, 255, 240),
+    );
 }
 
 fn push_lasso_dot(cells: &mut Vec<SandRenderCell>, point: Vector2, size: i32, color: AppColor) {
@@ -8099,7 +11995,14 @@ fn push_lasso_dot(cells: &mut Vec<SandRenderCell>, point: Vector2, size: i32, co
     });
 }
 
-fn push_tool_rect(cells: &mut Vec<SandRenderCell>, x: f32, y: f32, width: i32, height: i32, color: AppColor) {
+fn push_tool_rect(
+    cells: &mut Vec<SandRenderCell>,
+    x: f32,
+    y: f32,
+    width: i32,
+    height: i32,
+    color: AppColor,
+) {
     if width <= 0 || height <= 0 {
         return;
     }
@@ -8173,7 +12076,10 @@ impl SlingshotGame {
             active: true,
             ready: true,
             targets_remaining: 2,
-            anchor: Vector2::new((bounds.width * 0.18).clamp(95.0, 260.0), bounds.bottom() - 140.0),
+            anchor: Vector2::new(
+                (bounds.width * 0.18).clamp(95.0, 260.0),
+                bounds.bottom() - 140.0,
+            ),
             ..Self::default()
         }
     }
@@ -8554,7 +12460,9 @@ impl SandWorld {
                     let prefer_left = ((x as u64 * 13 + y as u64 * 7 + self.frame) & 1) == 0;
                     let first = if prefer_left { -1 } else { 1 };
                     let second = -first;
-                    if self.try_slide(idx, x, y, first, grain) || self.try_slide(idx, x, y, second, grain) {
+                    if self.try_slide(idx, x, y, first, grain)
+                        || self.try_slide(idx, x, y, second, grain)
+                    {
                         moved = true;
                         continue;
                     }
@@ -8699,7 +12607,8 @@ impl SandWorld {
 }
 
 fn sand_span_color(start_x: usize, y: usize, len: usize, grain: u8) -> AppColor {
-    let shade = 1 + (((start_x as u64 * 17 + y as u64 * 31 + len as u64 * 7 + grain as u64) & 3) as u8);
+    let shade =
+        1 + (((start_x as u64 * 17 + y as u64 * 31 + len as u64 * 7 + grain as u64) & 3) as u8);
     sand_color(shade)
 }
 
@@ -8777,19 +12686,19 @@ impl SettingsPanel {
             KeyCode::ArrowUp => {
                 self.selected_index = self.selected_index.saturating_sub(1);
                 true
-            },
+            }
             KeyCode::ArrowDown => {
                 self.selected_index = (self.selected_index + 1).min(ENTRY_COUNT - 1);
                 true
-            },
+            }
             KeyCode::ArrowLeft => {
                 adjust_setting(config, self.selected_index, -1.0);
                 true
-            },
+            }
             KeyCode::ArrowRight => {
                 adjust_setting(config, self.selected_index, 1.0);
                 true
-            },
+            }
             _ => false,
         }
     }
@@ -8798,22 +12707,31 @@ impl SettingsPanel {
 fn adjust_setting(config: &mut AppConfig, selected_index: usize, direction: f32) {
     match selected_index {
         0 => config.gravity_y = (config.gravity_y + direction * 50.0).clamp(0.0, 4000.0),
-        1 => config.throw_sensitivity = (config.throw_sensitivity + direction * 0.05).clamp(0.1, 4.0),
-        2 => config.max_throw_speed = (config.max_throw_speed + direction * 100.0).clamp(100.0, 6000.0),
+        1 => {
+            config.throw_sensitivity = (config.throw_sensitivity + direction * 0.05).clamp(0.1, 4.0)
+        }
+        2 => {
+            config.max_throw_speed =
+                (config.max_throw_speed + direction * 100.0).clamp(100.0, 6000.0)
+        }
         3 => config.restitution = (config.restitution + direction * 0.05).clamp(0.05, 1.2),
-        4 => config.linear_damping = (config.linear_damping + direction * 0.002).clamp(0.900, 0.999),
+        4 => {
+            config.linear_damping = (config.linear_damping + direction * 0.002).clamp(0.900, 0.999)
+        }
         5 => config.sleep_threshold = (config.sleep_threshold + direction * 2.0).clamp(1.0, 120.0),
-        6 => config.floor_snap_threshold = (config.floor_snap_threshold + direction).clamp(0.0, 24.0),
+        6 => {
+            config.floor_snap_threshold = (config.floor_snap_threshold + direction).clamp(0.0, 24.0)
+        }
         7 => {
             let next = config.interaction_debounce_ms as i32 + (direction as i32 * 10);
             config.interaction_debounce_ms = next.clamp(0, 300) as u32;
-        },
+        }
         8 => {
             if direction != 0.0 {
                 config.start_in_pass_through = !config.start_in_pass_through;
             }
-        },
-        _ => {},
+        }
+        _ => {}
     }
 }
 
@@ -8843,30 +12761,33 @@ impl ImportPanel {
             KeyCode::ArrowUp => {
                 self.selected_index = self.selected_index.saturating_sub(1);
                 true
-            },
+            }
             KeyCode::ArrowDown => {
                 self.selected_index = (self.selected_index + 1).min(3);
                 true
-            },
+            }
             KeyCode::ArrowLeft => {
                 self.adjust(-1);
                 true
-            },
+            }
             KeyCode::ArrowRight => {
                 self.adjust(1);
                 true
-            },
+            }
             _ => false,
         }
     }
 
     fn adjust(&mut self, direction: i32) {
         match self.selected_index {
-            0 => self.scale_multiplier = (self.scale_multiplier + direction as f32 * 0.1).clamp(0.25, 3.0),
+            0 => {
+                self.scale_multiplier =
+                    (self.scale_multiplier + direction as f32 * 0.1).clamp(0.25, 3.0)
+            }
             1 => self.tint_r = (self.tint_r as i32 + direction * 8).clamp(0, 255) as u8,
             2 => self.tint_g = (self.tint_g as i32 + direction * 8).clamp(0, 255) as u8,
             3 => self.tint_b = (self.tint_b as i32 + direction * 8).clamp(0, 255) as u8,
-            _ => {},
+            _ => {}
         }
     }
 
@@ -8908,6 +12829,268 @@ mod tests {
     use super::*;
 
     #[test]
+    fn helper_claim_reconciliation_keeps_one_oldest_owner() {
+        let mut app = NativeApp::default();
+        let robot = app.scene.spawn_object(
+            Vector2::new(240.0, 300.0),
+            None,
+            ObjectVisualKind::RobotBuddy,
+        );
+        let first_drone = app.scene.spawn_object(
+            Vector2::new(520.0, 180.0),
+            None,
+            ObjectVisualKind::QuadDrone,
+        );
+        let second_drone = app.scene.spawn_object(
+            Vector2::new(700.0, 180.0),
+            None,
+            ObjectVisualKind::QuadDrone,
+        );
+        let cargo =
+            app.scene
+                .spawn_object(Vector2::new(420.0, 520.0), None, ObjectVisualKind::Cube);
+        app.robot_carries.insert(
+            robot,
+            RobotCarry {
+                object_id: cargo,
+                picked_up_at: 4.0,
+            },
+        );
+        app.drone_carries.insert(
+            first_drone,
+            DroneCarry {
+                object_id: cargo,
+                picked_up_at: 3.0,
+            },
+        );
+        app.drone_carries.insert(
+            second_drone,
+            DroneCarry {
+                object_id: cargo,
+                picked_up_at: 5.0,
+            },
+        );
+
+        app.reconcile_helper_cargo_claims();
+
+        assert!(!app.robot_carries.contains_key(&robot));
+        assert!(app.drone_carries.contains_key(&first_drone));
+        assert!(!app.drone_carries.contains_key(&second_drone));
+    }
+
+    #[test]
+    fn helper_target_reconciliation_keeps_sticky_targets_unique() {
+        let mut app = NativeApp::default();
+        let robot = app.scene.spawn_object(
+            Vector2::new(240.0, 300.0),
+            None,
+            ObjectVisualKind::RobotBuddy,
+        );
+        let drone = app.scene.spawn_object(
+            Vector2::new(520.0, 180.0),
+            None,
+            ObjectVisualKind::QuadDrone,
+        );
+        let cargo =
+            app.scene
+                .spawn_object(Vector2::new(420.0, 520.0), None, ObjectVisualKind::Cube);
+        app.helper_targets.insert(robot, cargo);
+        app.helper_targets.insert(drone, cargo);
+
+        app.reconcile_helper_cargo_claims();
+
+        assert_eq!(app.helper_targets.len(), 1);
+        assert_eq!(app.helper_targets.values().copied().next(), Some(cargo));
+    }
+
+    #[test]
+    fn orphaned_attached_cargo_is_made_physical_again() {
+        let mut app = NativeApp::default();
+        let cargo =
+            app.scene
+                .spawn_object(Vector2::new(420.0, 520.0), None, ObjectVisualKind::Cube);
+        let object = app
+            .scene
+            .objects_mut()
+            .iter_mut()
+            .find(|object| object.id == cargo)
+            .unwrap();
+        object.is_dragging = true;
+        object.body.is_dragging = true;
+        object.body.collidable = false;
+        object.body.gravity_scale = 0.0;
+
+        app.reconcile_helper_cargo_claims();
+
+        let object = app
+            .scene
+            .objects()
+            .iter()
+            .find(|object| object.id == cargo)
+            .unwrap();
+        assert!(!object.is_dragging);
+        assert!(!object.body.is_dragging);
+        assert!(object.body.collidable);
+        assert_eq!(object.body.gravity_scale, 1.0);
+    }
+
+    #[test]
+    fn drone_cooldown_blocks_switching_to_a_different_object() {
+        let mut app = NativeApp::default();
+        let drone = app.scene.spawn_object(
+            Vector2::new(520.0, 180.0),
+            None,
+            ObjectVisualKind::QuadDrone,
+        );
+        let cargo =
+            app.scene
+                .spawn_object(Vector2::new(720.0, 420.0), None, ObjectVisualKind::Cube);
+        app.drone_drop_cooldowns.insert(
+            drone,
+            DroneDropCooldown {
+                object_id: cargo + 100,
+                dropped_at: app.frame_clock.elapsed_seconds,
+            },
+        );
+        let object = app
+            .scene
+            .objects()
+            .iter()
+            .find(|object| object.id == cargo)
+            .unwrap();
+
+        assert!(!app.is_drone_carry_candidate(drone, object));
+    }
+
+    #[test]
+    fn colocated_drones_receive_opposing_separation_targets() {
+        let mut app = NativeApp::default();
+        let first = app.scene.spawn_object(
+            Vector2::new(400.0, 180.0),
+            None,
+            ObjectVisualKind::QuadDrone,
+        );
+        let second = app.scene.spawn_object(
+            Vector2::new(400.0, 180.0),
+            None,
+            ObjectVisualKind::QuadDrone,
+        );
+        let objects = app.scene.objects().to_vec();
+        let target = Vector2::new(500.0, 200.0);
+
+        let first_target = app.separated_drone_target(first, target, &objects);
+        let second_target = app.separated_drone_target(second, target, &objects);
+
+        assert!(first_target.x < target.x);
+        assert!(second_target.x > target.x);
+    }
+
+    #[test]
+    fn robot_separation_cannot_reverse_a_closest_target() {
+        let mut app = NativeApp::default();
+        let first = app.scene.spawn_object(
+            Vector2::new(400.0, 500.0),
+            None,
+            ObjectVisualKind::RobotBuddy,
+        );
+        app.scene.spawn_object(
+            Vector2::new(400.0, 500.0),
+            None,
+            ObjectVisualKind::RobotBuddy,
+        );
+
+        app.drive_robot(first, 1.0, 108.0);
+
+        let robot = app
+            .scene
+            .objects()
+            .iter()
+            .find(|object| object.id == first)
+            .unwrap();
+        assert!(robot.body.motor_velocity_x > 0.0);
+    }
+
+    #[test]
+    fn robot_grabs_a_large_floor_block_before_collision_pushes_it() {
+        let mut app = NativeApp::default();
+        let bounds = app.scene_bounds();
+        let robot = app.scene.spawn_object(
+            Vector2::new(400.0, bounds.bottom() - 68.64),
+            None,
+            ObjectVisualKind::RobotBuddy,
+        );
+        let cargo = app.scene.spawn_custom_object(
+            Vector2::new(
+                400.0 + 89.76 + ROBOT_PICKUP_CLEARANCE_PIXELS - 1.0,
+                bounds.bottom() - 120.0,
+            ),
+            Vector2::new(120.0, 120.0),
+            AppColor::from_rgb(120, 180, 220),
+            ObjectVisualKind::Cube,
+            CollisionShape::Box,
+        );
+
+        app.update_robot_buddies(1.0 / 60.0);
+
+        assert_eq!(
+            app.robot_carries.get(&robot).map(|carry| carry.object_id),
+            Some(cargo)
+        );
+    }
+
+    #[test]
+    fn cleanup_bin_reaches_the_wall_and_drone_targets_its_opening() {
+        let app = NativeApp::default();
+        let bin = app.robot_bin_rect();
+        let drop_target = app.drone_drop_target();
+        let first_queue_target = app.drone_delivery_queue_target(1);
+
+        assert_eq!(bin.x, app.scene_bounds().left());
+        assert!(bin.width >= 220.0);
+        assert!(drop_target.x > bin.x + ROBOT_BIN_WALL);
+        assert!(drop_target.x < bin.right() - ROBOT_BIN_WALL);
+        assert!(drop_target.y < bin.y);
+        assert!(first_queue_target.x < bin.right() + 130.0);
+        assert!(first_queue_target.y < drop_target.y);
+    }
+
+    #[test]
+    fn overlapping_drones_are_forced_into_separate_airspace() {
+        let mut app = NativeApp::default();
+        let first = app.scene.spawn_object(
+            Vector2::new(400.0, 180.0),
+            None,
+            ObjectVisualKind::QuadDrone,
+        );
+        let second = app.scene.spawn_object(
+            Vector2::new(400.0, 180.0),
+            None,
+            ObjectVisualKind::QuadDrone,
+        );
+
+        app.resolve_drone_overlaps();
+
+        let first_center = app
+            .scene
+            .objects()
+            .iter()
+            .find(|object| object.id == first)
+            .map(object_center)
+            .unwrap();
+        let second_center = app
+            .scene
+            .objects()
+            .iter()
+            .find(|object| object.id == second)
+            .map(object_center)
+            .unwrap();
+        assert!(
+            (second_center - first_center).length_squared().sqrt()
+                >= DRONE_MIN_CENTER_SEPARATION_PIXELS - 1.0
+        );
+    }
+
+    #[test]
     fn quick_bit_click_rejects_long_or_moving_drags() {
         let press = BitPointerPress {
             object_id: 7,
@@ -8942,8 +13125,126 @@ mod tests {
 
         assert!(valuable > ordinary);
         assert!(ordinary >= 10.0 + BIT_MIN_LIFETIME_SECONDS);
-        assert!(
-            valuable <= 10.0 + BIT_MIN_LIFETIME_SECONDS + BIT_MAX_VALUE_LIFETIME_BONUS_SECONDS
+        assert!(valuable <= 10.0 + BIT_MIN_LIFETIME_SECONDS + BIT_MAX_VALUE_LIFETIME_BONUS_SECONDS);
+    }
+
+    #[test]
+    fn settled_bits_shatter_only_on_large_velocity_changes() {
+        let resting = Vector2::ZERO;
+
+        assert!(!is_significant_bit_impact(
+            false,
+            resting,
+            Vector2::new(900.0, 0.0)
+        ));
+        assert!(!is_significant_bit_impact(
+            true,
+            resting,
+            Vector2::new(BIT_IMPACT_SHATTER_DELTA_SPEED - 1.0, 0.0)
+        ));
+        assert!(is_significant_bit_impact(
+            true,
+            resting,
+            Vector2::new(BIT_IMPACT_SHATTER_DELTA_SPEED + 1.0, 0.0)
+        ));
+    }
+
+    #[test]
+    fn chat_rotation_rebounds_at_readability_limit() {
+        let mut angle = 44.0;
+        let mut velocity = 30.0;
+        constrain_chat_rotation(&mut angle, &mut velocity, CHAT_MAX_YAW_DEGREES);
+        assert_eq!(angle, CHAT_MAX_YAW_DEGREES);
+        assert!(velocity < 0.0);
+
+        angle = -35.0;
+        velocity = -22.0;
+        constrain_chat_rotation(&mut angle, &mut velocity, CHAT_MAX_YAW_DEGREES);
+        assert_eq!(angle, -CHAT_MAX_YAW_DEGREES);
+        assert!(velocity > 0.0);
+    }
+
+    #[test]
+    fn chat_text_wraps_without_truncating_words_or_long_tokens() {
+        let source = "one two three abcdefghijk";
+        let wrapped = wrap_chat_text(source, 8);
+
+        assert_eq!(wrapped, "one two\nthree\nabcdefgh\nijk");
+        assert_eq!(
+            wrapped
+                .replace('\n', " ")
+                .split_whitespace()
+                .collect::<String>(),
+            "onetwothreeabcdefghijk"
         );
+    }
+
+    #[test]
+    fn chat_text_preserves_emoji_and_bounds_other_unicode() {
+        assert_eq!(sanitized_chat_text("  hi\n🦀café  ", 8), "hi🦀caf?");
+        assert_eq!(sanitized_chat_text("abcdefghijk", 5), "abcde");
+    }
+
+    #[test]
+    fn inline_chat_extracts_twitch_emotes_and_emoji_in_order() {
+        let payload = serde_json::json!({
+            "fragments": [
+                { "text": "Hi ", "emoteId": null },
+                { "text": "Kappa", "emoteId": "25", "animated": true },
+                { "text": " 🦀", "emoteId": null }
+            ]
+        });
+        let (text, images) = inline_chat_message(Some(&payload), "ignored");
+
+        assert_eq!(text, "Hi \u{fffc} \u{fffc}");
+        assert_eq!(images[0].0, "twitch:25");
+        assert!(images[0].1.contains("/animated/"));
+        assert!(images[0].2);
+        assert_eq!(images[1].0, "emoji:1f980");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn animated_chat_frames_respect_delays_and_loop() {
+        let mut animation = ChatAtlasAnimation {
+            slot: 1,
+            frames: vec![vec![0], vec![1]],
+            frame_seconds: vec![0.1, 0.2],
+            frame_index: 0,
+            next_frame_at: 0.0,
+        };
+
+        assert!(!advance_chat_animation(&mut animation, 5.0));
+        assert!(!advance_chat_animation(&mut animation, 5.05));
+        assert!(advance_chat_animation(&mut animation, 5.1));
+        assert_eq!(animation.frame_index, 1);
+        assert!(advance_chat_animation(&mut animation, 5.31));
+        assert_eq!(animation.frame_index, 0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn direct3d_shader_pipeline_compiles() {
+        let (device, _context) = create_d3d_device().expect("Direct3D device should initialize");
+        create_d3d_pipeline(&device).expect("embedded Direct3D shaders should compile");
+    }
+
+    #[test]
+    fn wgpu_shader_source_validates() {
+        let source = include_str!("main.rs").replace("\r\n", "\n");
+        let (_, shader_tail) = source
+            .split_once("r#\"\nstruct VertexInput {")
+            .expect("embedded WGSL shader start should be present");
+        let (shader_tail, _) = shader_tail
+            .split_once("\n\"#,\n            )),\n        });")
+            .expect("embedded WGSL shader end should be present");
+        let shader = format!("struct VertexInput {{{shader_tail}");
+        let module = naga::front::wgsl::parse_str(&shader).expect("embedded WGSL should parse");
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("embedded WGSL should validate");
     }
 }

@@ -34,7 +34,12 @@ fn main() {
 
 fn c_sources(src_dir: &Path) -> Vec<PathBuf> {
     let mut files = fs::read_dir(src_dir)
-        .unwrap_or_else(|error| panic!("failed to read Box3D source directory {}: {error}", src_dir.display()))
+        .unwrap_or_else(|error| {
+            panic!(
+                "failed to read Box3D source directory {}: {error}",
+                src_dir.display()
+            )
+        })
         .map(|entry| entry.expect("failed to read Box3D source entry").path())
         .filter(|path| path.extension().is_some_and(|extension| extension == "c"))
         .collect::<Vec<_>>();
